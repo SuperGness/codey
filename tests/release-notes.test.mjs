@@ -9,7 +9,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const exports = {};
 new Function("exports", compiled)(exports);
-const { parseReleaseNotes } = exports;
+const { parseReleaseNotes, groupReleaseNotes, releaseVersionLabel } = exports;
 
 test("跨版本标题与旧分类同时保留，不把版本标题当作条目", () => {
   const groups = parseReleaseNotes("## 1.2.7\n\n**新增功能**\n- 新功能\n\n## 1.2.6\n**问题修复**\n- 修复启动");
@@ -40,4 +40,20 @@ test("保留旧日志和无标题条目的展示，忽略空内容", () => {
   ]);
   assert.deepEqual(parseReleaseNotes("## ###\n\n"), []);
   assert.deepEqual(parseReleaseNotes(), []);
+});
+
+test("按版本分段，分类归入所属版本，版本下的无标题条目保留", () => {
+  const sections = groupReleaseNotes(parseReleaseNotes(
+    "## 1.5.1\n\n### 新增功能\n- 导入\n\n**问题修复**\n- 修复\n\n## 1.3.9\n修复统计",
+  ));
+  assert.deepEqual(sections, [
+    { version: "1.5.1", categories: [{ title: "新增功能", lines: ["导入"] }, { title: "问题修复", lines: ["修复"] }] },
+    { version: "1.3.9", categories: [{ title: "", lines: ["修复统计"] }] },
+  ]);
+  assert.deepEqual(groupReleaseNotes(parseReleaseNotes("**体验优化**\n- 更快\n说明")), [
+    { version: "", categories: [{ title: "体验优化", lines: ["更快", "说明"] }] },
+  ]);
+  assert.deepEqual(groupReleaseNotes([]), []);
+  assert.equal(releaseVersionLabel("1.5.1"), "v1.5.1");
+  assert.equal(releaseVersionLabel("v1.5.1"), "v1.5.1");
 });

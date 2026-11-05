@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { parseReleaseNotes } from "./releaseNotes";
+import { groupReleaseNotes, parseReleaseNotes, releaseVersionLabel } from "./releaseNotes";
 import {
   IconAlertTriangle as AlertTriangle,
   IconCheck as Check,
@@ -492,6 +492,13 @@ type ConfirmationDialogProps = {
   onConfirm: (confirmation: Confirmation) => void;
 };
 
+function releaseCategoryTone(title: string) {
+  if (title === "新增功能") return "text-success";
+  if (title === "问题修复") return "text-warning";
+  if (title === "体验优化") return "text-accent";
+  return "text-muted";
+}
+
 function ConfirmationDialogComponent({
   confirmation,
   container,
@@ -506,8 +513,8 @@ function ConfirmationDialogComponent({
   const isUpdate =
     confirmation?.action === "download-update" ||
     confirmation?.action === "install-update";
-  const noteGroups = useMemo(
-    () => isUpdate ? parseReleaseNotes(confirmation?.releaseNotes) : [],
+  const noteSections = useMemo(
+    () => isUpdate ? groupReleaseNotes(parseReleaseNotes(confirmation?.releaseNotes)) : [],
     [isUpdate, confirmation?.releaseNotes],
   );
   return (
@@ -524,34 +531,47 @@ function ConfirmationDialogComponent({
             {confirmation?.description}
           </DialogDescription>
         </DialogHeader>
-        {noteGroups.length > 0 && (
-          <section className="mt-4 flex min-h-0 flex-col gap-2">
-            <h3 className="m-0 shrink-0 text-xs font-medium text-foreground">更新日志</h3>
-            <div
-              className="update-release-notes min-h-0 max-h-[min(360px,45dvh)] overflow-y-auto overscroll-contain rounded-lg border border-default p-4 text-sm leading-7 text-muted [overflow-wrap:anywhere]"
-              role="region"
-              aria-label="更新日志内容"
-              tabIndex={0}
-            >
-              <div className="space-y-3">
-                {noteGroups.map((group, groupIndex) => (
-                  <div key={groupIndex}>
-                    {group.title && <h4
-                      aria-level={Math.min(Math.max(group.level + 2, 4), 6)}
-                      className={`m-0 mb-1 font-semibold text-foreground ${group.level <= 2 ? "text-sm" : "text-xs"}`}
-                    >{group.title}</h4>}
-                    {group.lines.length > 0 && <ul className="m-0 list-disc space-y-2 pl-4">
-                      {group.lines.map((line, index) => (
-                        <li key={index} className="pl-1 whitespace-pre-wrap">
-                          {line}
-                        </li>
-                      ))}
-                    </ul>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
+        {noteSections.length > 0 && (
+          <div
+            className="update-release-notes mt-4 min-h-0 max-h-[min(380px,50dvh)] overflow-y-auto overscroll-contain rounded-xl border border-default bg-[var(--overlay)] text-sm [overflow-wrap:anywhere]"
+            role="region"
+            aria-label="更新日志"
+            tabIndex={0}
+          >
+            {noteSections.map((section, sectionIndex) => (
+              <section key={sectionIndex} className="border-t border-default first:border-t-0">
+                {section.version && (
+                  <h3 className="sticky top-0 z-10 m-0 flex items-center gap-2 bg-[var(--overlay)] px-4 pb-1.5 pt-3 text-sm font-semibold text-foreground">
+                    {releaseVersionLabel(section.version)}
+                    {sectionIndex === 0 && noteSections.length > 1 && (
+                      <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-medium leading-none text-accent">最新</span>
+                    )}
+                  </h3>
+                )}
+                <div className={`space-y-2.5 px-4 pb-3.5 ${section.version ? "" : "pt-3.5"}`}>
+                  {section.categories.map((category, categoryIndex) => (
+                    <div key={categoryIndex}>
+                      {category.title && (
+                        <h4 className={`release-note-category m-0 mb-1 flex items-center gap-1.5 text-xs font-medium ${releaseCategoryTone(category.title)}`}>
+                          <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
+                          {category.title}
+                        </h4>
+                      )}
+                      {category.lines.length > 0 && (
+                        <ul className="m-0 list-none space-y-1 p-0">
+                          {category.lines.map((line, index) => (
+                            <li key={index} className="relative whitespace-pre-wrap pl-3 leading-6 text-foreground/85 before:absolute before:left-0 before:top-[0.7em] before:size-1 before:rounded-full before:bg-current before:opacity-40 before:content-['']">
+                              {line}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
         )}
         <DialogFooter className={isUpdate ? "shrink-0" : undefined}>
           <Button variant="outline" onClick={onClose}>

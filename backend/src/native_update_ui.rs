@@ -44,35 +44,26 @@ impl NativeUpdateUi {
             .ok()
             .zip(semver::Version::parse(current_version).ok())
             .is_some_and(|(target, current)| target < current);
-        let notes = release_notes.map(format_update_notes).unwrap_or_default();
-        let title = if rollback {
-            format!("回退 Codey 至 v{latest_version}")
-        } else {
-            format!("发现 Codey v{latest_version} 更新")
-        };
-        let description = if rollback {
-            format!(
-                "管理员已授权将 v{current_version} 降级至 v{latest_version}。\n请保存工作；确认后下载安装旧版本并重启，安装前将再次校验授权。{notes}"
-            )
-        } else {
-            format!(
-                "当前版本为 v{current_version}。\n是否现在下载、校验并安装更新？安装时会退出 Codex 和 Codey，并尝试启动新版。{notes}"
-            )
-        };
-        show_dialog(
-            title,
-            description,
-            DialogKind::Confirm,
-            if rollback {
-                "回退并重启"
-            } else {
-                "更新并重启"
+        let prompt = if rollback {
+            UpdatePrompt {
+                title: format!("回退 Codey 至 v{latest_version}"),
+                description: format!(
+                    "管理员已授权将 v{current_version} 降级至 v{latest_version}。请保存工作；确认后下载安装旧版本并重启，安装前将再次校验授权。"
+                ),
+                notes: release_notes.map(parse_update_notes).unwrap_or_default(),
+                primary_label: "回退并重启".to_string(),
             }
-            .to_string(),
-            Some("稍后".to_string()),
-        )
-        .await
-        .map(|result| result == DialogResult::Primary)
+        } else {
+            UpdatePrompt {
+                title: format!("发现 Codey v{latest_version} 更新"),
+                description: format!(
+                    "当前版本为 v{current_version}。更新时会退出 Codex 和 Codey，安装完成后尝试启动新版。"
+                ),
+                notes: release_notes.map(parse_update_notes).unwrap_or_default(),
+                primary_label: "更新并重启".to_string(),
+            }
+        };
+        show_update_prompt(prompt).await
     }
 
     pub async fn show_update_failure(&self, error: &str) -> Result<(), String> {
@@ -108,6 +99,7 @@ impl NativeUpdateUi {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DialogKind {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Confirm,
     Failure,
     RestoreContext,
@@ -197,25 +189,149 @@ enum DialogResult {
     Secondary,
 }
 
-// 原生消息框没有滚动区，更新说明完整拼入正文，去掉标题标记便于阅读。
-fn format_update_notes(notes: &str) -> String {
-    let lines: Vec<&str> = notes
-        .trim()
+struct UpdatePrompt {
+    title: String,
+    description: String,
+    notes: Vec<NoteLine>,
+    primary_label: String,
+}
+
+const UPDATE_LATER_LABEL: &str = "稍后";
+
+/// 更新说明按行归类：版本等标题、分类标题与条目，供原生弹窗分别排版。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NoteLine {
+    Heading(String),
+    Category(String),
+    Item(String),
+}
+
+const NOTE_CATEGORIES: [&str; 3] = ["新增功能", "体验优化", "问题修复"];
+
+fn note_category(text: &str) -> Option<&str> {
+    let text = text
+        .strip_prefix("**")
+        .and_then(|inner| inner.strip_suffix("**"))
+        .unwrap_or(text);
+    NOTE_CATEGORIES.contains(&text).then_some(text)
+}
+
+fn parse_update_notes(notes: &str) -> Vec<NoteLine> {
+    notes
         .lines()
-        .map(|line| {
-            let line = line.trim();
-            let line = plain_atx_heading(line).unwrap_or(line);
-            line.strip_prefix("**")
-                .and_then(|title| title.strip_suffix("**"))
-                .filter(|title| matches!(*title, "新增功能" | "体验优化" | "问题修复"))
-                .unwrap_or(line)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            if let Some(title) = plain_atx_heading(line) {
+                return match note_category(title) {
+                    Some(category) => Some(NoteLine::Category(category.to_string())),
+                    None if title.is_empty() => None,
+                    None => Some(NoteLine::Heading(title.to_string())),
+                };
+            }
+            if let Some(category) = note_category(line) {
+                return Some(NoteLine::Category(category.to_string()));
+            }
+            let item = ["-", "*", "•"]
+                .iter()
+                .find_map(|marker| {
+                    line.strip_prefix(marker)
+                        .filter(|rest| rest.starts_with([' ', '\t']))
+                })
+                .map_or(line, str::trim_start);
+            Some(NoteLine::Item(item.to_string()))
+        })
+        .collect()
+}
+
+/// 版本标题统一带 v 前缀，非版本号标题保持原样。
+fn version_label(heading: &str) -> String {
+    if heading.starts_with(|ch: char| ch.is_ascii_digit()) {
+        format!("v{heading}")
+    } else {
+        heading.to_string()
+    }
+}
+
+/// 无法滚动的消息框只展示最新一节，较早版本汇总为一句，避免弹窗超出屏幕。
+#[cfg(any(not(target_os = "macos"), test))]
+fn compact_update_notes(notes: &[NoteLine]) -> String {
+    const MAX_ITEMS: usize = 12;
+    let first_len = notes
+        .iter()
+        .skip(1)
+        .position(|line| matches!(line, NoteLine::Heading(_)))
+        .map_or(notes.len(), |index| index + 1);
+    let (first, older) = notes.split_at(first_len);
+    let mut lines = first.iter().peekable();
+    let mut rendered = match lines.next_if(|line| matches!(line, NoteLine::Heading(_))) {
+        Some(NoteLine::Heading(heading)) => format!("\n\n更新说明（{}）：", version_label(heading)),
+        _ => "\n\n更新说明：".to_string(),
+    };
+    let mut shown = 0;
+    let mut hidden = 0;
+    let mut pending_category = None;
+    for line in lines {
+        match line {
+            NoteLine::Category(category) => pending_category = Some(category),
+            NoteLine::Item(text) if shown < MAX_ITEMS => {
+                if let Some(category) = pending_category.take() {
+                    rendered.push_str(&format!("\n{category}"));
+                }
+                rendered.push_str(&format!("\n- {text}"));
+                shown += 1;
+            }
+            _ => hidden += 1,
+        }
+    }
+    if shown == 0 && older.is_empty() {
+        return String::new();
+    }
+    if hidden > 0 {
+        rendered.push_str(&format!("\n…另有 {hidden} 项"));
+    }
+    let older_versions: Vec<String> = older
+        .iter()
+        .filter_map(|line| match line {
+            NoteLine::Heading(heading) => Some(version_label(heading)),
+            _ => None,
         })
         .collect();
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n更新说明：\n{}", lines.join("\n"))
+    if !older_versions.is_empty() {
+        let listed = &older_versions[..older_versions.len().min(3)];
+        let more = if older_versions.len() > listed.len() {
+            " 等"
+        } else {
+            ""
+        };
+        rendered.push_str(&format!(
+            "\n\n另含 {} 个较早版本（{}{more}）的更新，完整说明可在 Codey 设置中检查更新查看。",
+            older_versions.len(),
+            listed.join("、"),
+        ));
     }
+    rendered
+}
+
+#[cfg(target_os = "macos")]
+async fn show_update_prompt(prompt: UpdatePrompt) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || platform::confirm_update(prompt))
+        .await
+        .map_err(|error| format!("原生更新对话框任务异常退出：{error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn show_update_prompt(prompt: UpdatePrompt) -> Result<bool, String> {
+    let notes = compact_update_notes(&prompt.notes);
+    show_dialog(
+        prompt.title,
+        format!("{}{notes}", prompt.description),
+        DialogKind::Confirm,
+        prompt.primary_label,
+        Some(UPDATE_LATER_LABEL.to_string()),
+    )
+    .await
+    .map(|result| result == DialogResult::Primary)
 }
 
 fn plain_atx_heading(line: &str) -> Option<&str> {
@@ -240,78 +356,105 @@ fn plain_atx_heading(line: &str) -> Option<&str> {
 mod update_note_tests {
     use super::*;
 
-    #[test]
-    fn full_notes_are_embedded_without_truncation() {
-        let notes = (0..40)
-            .map(|index| format!("- 第{index}项：{}🌟", "必要的更新说明".repeat(20)))
-            .collect::<Vec<_>>()
-            .join("\r\n");
-        let rendered = format_update_notes(&notes);
-        assert!(rendered.starts_with("\n\n更新说明：\n"));
-        assert!(rendered.contains("第0项"));
-        assert!(rendered.contains("第39项"));
-        assert!(rendered.contains("🌟"));
-        let plain: String = rendered.chars().filter(|ch| *ch != '\n').collect();
-        let original: String = notes
-            .chars()
-            .filter(|ch| !matches!(ch, '\r' | '\n'))
-            .collect();
-        assert!(plain.contains(&original));
+    use NoteLine::{Category, Heading, Item};
+
+    fn heading(text: &str) -> NoteLine {
+        Heading(text.to_string())
+    }
+    fn category(text: &str) -> NoteLine {
+        Category(text.to_string())
+    }
+    fn item(text: &str) -> NoteLine {
+        Item(text.to_string())
     }
 
     #[test]
-    fn empty_notes_do_not_gain_a_heading() {
-        assert!(format_update_notes(" \r\n \t").is_empty());
-        let rendered = format_update_notes("- 修复启动问题\r\n- 优化更新提示");
-        assert!(rendered.contains("修复启动问题\n- 优化更新提示"));
-    }
-
-    #[test]
-    fn category_headings_are_readable_in_plain_text_dialogs() {
-        let rendered = format_update_notes(
-            "**新增功能**\n- 支持账号切换\n\n**体验优化**\n- 简化更新提示\n\n**问题修复**\n- 修复启动失败",
+    fn notes_are_classified_into_headings_categories_and_items() {
+        assert_eq!(
+            parse_update_notes(
+                "## 1.5.1\r\n\r\n**新增功能**\n- 支持导入\n\n### 体验优化\n* 更快\n• 更稳\n问题修复\n修复启动\n- \t缩进条目"
+            ),
+            vec![
+                heading("1.5.1"),
+                category("新增功能"),
+                item("支持导入"),
+                category("体验优化"),
+                item("更快"),
+                item("更稳"),
+                category("问题修复"),
+                item("修复启动"),
+                item("缩进条目"),
+            ]
         );
-        assert!(!rendered.contains("**"));
-        for expected in [
-            "新增功能",
-            "体验优化",
-            "问题修复",
-            "支持账号切换",
-            "简化更新提示",
-            "修复启动失败",
-        ] {
-            assert!(rendered.contains(expected));
-        }
-        assert!(format_update_notes("**保留其他文字**").contains("**保留其他文字**"));
+        assert!(parse_update_notes(" \r\n \t").is_empty());
+        assert_eq!(
+            parse_update_notes("**保留其他文字**"),
+            vec![item("**保留其他文字**")]
+        );
     }
 
     #[test]
-    fn atx_headings_preserve_the_full_title_and_following_content() {
+    fn atx_headings_preserve_the_full_title_and_plain_hashes() {
         for level in 1..=6 {
             for separator in [" ", "\t"] {
                 let marker = "#".repeat(level);
-                let rendered = format_update_notes(&format!(
-                    "{marker}{separator}完整标题 C# 和 #标签 ##\t\r\n- 第一项\r\n\r\n第二段"
-                ));
                 assert_eq!(
-                    rendered,
-                    "\n\n更新说明：\n完整标题 C# 和 #标签\n- 第一项\n\n第二段"
+                    parse_update_notes(&format!("{marker}{separator}完整标题 C# 和 #标签 ##\t")),
+                    vec![heading("完整标题 C# 和 #标签")]
                 );
             }
         }
         assert_eq!(
-            format_update_notes("## **新增功能**\n### 普通标题\n######\n## ###"),
-            "\n\n更新说明：\n新增功能\n普通标题\n\n"
+            parse_update_notes("## **新增功能**\n######\n## ###"),
+            vec![category("新增功能")]
+        );
+        assert_eq!(
+            parse_update_notes(
+                "#tag\n##没有分隔空白\n####### 超过六级\n正文 # 井号\n## 标题###\n## C#\n## 标题 #标签"
+            ),
+            vec![
+                item("#tag"),
+                item("##没有分隔空白"),
+                item("####### 超过六级"),
+                item("正文 # 井号"),
+                heading("标题###"),
+                heading("C#"),
+                heading("标题 #标签"),
+            ]
         );
     }
 
     #[test]
-    fn non_heading_hashes_and_attached_closing_hashes_are_preserved() {
-        let notes =
-            "#tag\n##没有分隔空白\n####### 超过六级\n正文 # 井号\n## 标题###\n## C#\n## 标题 #标签";
+    fn compact_notes_show_the_latest_version_and_summarize_older_ones() {
+        let notes = parse_update_notes(
+            "## 1.5.1\n\n### 新增功能\n- 支持导入\n\n### 问题修复\n- 修复启动\n\n## 1.5.0\n- 旧条目\n\n## 1.3.10\n- 旧条目\n\n## 1.3.9\n- 旧条目\n\n## 1.3.8\n- 旧条目",
+        );
         assert_eq!(
-            format_update_notes(notes),
-            "\n\n更新说明：\n#tag\n##没有分隔空白\n####### 超过六级\n正文 # 井号\n标题###\nC#\n标题 #标签"
+            compact_update_notes(&notes),
+            "\n\n更新说明（v1.5.1）：\n新增功能\n- 支持导入\n问题修复\n- 修复启动\n\n另含 4 个较早版本（v1.5.0、v1.3.10、v1.3.9 等）的更新，完整说明可在 Codey 设置中检查更新查看。"
+        );
+        let single = parse_update_notes("## 1.5.1\n- 新条目\n## 1.5.0\n- 旧条目");
+        assert!(compact_update_notes(&single).ends_with(
+            "另含 1 个较早版本（v1.5.0）的更新，完整说明可在 Codey 设置中检查更新查看。"
+        ));
+    }
+
+    #[test]
+    fn compact_notes_cap_long_sections_and_skip_empty_notes() {
+        let notes = (0..40)
+            .map(|index| format!("- 第{index}项🌟"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let rendered = compact_update_notes(&parse_update_notes(&format!("**体验优化**\n{notes}")));
+        assert!(rendered.starts_with("\n\n更新说明：\n体验优化\n- 第0项🌟"));
+        assert!(rendered.contains("第11项🌟"));
+        assert!(!rendered.contains("第12项"));
+        assert!(rendered.ends_with("\n…另有 28 项"));
+        assert!(compact_update_notes(&[]).is_empty());
+        assert!(compact_update_notes(&parse_update_notes("**新增功能**")).is_empty());
+        assert_eq!(
+            compact_update_notes(&parse_update_notes("- 修复启动问题\n- 优化更新提示")),
+            "\n\n更新说明：\n- 修复启动问题\n- 优化更新提示"
         );
     }
 
@@ -618,15 +761,22 @@ mod platform {
     use std::thread;
 
     use dispatch2::MainThreadBound;
-    use objc2::rc::Retained;
-    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2::runtime::AnyObject;
+    use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSFloatingWindowLevel,
-        NSPanel, NSTextField, NSWindowStyleMask,
+        NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
+        NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType, NSBorderType,
+        NSColor, NSFloatingWindowLevel, NSFont, NSFontAttributeName,
+        NSForegroundColorAttributeName, NSMutableParagraphStyle, NSPanel,
+        NSParagraphStyleAttributeName, NSScrollView, NSTextField, NSTextView, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{
+        NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary,
+        NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString,
+    };
 
-    use super::NativeUpdateUi;
+    use super::{NativeUpdateUi, NoteLine, UPDATE_LATER_LABEL, UpdatePrompt, version_label};
 
     struct MacStatusWindow {
         panel: Retained<NSPanel>,
@@ -714,6 +864,156 @@ mod platform {
                 state.app.stop(None);
             });
         }
+    }
+
+    const NOTES_WIDTH: f64 = 420.0;
+    const NOTES_MAX_HEIGHT: f64 = 260.0;
+    const NOTES_INSET: f64 = 10.0;
+    const ITEM_INDENT: f64 = 14.0;
+
+    /// 更新确认使用带滚动区的 NSAlert：说明再长，按钮也始终留在屏幕内。
+    pub(super) fn confirm_update(prompt: UpdatePrompt) -> bool {
+        dispatch2::run_on_main(move |mtm| {
+            autoreleasepool(|_| {
+                let app = NSApplication::sharedApplication(mtm);
+                let alert = NSAlert::new(mtm);
+                alert.setAlertStyle(NSAlertStyle::Informational);
+                alert.setMessageText(&NSString::from_str(&prompt.title));
+                alert.setInformativeText(&NSString::from_str(&prompt.description));
+                alert.addButtonWithTitle(&NSString::from_str(&prompt.primary_label));
+                let later = alert.addButtonWithTitle(&NSString::from_str(UPDATE_LATER_LABEL));
+                later.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+                let notes = (!prompt.notes.is_empty()).then(|| notes_view(&prompt.notes, mtm));
+                if let Some((scroll, _)) = &notes {
+                    alert.setAccessoryView(Some(scroll));
+                }
+                alert.layout();
+                // 布局会调整文本视图尺寸并改变滚动位置，布局后再回到开头，先展示最新版本。
+                if let Some((_, text_view)) = &notes {
+                    text_view.setSelectedRange(NSRange::new(0, 0));
+                    text_view.scrollPoint(NSPoint::new(0.0, 0.0));
+                }
+                #[allow(deprecated)]
+                app.activateIgnoringOtherApps(true);
+                alert.runModal() == NSAlertFirstButtonReturn
+            })
+        })
+    }
+
+    fn notes_view(
+        notes: &[NoteLine],
+        mtm: MainThreadMarker,
+    ) -> (Retained<NSScrollView>, Retained<NSTextView>) {
+        let content = NSMutableAttributedString::new();
+        let mut previous: Option<&NoteLine> = None;
+        for line in notes {
+            let (text, font, color, before, indent) = match line {
+                NoteLine::Heading(heading) => (
+                    version_label(heading),
+                    NSFont::boldSystemFontOfSize(13.0),
+                    NSColor::labelColor(),
+                    if previous.is_some() { 14.0 } else { 0.0 },
+                    false,
+                ),
+                NoteLine::Category(category) => (
+                    category.clone(),
+                    NSFont::boldSystemFontOfSize(11.0),
+                    NSColor::secondaryLabelColor(),
+                    if matches!(previous, None | Some(NoteLine::Heading(_))) {
+                        4.0
+                    } else {
+                        8.0
+                    },
+                    false,
+                ),
+                NoteLine::Item(item) => (
+                    format!("•\t{item}"),
+                    NSFont::systemFontOfSize(12.0),
+                    NSColor::labelColor(),
+                    if matches!(previous, Some(NoteLine::Heading(_))) {
+                        4.0
+                    } else {
+                        2.0
+                    },
+                    true,
+                ),
+            };
+            let paragraph = NSMutableParagraphStyle::new();
+            paragraph.setParagraphSpacingBefore(before);
+            paragraph.setLineSpacing(2.0);
+            if indent {
+                paragraph.setTabStops(Some(&NSArray::new()));
+                paragraph.setDefaultTabInterval(ITEM_INDENT);
+                paragraph.setHeadIndent(ITEM_INDENT);
+            }
+            let separator = if previous.is_some() { "\n" } else { "" };
+            let attributes = unsafe {
+                NSDictionary::<NSAttributedStringKey, AnyObject>::from_slices(
+                    &[
+                        NSFontAttributeName,
+                        NSForegroundColorAttributeName,
+                        NSParagraphStyleAttributeName,
+                    ],
+                    &[&*font, &*color, &*paragraph],
+                )
+            };
+            let piece = unsafe {
+                NSAttributedString::initWithString_attributes(
+                    NSAttributedString::alloc(),
+                    &NSString::from_str(&format!("{separator}{text}")),
+                    Some(&attributes),
+                )
+            };
+            content.appendAttributedString(&piece);
+            previous = Some(line);
+        }
+
+        let text_width = NOTES_WIDTH - 2.0;
+        let text_view = NSTextView::initWithFrame(
+            NSTextView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(text_width, 0.0)),
+        );
+        text_view.setEditable(false);
+        text_view.setSelectable(true);
+        text_view.setDrawsBackground(false);
+        text_view.setTextContainerInset(NSSize::new(NOTES_INSET, NOTES_INSET));
+        text_view.setVerticallyResizable(true);
+        text_view.setHorizontallyResizable(false);
+        text_view.setMinSize(NSSize::new(0.0, 0.0));
+        text_view.setMaxSize(NSSize::new(text_width, f64::MAX));
+        text_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        let mut content_height = NOTES_MAX_HEIGHT;
+        unsafe {
+            if let Some(storage) = text_view.textStorage() {
+                storage.setAttributedString(&content);
+            }
+            if let (Some(container), Some(layout)) =
+                (text_view.textContainer(), text_view.layoutManager())
+            {
+                container.setWidthTracksTextView(true);
+                container.setContainerSize(NSSize::new(text_width - 2.0 * NOTES_INSET, f64::MAX));
+                layout.ensureLayoutForTextContainer(&container);
+                content_height =
+                    layout.usedRectForTextContainer(&container).size.height + 2.0 * NOTES_INSET;
+            }
+        }
+        let height = content_height.ceil().min(NOTES_MAX_HEIGHT);
+        text_view.setFrameSize(NSSize::new(text_width, content_height.max(height)));
+
+        let scroll = NSScrollView::initWithFrame(
+            NSScrollView::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(NOTES_WIDTH, height + 2.0),
+            ),
+        );
+        scroll.setBorderType(NSBorderType::BezelBorder);
+        scroll.setHasVerticalScroller(true);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDrawsBackground(true);
+        scroll.setBackgroundColor(&NSColor::textBackgroundColor());
+        scroll.setDocumentView(Some(&text_view));
+        (scroll, text_view)
     }
 
     pub fn run_application<F>(run: F) -> anyhow::Result<()>

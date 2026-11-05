@@ -365,7 +365,7 @@ export function useAppUpdates({
         "是否立即下载更新？",
       ]
         .filter(Boolean)
-        .join("\n\n"),
+        .join(""),
       releaseNotes: target.releaseNotes?.trim() || undefined,
       confirmLabel: target.rollback ? "下载回退版本" : "立即更新",
       run: () => void downloadUpdate(target),

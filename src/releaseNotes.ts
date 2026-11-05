@@ -25,3 +25,26 @@ export function parseReleaseNotes(notes?: string): ReleaseNoteGroup[] {
   }
   return groups.filter((item) => item.title || item.lines.length > 0);
 }
+
+export const RELEASE_NOTE_CATEGORIES = ["新增功能", "体验优化", "问题修复"] as const;
+export type ReleaseNoteCategory = { title: string; lines: string[] };
+export type ReleaseNoteSection = { version: string; categories: ReleaseNoteCategory[] };
+
+// 分类标题归入当前版本，其余标题开启新的版本段；无标题条目归入当前段的无名分类。
+export function groupReleaseNotes(groups: ReleaseNoteGroup[]): ReleaseNoteSection[] {
+  const sections: ReleaseNoteSection[] = [];
+  for (const group of groups) {
+    const isCategory = (RELEASE_NOTE_CATEGORIES as readonly string[]).includes(group.title);
+    if (group.title && !isCategory) {
+      sections.push({ version: group.title, categories: group.lines.length > 0 ? [{ title: "", lines: group.lines }] : [] });
+      continue;
+    }
+    if (sections.length === 0) sections.push({ version: "", categories: [] });
+    sections[sections.length - 1].categories.push({ title: group.title, lines: group.lines });
+  }
+  return sections;
+}
+
+export function releaseVersionLabel(version: string) {
+  return /^\d/.test(version) ? `v${version}` : version;
+}
