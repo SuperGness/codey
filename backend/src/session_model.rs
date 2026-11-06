@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use codey_runtime_core::codex_sqlite::codex_session_db_paths_from_home;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
+
+const ROLLOUT_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 // Only model metadata leaves this module; conversation items are never returned.
 fn validate_thread_id(thread_id: &str) -> Result<()> {
@@ -307,9 +309,14 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
     let mut model = None;
     let mut session_provider = None;
     let mut identity = RolloutIdentity::default();
-    for line in BufReader::new(File::open(path)?).lines() {
-        let line = line?;
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+    let mut reader = BufReader::with_capacity(ROLLOUT_READ_BUFFER_BYTES, File::open(path)?);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let Some(record) = metadata_record(&line, "turn_context") else {
             identity.require_owner()?;
             continue;
         };
@@ -393,6 +400,36 @@ fn checked_path(home: &Path, path: &Path) -> Result<PathBuf> {
         bail!("会话元数据不在 Codex 数据目录内");
     }
     Ok(path)
+}
+
+#[derive(Deserialize)]
+struct MetadataRecordHeader<'a> {
+    #[serde(default, rename = "type")]
+    kind: Value,
+    #[serde(borrow)]
+    payload: Option<&'a RawValue>,
+}
+
+// 正文只做 JSON 结构扫描，避免为无关消息分配完整对象；归属检查仍覆盖整份文件。
+fn metadata_record(line: &str, wanted_type: &str) -> Option<Value> {
+    if let Ok(header) = serde_json::from_str::<MetadataRecordHeader<'_>>(line) {
+        match header.kind.as_str() {
+            Some("session_meta") => {}
+            Some(kind) if kind == wanted_type => {}
+            Some("event_msg") => {
+                if let Some(payload) = header.payload
+                    && let Ok(event) =
+                        serde_json::from_str::<MetadataRecordHeader<'_>>(payload.get())
+                    && event.kind != "thread_settings_applied"
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    // 头部无法单独解析时保留完整解析的语义，包括 JSON 重复字段的处理。
+    serde_json::from_str(line).ok()
 }
 
 #[derive(Default)]
@@ -502,9 +539,17 @@ pub(crate) fn native_compaction_source(home: &Path, thread_id: &str) -> Result<O
     let mut identity = RolloutIdentity::default();
     let mut source = None;
     let mut native_history = false;
-    for line in BufReader::new(File::open(checked_path(&home, &rollout)?)?).lines() {
-        let line = line?;
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+    let mut reader = BufReader::with_capacity(
+        ROLLOUT_READ_BUFFER_BYTES,
+        File::open(checked_path(&home, &rollout)?)?,
+    );
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let Some(record) = metadata_record(&line, "compacted") else {
             identity.require_owner()?;
             continue;
         };
@@ -557,6 +602,10 @@ struct MetadataPayload {
 }
 
 #[cfg(test)]
+#[path = "session_model/latency_bench.rs"]
+mod latency_bench;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -606,6 +655,36 @@ mod tests {
                 "id":"ancestor","model_provider":"ancestor-provider"
             }}),
         ]
+    }
+
+    #[test]
+    fn metadata_headers_preserve_escaped_types_and_last_duplicate_fields() {
+        let home = rollout_home();
+        let mut records = vec![
+            r#"{"type":"session_meta","payload":{"id":"saved","model_provider":"initial"}}"#,
+            r#"{"type":"response_item","payload":{"text":"\"type\":\"session_meta\",\"id\":\"other\""}}"#,
+            r#"{"type":"ignored","ty\u0070e":"turn\u005fcontext","payload":{},"payload":{"model":"route/escaped","effort":"low"}}"#,
+        ];
+        std::fs::write(home.path().join("session.jsonl"), records.join("\r\n")).unwrap();
+        assert_eq!(
+            read(home.path(), "saved").unwrap(),
+            json!({"status":"ok","threadId":"saved","model":"route/escaped",
+                "modelProvider":"initial","reasoningEffort":"low"})
+        );
+        records.push(r#"{"type":"event_msg","payload":{"type":"ignored","type":"thread_settings_applied","thread_id":"saved","thread_settings":{"model":"route/applied","model_provider_id":"actual","reasoning_effort":null}}}"#);
+        std::fs::write(home.path().join("session.jsonl"), records.join("\n")).unwrap();
+        let applied = json!({"status":"ok","threadId":"saved","model":"route/applied",
+            "modelProvider":"actual","reasoningEffort":null});
+        assert_eq!(read(home.path(), "saved").unwrap(), applied);
+        records.push(r#"{"type":"comp\u0061cted","payload":{"replacement_history":[{"type":"compaction","encrypted_content":"opaque"}],"resume_metadata":{"previous_turn_settings":{"model":"source/model"}}}}"#);
+        std::fs::write(home.path().join("session.jsonl"), records.join("\n")).unwrap();
+        assert_eq!(read(home.path(), "saved").unwrap(), applied);
+        assert_eq!(
+            native_compaction_source(home.path(), "saved")
+                .unwrap()
+                .as_deref(),
+            Some("source/model")
+        );
     }
 
     #[test]
@@ -812,6 +891,11 @@ mod tests {
             assert!(native_compaction_source(home.path(), "saved").is_err());
         }
         for records in [
+            vec![
+                owner.clone(),
+                turn.clone(),
+                json!({"type":"session_meta","payload":{"id":"other"}}),
+            ],
             vec![turn],
             vec![
                 owner.clone(),
