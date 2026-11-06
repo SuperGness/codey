@@ -1955,6 +1955,51 @@ fn update_manifest_url_defaults_to_the_public_source_for_local_builds() {
 }
 
 #[test]
+fn release_admin_url_is_empty_without_a_release_build_identity() {
+    // 开发构建与测试一律不登记发布管理服务，正式构建也要构建标识和服务地址齐全。
+    for release_build in [false, true] {
+        assert_eq!(
+            release_admin_url_for(release_build, None, Some("https://admin.example.com")),
+            ""
+        );
+        assert_eq!(
+            release_admin_url_for(
+                release_build,
+                Some("   "),
+                Some("https://admin.example.com")
+            ),
+            ""
+        );
+        assert_eq!(
+            release_admin_url_for(release_build, Some("build_1"), None),
+            ""
+        );
+        assert_eq!(
+            release_admin_url_for(release_build, Some("build_1"), Some("  ")),
+            ""
+        );
+    }
+    assert_eq!(
+        release_admin_url_for(false, Some("build_1"), Some("https://admin.example.com")),
+        ""
+    );
+    assert_eq!(
+        release_admin_url_for(
+            true,
+            Some(" build_1 "),
+            Some(" https://admin.example.com/ ")
+        ),
+        "https://admin.example.com"
+    );
+}
+
+#[test]
+fn local_builds_have_no_release_build_id_or_admin_url() {
+    assert_eq!(release_build_id(), None);
+    assert_eq!(default_release_admin_url(), "");
+}
+
+#[test]
 fn pet_slim_mode_defaults_to_enabled_for_existing_configs() {
     let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
         .unwrap()

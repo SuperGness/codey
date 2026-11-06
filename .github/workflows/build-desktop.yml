@@ -193,6 +193,7 @@ jobs:
           CODEY_SKIP_OVERLAY_BUILD: "1"
           CODEY_UPDATE_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
           CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
+          CODEY_RELEASE_BUILD_ID: ${{ inputs.build_id }}
         run: pnpm run build
 
       - name: Verify and archive macOS app
@@ -424,6 +425,7 @@ jobs:
           CODEY_SKIP_OVERLAY_BUILD: "1"
           CODEY_UPDATE_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
           CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
+          CODEY_RELEASE_BUILD_ID: ${{ inputs.build_id }}
         run: pnpm run build
 
       - name: Build Windows packages

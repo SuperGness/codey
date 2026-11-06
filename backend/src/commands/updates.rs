@@ -20,6 +20,8 @@ const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_DOWNLOAD_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_UPDATE_MANIFEST_BYTES: usize = 1024 * 1024;
 static DEVICE_IDENTITY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// 被服务端拒绝登记的服务地址在本进程内不再重试，按地址区分避免并行测试互相影响。
+static REJECTED_REGISTRATIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn device_http_client_builder() -> reqwest::ClientBuilder {
     // 注册请求体和检查、上报请求头都包含密钥，禁止转发到重定向目标。
@@ -539,6 +541,17 @@ async fn load_or_register_device(
 ) -> Result<DeviceIdentity, String> {
     // 设置弹窗和自动更新可能同时首次登记，必须共用同一份设备身份。
     let _guard = DEVICE_IDENTITY_LOCK.lock().await;
+    if REJECTED_REGISTRATIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|rejected| rejected == base_url)
+    {
+        return Err(device_identity_failure(
+            "register",
+            "注册设备失败：发布管理服务已拒绝登记",
+        ));
+    }
     let path = device_identity_path(&state.store).await?;
     let mut identity = match read_device_identity(&state.store).await? {
         Some(identity) if !identity.pending => return Ok(identity),
@@ -560,6 +573,7 @@ async fn load_or_register_device(
         "platform": current_update_platform(),
         "arch": current_update_arch(),
         "currentVersion": env!("CARGO_PKG_VERSION"),
+        "buildId": crate::config::release_build_id(),
         // 设备管理需要一眼看到客户端环境，登记时一并带上。
         "codexVersion": current_codex_version().await,
         "osName": current_os_name(),
@@ -576,11 +590,21 @@ async fn load_or_register_device(
         .await
         .map_err(|error| {
             device_identity_failure("register", format!("注册设备失败：{}", error.without_url()))
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            device_identity_failure("register", format!("注册设备失败：{}", error.without_url()))
         })?;
+    // 服务端拒绝登记说明当前构建不在发布渠道内，本进程内不再重复登记。
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        REJECTED_REGISTRATIONS
+            .lock()
+            .unwrap()
+            .push(base_url.to_string());
+        return Err(device_identity_failure(
+            "register",
+            "注册设备失败：发布管理服务拒绝登记",
+        ));
+    }
+    let response = response.error_for_status().map_err(|error| {
+        device_identity_failure("register", format!("注册设备失败：{}", error.without_url()))
+    })?;
     let registered = response
         .json::<DeviceIdentityResponse>()
         .await
@@ -1809,6 +1833,7 @@ mod tests {
                     let request = read_registration_request(&mut stream).await;
                     assert_eq!(request["codexVersion"], Value::Null);
                     assert_eq!(request["osVersion"], Value::Null);
+                    assert_eq!(request["buildId"], Value::Null);
                     let pending: DeviceIdentity =
                         serde_json::from_slice(&tokio::fs::read(&server_path).await.unwrap())
                             .unwrap();
@@ -2146,6 +2171,7 @@ mod tests {
         assert_eq!(body["installKey"], identity.install_key);
         assert_eq!(body["codexVersion"], "1.2.3-test");
         assert_eq!(body["osVersion"], "test-os-version");
+        assert_eq!(body["buildId"], Value::Null);
         let report = requests
             .iter()
             .find(|request| request.starts_with("GET /api/updates/check?"))
@@ -2164,6 +2190,73 @@ mod tests {
                 .iter()
                 .all(|request| request.contains("updatePolicy=stable"))
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_registration_is_not_retried_and_public_check_still_works() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            http_client: crate::system_proxy_client::SystemProxyClient::fixed(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+            ),
+            ..AppState::default()
+        };
+        state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Stable;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let registrations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = registrations.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let (status, body) = if request.starts_with("POST /api/devices/register ") {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ("403 Forbidden", r#"{"error":"denied"}"#)
+                } else {
+                    ("200 OK", r#"{"updateAvailable":false}"#)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            TEST_DEVICE_VERSIONS.scope(
+                TestDeviceVersions {
+                    codex: None,
+                    os: None,
+                },
+                async {
+                    assert!(load_or_register_device(&state, &base_url).await.is_err());
+                    for _ in 0..2 {
+                        let check = fetch_release_admin_update(
+                            &state,
+                            &base_url,
+                            UpdateRequestMode::Manual,
+                        )
+                        .await
+                        .unwrap();
+                        assert!(!check.update_available);
+                    }
+                },
+            ),
+        )
+        .await;
+        server.abort();
+        result.unwrap();
+        assert_eq!(registrations.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn valid_asset() -> UpdateManifestAsset {

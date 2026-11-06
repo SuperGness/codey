@@ -950,7 +950,6 @@ pub(super) fn default_subagent_reasoning_effort() -> String {
 
 pub(super) const DEFAULT_UPDATE_BASE_URL: &str =
     "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev";
-const DEFAULT_RELEASE_ADMIN_URL: &str = "https://codey-release-admin.kimzane9991.workers.dev";
 
 pub(super) fn update_manifest_url_from_base(configured_base_url: Option<&str>) -> String {
     let base_url = configured_base_url
@@ -965,11 +964,35 @@ pub fn default_update_manifest_url() -> String {
     update_manifest_url_from_base(option_env!("CODEY_UPDATE_BASE_URL"))
 }
 
-pub fn default_release_admin_url() -> String {
-    option_env!("CODEY_RELEASE_ADMIN_URL")
+/// 只有发布流水线注入构建标识的正式分发构建才带发布构建身份。
+pub fn release_build_id() -> Option<&'static str> {
+    if cfg!(any(test, debug_assertions)) {
+        return None;
+    }
+    option_env!("CODEY_RELEASE_BUILD_ID")
         .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .unwrap_or(DEFAULT_RELEASE_ADMIN_URL)
-        .trim_end_matches('/')
-        .to_string()
+        .filter(|id| !id.is_empty())
+}
+
+pub fn release_admin_url_for(
+    release_build: bool,
+    build_id: Option<&str>,
+    url: Option<&str>,
+) -> String {
+    let build_id = build_id.map(str::trim).filter(|id| !id.is_empty());
+    let url = url.map(str::trim).filter(|url| !url.is_empty());
+    if release_build && build_id.is_some() {
+        url.unwrap_or_default().trim_end_matches('/').to_string()
+    } else {
+        String::new()
+    }
+}
+
+// 非正式构建不得向生产发布管理服务登记设备，回退到公开 R2 清单检查。
+pub fn default_release_admin_url() -> String {
+    release_admin_url_for(
+        !cfg!(any(test, debug_assertions)),
+        release_build_id(),
+        option_env!("CODEY_RELEASE_ADMIN_URL"),
+    )
 }
