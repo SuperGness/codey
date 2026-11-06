@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 10;
+  const VERSION = 12;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -145,59 +145,76 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 56%, transparent); --cs-soft: color-mix(in srgb, var(--cs-text) 80%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 10%, transparent); --cs-fill: color-mix(in srgb, var(--cs-text) 5%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 97%, var(--cs-text)); --cs-live: light-dark(#248a3d, #30d158); --cs-seg-cached: color-mix(in srgb, var(--cs-text) 26%, transparent); --cs-seg-input: light-dark(#0071e3, #0a84ff); --cs-seg-output: light-dark(#8944ab, #bf5af2); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 5px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
+      ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 62%, transparent); --cs-soft: color-mix(in srgb, var(--cs-text) 84%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 9%, transparent); --cs-line-strong: color-mix(in srgb, var(--cs-text) 15%, transparent); --cs-fill: color-mix(in srgb, var(--cs-text) 4.5%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 88%, var(--cs-text) 4%); --cs-live: light-dark(#248a3d, #30d158); --cs-accent: light-dark(#007aff, #0a84ff); --cs-cyan: light-dark(#0891b2, #22d3ee); --cs-violet: light-dark(#7c3aed, #a78bfa); --cs-amber: light-dark(#c46a00, #ff9f0a); --cs-seg-cached: color-mix(in srgb, var(--cs-text) 26%, transparent); --cs-seg-input: var(--cs-accent); --cs-seg-output: var(--cs-violet); --cs-seg-write: var(--cs-amber); --cs-seg-model: var(--cs-accent); --cs-seg-tool: var(--cs-cyan); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 6px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
       ${styleScope} *, ${styleScope} *::before, ${styleScope} *::after { box-sizing: border-box; }
       ${styleScope}[hidden], ${styleScope} [hidden] { display: none !important; }
-      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 4px; }
-      ${styleScope} .codey-cs-divider { width: 1px; height: 12px; margin: 0 2px; background: var(--cs-line); }
+      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px; width: fit-content; max-width: 100%; margin: 0 auto; padding: 2px; border-radius: 999px; background: var(--cs-fill); box-shadow: inset 0 0 0 .5px var(--cs-line); }
+      ${styleScope} .codey-cs-divider { width: 1px; height: 11px; margin: 0 1px; background: var(--cs-line-strong); opacity: .6; }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
-      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 10px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; transition: background-color .15s ease, color .15s ease, opacity .2s ease; }
-      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: var(--cs-fill); color: var(--cs-soft); }
-      ${styleScope} button:focus-visible { outline: 2px solid var(--cs-text); outline-offset: 2px; }
-      ${styleScope} .codey-cs-icon { display: inline-block; width: 14px; height: 14px; flex: 0 0 14px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
+      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 11px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; transition: background-color .18s cubic-bezier(.32, .72, 0, 1), color .18s cubic-bezier(.32, .72, 0, 1), box-shadow .18s cubic-bezier(.32, .72, 0, 1), opacity .2s ease; }
+      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: color-mix(in srgb, var(--bg-primary, Canvas) 90%, var(--cs-text) 6%); color: var(--cs-text); box-shadow: 0 1px 3px #0000001f, inset 0 .5px 0 color-mix(in srgb, #fff 18%, transparent); }
+      #${barId}[data-running="true"] .codey-cs-activity-summary { background: color-mix(in srgb, var(--cs-live) 8%, transparent); color: var(--cs-soft); }
+      ${styleScope} button:focus-visible { outline: 2px solid var(--cs-accent); outline-offset: 2px; }
+      ${styleScope} .codey-cs-icon { display: inline-block; width: 13.5px; height: 13.5px; flex: 0 0 13.5px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; transition: color .18s ease; }
+      ${styleScope} .codey-cs-activity-summary:is(:hover, [aria-expanded="true"]) .codey-cs-icon { color: var(--cs-accent); }
+      ${styleScope} .codey-cs-tokens-summary:is(:hover, [aria-expanded="true"]) .codey-cs-icon { color: var(--cs-violet); }
+      #${barId}[data-running="true"] .codey-cs-activity-summary .codey-cs-icon { color: var(--cs-live); }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
-      ${styleScope} .codey-cs-sep { opacity: .5; }
-      ${styleScope} .codey-cs-speed, ${styleScope} .codey-cs-total { color: var(--cs-soft); font-weight: 560; }
-      ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4px; }
-      ${styleScope} .codey-cs-ring { --cs-rate: 0; width: 12px; height: 12px; flex: none; border-radius: 50%; background: conic-gradient(currentColor calc(var(--cs-rate) * 1%), var(--cs-line) 0); mask: radial-gradient(circle, transparent 3.4px, #000 3.9px); }
+      ${styleScope} .codey-cs-sep { opacity: .4; }
+      ${styleScope} .codey-cs-speed, ${styleScope} .codey-cs-total { color: var(--cs-text); font-weight: 600; letter-spacing: -.01em; }
+      ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4.5px; }
+      ${styleScope} .codey-cs-cache-rate { color: var(--cs-soft); font-weight: 560; }
+      ${styleScope} .codey-cs-ring { --cs-rate: 0; width: 12px; height: 12px; flex: none; border-radius: 50%; background: conic-gradient(var(--cs-cyan) calc(var(--cs-rate) * 1%), var(--cs-line-strong) 0); mask: radial-gradient(circle, transparent 3.4px, #000 3.9px); }
       ${styleScope} .codey-cs-live { position: relative; display: none; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--cs-live); }
-      ${styleScope} .codey-cs-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; animation: codey-cs-pulse 1.8s ease-out infinite; }
+      ${styleScope} .codey-cs-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; animation: codey-cs-pulse 1.8s cubic-bezier(.22, 1, .36, 1) infinite; }
       #${barId}[data-running="true"] .codey-cs-live { display: inline-block; }
       #${barId}[data-state="stale"] .codey-cs-summary { opacity: .55; }
-      @keyframes codey-cs-pulse { from { transform: scale(1); opacity: .55; } to { transform: scale(2.8); opacity: 0; } }
-      @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-live::after { animation: none; } ${styleScope} .codey-cs-summary { transition: none; } }
-      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 15px 16px 13px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 14px; box-shadow: 0 12px 32px -12px #0000003d, 0 2px 6px #0000000d; user-select: text; }
-      ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
-      ${styleScope} .codey-cs-badge { display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 8px; background: var(--cs-fill); color: var(--cs-soft); }
+      @keyframes codey-cs-pulse { from { transform: scale(1); opacity: .6; } to { transform: scale(2.8); opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-live::after { animation: none; } ${styleScope} .codey-cs-summary, ${styleScope} .codey-cs-icon { transition: none; } }
+      ${styleScope} .codey-cs-details { --cs-badge-tint: var(--cs-accent); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(364px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 14px 15px 13px; color: var(--cs-text); background: var(--cs-surface); backdrop-filter: saturate(180%) blur(28px); -webkit-backdrop-filter: saturate(180%) blur(28px); border: 1px solid var(--cs-line-strong); border-radius: 18px; box-shadow: 0 14px 40px -12px #0000004d, 0 2px 8px #00000014, inset 0 .5px 0 color-mix(in srgb, #fff 18%, transparent); user-select: text; }
+      ${styleScope} .codey-cs-tokens-details { --cs-badge-tint: var(--cs-violet); }
+      ${styleScope} .codey-cs-activity-details[data-running="true"] { --cs-badge-tint: var(--cs-live); }
+      ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
+      ${styleScope} .codey-cs-badge { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border-radius: 9px; background: color-mix(in srgb, var(--cs-badge-tint) 12%, transparent); color: var(--cs-badge-tint); }
       ${styleScope} .codey-cs-titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
-      ${styleScope} .codey-cs-titles strong { font-size: 13px; font-weight: 600; white-space: nowrap; }
+      ${styleScope} .codey-cs-titles strong { font-size: 13px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
       ${styleScope} .codey-cs-subtitle { color: var(--cs-muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      ${styleScope} .codey-cs-heading-total { margin-left: auto; font-size: 15px; font-weight: 600; letter-spacing: -.01em; text-align: right; white-space: nowrap; }
-      ${styleScope} dl { margin: 0; }
+      ${styleScope} .codey-cs-heading-meta { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 5px; }
+      ${styleScope} .codey-cs-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 1px 8px; border-radius: 999px; background: var(--cs-fill); color: var(--cs-soft); font-size: 11px; font-weight: 560; white-space: nowrap; }
+      ${styleScope} .codey-cs-coverage-pill { color: var(--cs-muted); font-weight: 500; }
+      ${styleScope} .codey-cs-coverage-pill[data-tone="warn"] { background: color-mix(in srgb, var(--cs-amber) 14%, transparent); color: var(--cs-amber); }
+      ${styleScope} .codey-cs-heading-stat { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; line-height: 1.2; text-align: right; }
+      ${styleScope} .codey-cs-heading-caption { color: var(--cs-muted); font-size: 10px; font-weight: 500; white-space: nowrap; }
+      ${styleScope} .codey-cs-heading-total { font-size: 13.5px; font-weight: 650; color: var(--cs-text); letter-spacing: -.01em; text-align: right; white-space: nowrap; }
+      ${styleScope} .codey-cs-pill.codey-cs-heading-total { font-size: 11px; font-weight: 600; color: var(--cs-soft); }
+      ${styleScope} .codey-cs-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; row-gap: 0; }
+      ${styleScope} dl { display: contents; margin: 0; }
       ${styleScope} dt { color: var(--cs-muted); }
       ${styleScope} dd { margin: 0; color: var(--cs-soft); overflow-wrap: anywhere; }
-      ${styleScope} .codey-cs-section-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 1px 1px 7px; color: var(--cs-muted); font-size: 10.5px; }
-      ${styleScope} .codey-cs-section-label span:last-child { color: var(--cs-soft); font-weight: 560; }
-      ${styleScope} .codey-cs-activity-details dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-      ${styleScope} .codey-cs-activity-details .codey-cs-detail-row { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px 9px; border-radius: 10px; background: var(--cs-fill); }
-      ${styleScope} .codey-cs-activity-details dt { display: flex; flex-direction: column; gap: 2px; font-size: 11px; line-height: 1.35; }
-      ${styleScope} .codey-cs-activity-details dd { font-size: 15px; font-weight: 600; line-height: 1.3; }
-      ${styleScope} .codey-cs-tool-hint { color: var(--cs-muted); font-size: 9.5px; font-weight: 400; white-space: nowrap; }
-      ${styleScope} .codey-cs-composition { display: flex; gap: 2px; height: 8px; margin: 0 0 10px; border-radius: 4px; overflow: hidden; background: var(--cs-fill); }
-      ${styleScope} .codey-cs-seg { flex: 0 1 0; min-width: 3px; }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] { display: flex; flex-direction: column; justify-content: space-between; gap: 4px; margin-bottom: 10px; padding: 10px 12px; border-radius: 12px; background: var(--cs-fill); }
+      ${styleScope} .codey-cs-detail-row[data-key="speed"] { background: color-mix(in srgb, var(--cs-badge-tint) 8%, var(--cs-fill)); }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] dt { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 500; line-height: 1.3; }
+      ${styleScope} .codey-cs-detail-row[data-key="outputTokens"] dt::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--cs-seg-output); }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] dd { font-size: 15.5px; font-weight: 650; color: var(--cs-text); line-height: 1.25; letter-spacing: -.02em; }
+      ${styleScope} .codey-cs-composition { grid-column: 1 / -1; grid-row: 2; display: flex; gap: 2.5px; height: 6px; margin: 0 0 7px; border-radius: 999px; overflow: hidden; background: var(--cs-fill); }
+      ${styleScope} .codey-cs-seg { flex: 0 1 0; min-width: 4px; border-radius: 999px; background: var(--cs-dot); }
+      ${styleScope} [data-key="modelDurationMs"] { --cs-dot: var(--cs-seg-model); }
+      ${styleScope} [data-key="toolDurationMs"] { --cs-dot: var(--cs-seg-tool); }
       ${styleScope} [data-key="cachedInputTokens"] { --cs-dot: var(--cs-seg-cached); }
       ${styleScope} [data-key="uncachedInputTokens"] { --cs-dot: var(--cs-seg-input); }
       ${styleScope} [data-key="outputTokens"] { --cs-dot: var(--cs-seg-output); }
-      ${styleScope} .codey-cs-seg { background: var(--cs-dot); }
-      ${styleScope} .codey-cs-tokens-details .codey-cs-detail-row { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; padding: 4px 0; }
-      ${styleScope} .codey-cs-tokens-details dd { text-align: right; }
-      ${styleScope} .codey-cs-tokens-details .codey-cs-detail-row[data-key$="Tokens"]:not([data-key="freshTokens"]) dt::before { content: ""; display: inline-block; width: 7px; height: 7px; margin: 0 7px 1px 0; border-radius: 2px; background: var(--cs-dot, transparent); box-shadow: inset 0 0 0 1px var(--cs-line); }
-      ${styleScope} .codey-cs-detail-row[data-key="freshTokens"] { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--cs-line); }
-      ${styleScope} .codey-cs-detail-row:is([data-key="freshTokens"], [data-key="cacheRate"]) dd { font-weight: 600; }
-      ${styleScope} .codey-cs-note { margin: 11px 0 0; padding-top: 9px; border-top: 1px solid var(--cs-line); color: var(--cs-muted); font-size: 10.5px; line-height: 1.55; }
+      ${styleScope} [data-key="cacheWriteInputTokens"] { --cs-dot: var(--cs-seg-write); }
+      ${styleScope} [data-key="cacheRate"] { --cs-dot: var(--cs-cyan); }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 5.5px 2px; border-top: 1px solid color-mix(in srgb, var(--cs-line) 70%, transparent); }
+      ${styleScope} .codey-cs-detail-row:is([data-key="modelDurationMs"], [data-key="cachedInputTokens"]) { border-top: 0; padding-top: 3px; }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dt { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--cs-soft); font-size: 12px; font-weight: 500; line-height: 1.4; }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dt::before { content: ""; display: inline-block; width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--cs-dot, transparent); }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dd { color: var(--cs-text); font-size: 12.5px; font-weight: 600; text-align: right; white-space: nowrap; flex: none; }
+      ${styleScope} .codey-cs-detail-row[data-key="cacheRate"] dd { color: var(--cs-cyan); font-weight: 650; }
+      ${styleScope} .codey-cs-note { margin: 10px 0 0; padding-top: 9px; border-top: 1px solid var(--cs-line); color: var(--cs-muted); font-size: 10.5px; line-height: 1.55; }
       ${styleScope} .codey-cs-note:empty { display: none; }
-      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-divider { display: none; } ${styleScope} .codey-cs-summary { padding-inline: 6px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 12px; } }
-      @media (max-width: 360px) { ${styleScope} .codey-cs-activity-details dl { grid-template-columns: 1fr; } }
+      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-divider { display: none; } ${styleScope} .codey-cs-summary { padding-inline: 8px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 12px; } }
+      @media (max-width: 360px) { ${styleScope} .codey-cs-body { grid-template-columns: 1fr; } }
     `;
     document.documentElement.appendChild(style);
   };
@@ -224,7 +241,7 @@
       const overlay = make("div", "", "", document.body || document.documentElement);
       overlay.id = overlayId;
       overlay.style.display = "contents";
-      const refs = { overlay, buttons: {}, panels: {}, fields: {}, rows: {}, notes: {}, subtitles: {}, segments: {}, active: null, pinned: false, closeTimer: 0 };
+      const refs = { overlay, buttons: {}, panels: {}, fields: {}, rows: {}, notes: {}, subtitles: {}, segments: {}, activitySegments: {}, active: null, pinned: false, closeTimer: 0 };
       // Tabler Icons v3.45.0 (MIT), matching the existing application icon family.
       const paths = {
         activity: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M13.41 10.59l2.59 -2.59", "M7 12a5 5 0 0 1 5 -5"],
@@ -242,9 +259,9 @@
         return element;
       };
       for (const [kind, title, fields] of [
-        ["activity", "最近一轮", [["modelDurationMs", "模型请求耗时"], ["toolDurationMs", "工具耗时"], ["averageTtftMs", "首内容平均等待"], ["speed", "平均生成速度"]]],
-        // 前三项与构成条同序同色；缓存写入只在上游回报时显示。
-        ["tokens", "Token 用量", [["cachedInputTokens", "缓存读取"], ["uncachedInputTokens", "未缓存输入"], ["outputTokens", "输出"], ["cacheWriteInputTokens", "缓存写入"], ["freshTokens", "新增合计"], ["cacheRate", "缓存命中率"]]],
+        ["activity", "最近一轮", [["speed", "平均生成速度"], ["averageTtftMs", "首内容平均等待"], ["modelDurationMs", "模型请求耗时"], ["toolDurationMs", "工具耗时"]]],
+        // 顶部突出总输入与总输出；下方按构成列出缓存读取、未缓存输入、缓存写入与缓存命中率。
+        ["tokens", "Token 用量", [["inputTokens", "总输入"], ["outputTokens", "总输出"], ["cachedInputTokens", "缓存读取"], ["uncachedInputTokens", "未缓存输入"], ["cacheWriteInputTokens", "缓存写入"], ["cacheRate", "缓存命中率"]]],
       ]) {
         if (kind === "tokens") decorative("codey-cs-divider", groups);
         const button = make("button", `codey-cs-summary codey-cs-${kind}-summary`, "", groups);
@@ -278,13 +295,25 @@
         const titles = make("div", "codey-cs-titles", "", heading);
         make("strong", "", title, titles);
         refs.subtitles[kind] = make("span", "codey-cs-subtitle", "", titles);
+        const body = make("div", "codey-cs-body", "", panel);
         if (kind === "activity") {
-          refs.headingTotal = make("span", "codey-cs-heading-total", "—", heading);
+          const meta = make("div", "codey-cs-heading-meta", "", heading);
+          refs.turnCoverage = make("span", "codey-cs-pill codey-cs-coverage-pill", "统计范围未知", meta);
+          refs.headingTotal = make("span", "codey-cs-pill codey-cs-heading-total", "—", meta);
+          refs.activityComposition = make("div", "codey-cs-composition codey-cs-activity-composition", "", body);
+          refs.activityComposition.setAttribute("aria-hidden", "true");
+          refs.activityComposition.hidden = true;
+          for (const key of ["modelDurationMs", "toolDurationMs"]) {
+            refs.activitySegments[key] = make("span", "codey-cs-seg", "", refs.activityComposition);
+            refs.activitySegments[key].setAttribute("data-key", key);
+          }
         }
         if (kind === "tokens") {
-          refs.fields.totalTokens = make("span", "codey-cs-heading-total", "—", heading);
+          const stat = make("div", "codey-cs-heading-stat", "", heading);
+          make("span", "codey-cs-heading-caption", "累计总量", stat);
+          refs.fields.totalTokens = make("span", "codey-cs-heading-total", "—", stat);
           refs.fields.totalTokens.setAttribute("data-field", "totalTokens");
-          refs.composition = make("div", "codey-cs-composition", "", panel);
+          refs.composition = make("div", "codey-cs-composition", "", body);
           refs.composition.setAttribute("aria-hidden", "true");
           refs.composition.hidden = true;
           for (const key of compositionKeys) {
@@ -292,21 +321,13 @@
             refs.segments[key].setAttribute("data-key", key);
           }
         }
-        const sectionLabel = kind === "activity"
-          ? make("div", "codey-cs-section-label", "", panel)
-          : null;
-        if (sectionLabel) {
-          make("span", "", "统计范围", sectionLabel);
-          refs.turnCoverage = make("span", "", "统计范围未知", sectionLabel);
-        }
-        const list = make("dl", "", "", panel);
-        for (const [key, label] of fields) {
+        const list = make("dl", "", "", body);
+        for (const [index, [key, label]] of fields.entries()) {
           const row = make("div", "codey-cs-detail-row", "", list);
           row.setAttribute("data-key", key);
-          const term = make("dt", "", label, row);
+          row.setAttribute("data-tier", index < 2 ? "primary" : "breakdown");
+          make("dt", "", label, row);
           refs.rows[key] = row;
-          if (key === "modelDurationMs") refs.modelHint = make("small", "codey-cs-tool-hint", "含首内容等待", term);
-          if (key === "toolDurationMs") refs.toolHint = make("small", "codey-cs-tool-hint", "调用累计 · 并行可能重叠", term);
           refs.fields[key] = make("dd", "", "—", row);
           refs.fields[key].setAttribute("data-field", key);
         }
@@ -439,7 +460,10 @@
   const setText = (element, value) => {
     // 相同 textContent 仍会替换文本节点，触发其他页面观察器。
     if (element.textContent === value) return false;
-    element.textContent = value;
+    // 输入框所在区域内替换文本节点会引发约 10ms 的样式重算，只改已有文本节点则不会。
+    const node = element.firstChild;
+    if (node?.nodeType === 3 && !node.nextSibling) node.nodeValue = value;
+    else element.textContent = value;
     return true;
   };
 
@@ -533,19 +557,25 @@
     setValue(bar.dataset, "status", status);
     const tokenValue = value => finite(value) ? `${count(value)} Tokens` : "—";
     data.uncachedInputTokens = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
-    // 累计总量每步都会重复计入已缓存的上下文；摘要优先显示未命中缓存的输入与
-    // 输出之和，缓存字段缺失时才回退为累计总量。
-    data.freshTokens = data.uncachedInputTokens != null && finite(data.outputTokens) ? data.uncachedInputTokens + data.outputTokens : null;
-    const headline = data.freshTokens != null ? `新增 ${formatTokenCount(data.freshTokens)} Tokens`
-      : data.totalTokens != null ? `累计 ${formatTokenCount(data.totalTokens)} Tokens` : "—";
+    const headline = data.totalTokens != null ? `总计 ${formatTokenCount(data.totalTokens)} Tokens` : "—";
     panelContentChanged = setText(refs.total, headline) || panelContentChanged;
-    setValue(refs.total, "title", data.totalTokens == null && data.freshTokens == null ? `${scopeLabel} Token 用量未知。`
-      : `${data.freshTokens != null ? `新增 ${tokenValue(data.freshTokens)}，为未命中缓存的输入与输出合计；` : ""}${scopeLabel} Token 总量 ${tokenValue(data.totalTokens)}，包含缓存读取。`);
+    setValue(refs.total, "title", data.totalTokens == null ? `${scopeLabel} Token 用量未知。`
+      : `${scopeLabel} Token 总量 ${tokenValue(data.totalTokens)}，包含缓存读取。`);
     for (const [key, element] of Object.entries(refs.fields)) {
       const durationState = key === "averageTtftMs" ? "average" : "";
       panelContentChanged = setText(element, key === "cacheRate" ? rate : key === "speed" ? speedText : key.endsWith("Ms") ? duration(turn?.[key], durationState) : tokenValue(data[key])) || panelContentChanged;
     }
-    // 构成条按千分比分配宽度，避免同一数据每次轮询都改写样式。
+    // 耗时与 Token 构成条均按千分比分配宽度，避免同一数据每次轮询都改写样式。
+    const modelMs = finite(turn?.modelDurationMs) ? turn.modelDurationMs : 0;
+    const toolMs = finite(turn?.toolDurationMs) ? turn.toolDurationMs : 0;
+    const durationTotal = modelMs + toolMs;
+    setValue(refs.activityComposition, "hidden", durationTotal <= 0);
+    if (durationTotal > 0) {
+      for (const [key, val] of [["modelDurationMs", modelMs], ["toolDurationMs", toolMs]]) {
+        setValue(refs.activitySegments[key], "hidden", val <= 0);
+        setStyle(refs.activitySegments[key], "flex-grow", String(Math.round((val / durationTotal) * 1000)));
+      }
+    }
     const parts = data.uncachedInputTokens == null || !finite(data.outputTokens) ? null
       : { cachedInputTokens: data.cachedInputTokens, uncachedInputTokens: data.uncachedInputTokens, outputTokens: data.outputTokens };
     const partsTotal = parts ? compositionKeys.reduce((sum, key) => sum + parts[key], 0) : 0;
@@ -561,20 +591,18 @@
     const turnState = running ? "进行中" : turn?.status === "aborted" ? "已中止" : "已完成";
     setText(refs.headingTotal, state === "ok" ? `会话 ${count(data.turnCount)} 轮` : "—");
     setValue(refs.turnCoverage, "hidden", state !== "ok" || !turn);
+    setValue(refs.turnCoverage.dataset, "tone", turn?.coverage === "partial" ? "warn" : "");
     setText(refs.turnCoverage, state === "ok" && turn ? coverageLabel : status);
     setValue(refs.turnCoverage, "title", coverageNote);
     setText(refs.subtitles.activity, state === "ok" && turn ? `${count(turn.stepCount)} 步 · ${turnState}` : status);
-    setText(refs.subtitles.tokens, state === "ok" ? (unknownUsage ? scopeLabel : `${scopeLabel} · 含缓存读取`) : status);
+    setText(refs.subtitles.tokens, state === "ok" ? scopeLabel : status);
     const pendingNote = stale ? (stats ? "更新失败，当前数据可能已过期。" : "暂时无法读取统计，稍后自动重试。") : !currentSessionId ? "建立会话后显示统计。" : !stats ? "暂无统计数据。" : "";
     const activitySummary = turn ? "" : "暂无可识别的最近一轮。";
-    const activityNote = [
-      speedKnown ? "速度仅统计有效计时步骤，不含首内容等待和工具时间。" : "",
-      turn?.coverage === "partial" ? "记录不完整。" : "",
-      estimatedSpeed && speedKnown ? "含生成中的 Token 估算。" : "",
-    ].join("");
-    panelContentChanged = setText(refs.notes.activity, pendingNote || activitySummary || activityNote) || panelContentChanged;
+    panelContentChanged = setText(refs.notes.activity, pendingNote || activitySummary) || panelContentChanged;
+    panelContentChanged = setText(refs.notes.tokens, pendingNote) || panelContentChanged;
     setAttribute(refs.buttons.activity, "aria-label", `本轮 ${count(turn?.stepCount)} 步，平均生成速度 ${speedText}，${status}。会话共 ${count(data.turnCount)} 轮。查看最近一轮详情`);
-    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel}${data.freshTokens != null ? ` 新增 ${formatTokenCount(data.freshTokens)} Tokens，` : " "}总量 ${data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} Tokens`}，缓存命中 ${rate}，${status}。查看 Token 详情`);
+    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} 总量 ${data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} Tokens`}，缓存命中 ${rate}，${status}。查看 Token 详情`);
+    setValue(refs.panels.activity.dataset, "running", running ? "true" : "false");
     setValue(bar.dataset, "running", running ? "true" : "false");
     setValue(bar.dataset, "state", state);
     // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。

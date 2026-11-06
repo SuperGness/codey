@@ -253,6 +253,27 @@ const observeRenderWork = (env) => {
   return counts;
 };
 
+test("updates an existing single text node in place instead of replacing it", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const element = env.bar().__codeyCs.speed;
+    const node = { nodeType: 3, nextSibling: null, nodeValue: element.textContent };
+    let replacements = 0;
+    Object.defineProperties(element, {
+      firstChild: { configurable: true, get: () => node },
+      textContent: { configurable: true, get: () => node.nodeValue, set: () => { replacements += 1; } },
+    });
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 50 } });
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(node.nodeValue, "50.0 Token/s");
+    assert.equal(replacements, 0);
+  } finally {
+    env.dispose();
+  }
+});
+
 test("refreshes with one composer scan per async phase and only writes changed text", async () => {
   const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
   try {
@@ -266,9 +287,9 @@ test("refreshes with one composer scan per async phase and only writes changed t
     env.setStats("conversation-1", { ...STATS, totalTokens: 500, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 50 } });
     env.refresh();
     await flushTimers(30);
-    // 速度（摘要与详情）和完整累计各写一次；新增值未变，摘要不重写。
-    assert.deepEqual(counts, { composerScans: 4, textWrites: 3 });
-    assert.equal(metric(env.bar(), "total"), "新增 12k Tokens");
+    // 速度（摘要与详情）和总量（摘要与详情）各写一次。
+    assert.deepEqual(counts, { composerScans: 4, textWrites: 4 });
+    assert.equal(metric(env.bar(), "total"), "总计 500 Tokens");
     assert.equal(field(env.bar(), "totalTokens"), "500 Tokens");
     assert.equal(metric(env.bar(), "speed"), "50.0 Token/s");
     assert.equal(field(env.bar(), "speed"), "50.0 Token/s");
@@ -509,10 +530,10 @@ test("shows precise totals in the tooltip and avoids a rounded 1000k boundary", 
   const env = createEnvironment({ statsBySession: { "conversation-1": { ...STATS, totalTokens: 999_999, cachedInputTokens: null } } });
   try {
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "total"), "累计 1.0M Tokens");
+    assert.equal(metric(env.bar(), "total"), "总计 1.0M Tokens");
     assert.equal(env.bar().__codeyCs.total.title, "本次运行 Token 总量 999,999 Tokens，包含缓存读取。");
     assert.equal(field(env.bar(), "totalTokens"), "999,999 Tokens");
-    assert.match(env.bar().__codeyCs.notes.activity.textContent, /不含首内容等待和工具时间/);
+    assert.equal(env.bar().__codeyCs.notes.activity.textContent, "");
   } finally {
     env.dispose();
   }
@@ -607,10 +628,10 @@ test("mounts the stats bar under the composer and renders speed/cache/total", as
   assert.equal(metric(bar, "activity"), "本轮 2 步");
   assert.match(bar.__codeyCs.activity.title, /最近一轮的模型生成步数/);
   assert.equal(metric(bar, "cache-rate"), "93%");
-  assert.equal(metric(bar, "total"), "新增 12k Tokens");
-  assert.equal(field(bar, "freshTokens"), "11,500 Tokens");
-  assert.equal(bar.__codeyCs.total.title, "新增 11,500 Tokens，为未命中缓存的输入与输出合计；本次运行 Token 总量 131,500 Tokens，包含缓存读取。");
-  assert.match(bar.querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /本次运行 新增 12k Tokens，总量 132k Tokens，缓存命中 93%/);
+  assert.equal(metric(bar, "total"), "总计 132k Tokens");
+  assert.equal(field(bar, "inputTokens"), "128,400 Tokens");
+  assert.equal(bar.__codeyCs.total.title, "本次运行 Token 总量 131,500 Tokens，包含缓存读取。");
+  assert.match(bar.querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /本次运行 总量 132k Tokens，缓存命中 93%/);
   assert.equal(field(bar, "outputTokens"), "3,100 Tokens");
   assert.equal(summary(env).querySelectorAll(".codey-cs-metric").length, 2);
   for (const selector of [".codey-cs-meta", ".codey-cs-status", '[data-field="model"]']) {
@@ -652,8 +673,8 @@ test("shows unknown values when upstream omits speed and cache", async () => {
   assert.equal(metric(bar, "speed"), "—");
   assert.equal(metric(bar, "cache-rate"), "—");
   assert.equal(field(bar, "cachedInputTokens"), "—");
-  assert.equal(metric(bar, "total"), "累计 132k Tokens", "without cache data the headline falls back to the cumulative total");
-  assert.equal(field(bar, "freshTokens"), "—");
+  assert.equal(metric(bar, "total"), "总计 132k Tokens");
+  assert.equal(field(bar, "inputTokens"), "—");
 });
 
 test("switches stats context when the conversation changes", async () => {
@@ -788,7 +809,8 @@ test("preserves reported zero tokens and zero cache hit rate", async () => {
   } } });
   await flushTimers(30);
   assert.equal(field(env.bar(), "totalTokens"), "0 Tokens");
-  assert.equal(metric(env.bar(), "total"), "新增 100 Tokens");
+  assert.equal(metric(env.bar(), "total"), "总计 0 Tokens");
+  assert.equal(field(env.bar(), "inputTokens"), "100 Tokens");
   assert.equal(field(env.bar(), "outputTokens"), "0 Tokens");
   assert.equal(metric(env.bar(), "cache-rate"), "0%");
   assert.equal(metric(env.bar(), "status"), "运行期统计");
@@ -1005,7 +1027,7 @@ test("restores historical totals without inventing historical request informatio
   await flushTimers(30);
   assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   assert.equal(metric(env.bar(), "status"), "历史统计");
-  assert.match(env.bar().querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /会话累计 新增 12k Tokens，总量 132k Tokens/);
+  assert.match(env.bar().querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /会话累计 总量 132k Tokens/);
   assert.equal(env.bar().dataset.running, "false");
 });
 
@@ -1035,8 +1057,8 @@ test("session totals own the turn count while the last turn owns speed, steps an
   assert.equal(metric(env.bar(), "speed"), "20.0 Token/s");
   assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   assert.equal(field(env.bar(), "outputTokens"), "3,100 Tokens");
-  assert.equal(panel(env).querySelectorAll("dt").at(-1).textContent, "平均生成速度");
-  assert.match(env.bar().__codeyCs.notes.activity.textContent, /不含首内容等待和工具时间/);
+  assert.equal(panel(env).querySelectorAll("dt")[0].textContent, "平均生成速度");
+  assert.equal(env.bar().__codeyCs.notes.activity.textContent, "");
 });
 
 test("uses only the reported session turn count and preserves zero independently of last turn availability", async () => {
@@ -1124,7 +1146,8 @@ test("distinguishes waiting, streaming, estimated average and completed average 
     assert.equal(metric(env.bar(), "speed"), expected);
     assert.equal(field(env.bar(), "speed"), expected);
     assert.match(summary(env).getAttribute("aria-label"), /平均生成速度/);
-    assert.equal(env.bar().__codeyCs.notes.activity.textContent.includes("含生成中的 Token 估算"), changes.speedIsEstimate === true);
+    assert.equal(env.bar().__codeyCs.speed.title.includes("包含生成中的 Token 估算"), changes.speedIsEstimate === true);
+    assert.equal(env.bar().__codeyCs.notes.activity.textContent, "");
   }
 });
 
@@ -1169,7 +1192,8 @@ test("explains limited coverage of historical and partial turn records", async (
     await flushTimers(30);
     assert.equal(metric(env.bar(), "speed"), "188 Token/s");
     assert.ok(env.bar().__codeyCs.turnCoverage.title.includes(note));
-    if (coverage === "partial") assert.match(env.bar().__codeyCs.notes.activity.textContent, /记录不完整/);
+    assert.equal(env.bar().__codeyCs.turnCoverage.dataset.tone, coverage === "partial" ? "warn" : "");
+    assert.equal(env.bar().__codeyCs.notes.activity.textContent, "");
   }
 });
 
@@ -1271,9 +1295,7 @@ test("formats long durations by hours and keeps model wait, tool accumulation an
       assert.equal(field(env.bar(), "modelDurationMs"), "4小时 19分 3秒");
       assert.equal(field(env.bar(), "toolDurationMs"), "4小时 2分 47秒");
       assert.equal(env.bar().__codeyCs.turnCoverage.textContent, "会话记录 + 本次运行");
-      assert.equal(env.bar().__codeyCs.modelHint.textContent, "含首内容等待");
-      assert.equal(env.bar().__codeyCs.toolHint.textContent, "调用累计 · 并行可能重叠");
-      assert.match(env.bar().__codeyCs.notes.activity.textContent, /不含首内容等待和工具时间/);
+      assert.equal(env.bar().__codeyCs.notes.activity.textContent, "");
     }
   } finally {
     env.dispose();
@@ -1374,11 +1396,9 @@ test("explains turn boundaries and accumulated tool timing", async () => {
   const note = env.bar().__codeyCs.notes.activity.textContent;
   assert.equal(env.bar().__codeyCs.activity.textContent, "本轮 2 步");
   assert.equal(env.bar().__codeyCs.headingTotal.textContent, "会话 4 轮");
-  assert.equal(env.bar().__codeyCs.modelHint.textContent, "含首内容等待");
-  assert.equal(note, "速度仅统计有效计时步骤，不含首内容等待和工具时间。");
+  assert.equal(note, "");
   assert.match(env.bar().__codeyCs.speed.title, /按有效步骤的生成 Token 总量与生成耗时计算/);
   assert.match(env.bar().__codeyCs.turnCoverage.title, /仅包含可恢复且有有效计时的记录/);
-  assert.equal(env.bar().__codeyCs.toolHint.textContent, "调用累计 · 并行可能重叠");
 });
 
 test("renders token composition, cache ring and panel subtitles without rewriting unchanged styles", async () => {
@@ -1387,16 +1407,27 @@ test("renders token composition, cache ring and panel subtitles without rewritin
     await flushTimers(30);
     const refs = env.bar().__codeyCs;
     const grow = key => refs.segments[key].style.getPropertyValue("flex-grow");
+    const activityGrow = key => refs.activitySegments[key].style.getPropertyValue("flex-grow");
     assert.equal(refs.composition.hidden, false);
     assert.deepEqual(["cachedInputTokens", "uncachedInputTokens", "outputTokens"].map(grow), ["913", "64", "24"]);
+    assert.equal(refs.activityComposition.hidden, false);
+    assert.deepEqual(["modelDurationMs", "toolDurationMs"].map(activityGrow), ["769", "231"]);
+    assert.equal(refs.rows.speed.getAttribute("data-tier"), "primary");
+    assert.equal(refs.rows.averageTtftMs.getAttribute("data-tier"), "primary");
+    assert.equal(refs.rows.modelDurationMs.getAttribute("data-tier"), "breakdown");
+    assert.equal(refs.rows.inputTokens.getAttribute("data-tier"), "primary");
+    assert.equal(refs.rows.outputTokens.getAttribute("data-tier"), "primary");
+    assert.equal(refs.rows.cachedInputTokens.getAttribute("data-tier"), "breakdown");
+    assert.equal(refs.rows.cacheRate.getAttribute("data-tier"), "breakdown");
     assert.equal(refs.ring.style.getPropertyValue("--cs-rate"), "93");
     assert.equal(refs.rows.cacheWriteInputTokens.hidden, false);
     assert.equal(field(env.bar(), "cacheWriteInputTokens"), "2,000 Tokens");
     assert.equal(refs.subtitles.activity.textContent, "2 步 · 已完成");
-    assert.equal(refs.subtitles.tokens.textContent, "本次运行 · 含缓存读取");
+    assert.equal(refs.subtitles.tokens.textContent, "本次运行");
+    assert.equal(refs.notes.tokens.textContent, "");
 
     let styleWrites = 0;
-    for (const element of [refs.ring, ...Object.values(refs.segments)]) {
+    for (const element of [refs.ring, ...Object.values(refs.segments), ...Object.values(refs.activitySegments)]) {
       const setProperty = element.style.setProperty;
       element.style.setProperty = (...args) => { styleWrites += 1; setProperty(...args); };
     }
