@@ -1624,6 +1624,7 @@ export function App({
         </>
       )}
       <SettingsLayout
+        active={!embedded || modalVisible}
         hidden={usageAnalysisOpen}
         brand={brand}
         contentRef={settingsScroll}

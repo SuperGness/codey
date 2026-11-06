@@ -13,6 +13,7 @@ test("设置页只在首次打开对应菜单后挂载模块", () => {
 });
 
 test("线路与模型菜单把激活状态透传到官方账号面板", () => {
+  assert.match(app, /<SettingsLayout\s+active=\{!embedded \|\| modalVisible\}/);
   assert.match(app, /models: \(active\) => \(/);
   assert.match(app, /<ModelSection\s+active=\{active\}/);
   const section = models.match(/<OfficialAccountsPanel[\s\S]*?\/>/)?.[0];

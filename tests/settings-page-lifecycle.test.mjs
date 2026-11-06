@@ -53,7 +53,7 @@ function layoutHarness() {
     }, []);
     return jsx("page-probe", { id, active, instance, draft, edit, expanded, expand, result, complete });
   }
-  function render(hidden = false) {
+  function render(hidden = false, active = true) {
     const seen = new Set();
     const cleanup = fiber => { fiber.mounted = false; fiber.hooks.forEach(hook => hook?.cleanup?.()); };
     function visit(node, path) {
@@ -74,7 +74,7 @@ function layoutHarness() {
     const sections = Object.fromEntries(pages.map(id => [id, ["models", "mcp", "skills"].includes(id)
       ? active => { callbacks.push({ id, active }); return jsx(Page, { id, active }); }
       : jsx(Page, { id })]));
-    tree = visit(jsx(exports.SettingsLayout, { sections, hidden }), "root");
+    tree = visit(jsx(exports.SettingsLayout, { sections, hidden, active }), "root");
     for (const [address, fiber] of fibers) if (!seen.has(address)) { cleanup(fiber); fibers.delete(address); }
     for (const fiber of fibers.values()) for (const effect of fiber.effects.splice(0)) effect();
   }
@@ -159,5 +159,21 @@ test("returning from usage analysis restores the models page and its existing st
   assert.equal(harness.page("models").draft, "route-draft");
   assert.equal(harness.page("models").expanded, true);
   assert.equal(harness.page("models").active, true);
+  assert.deepEqual(harness.unmounts, []);
+});
+
+test("inactive layouts stop page work without unmounting their children", () => {
+  // 只验证布局仍挂载时的活动状态；整个设置弹窗的关闭与草稿处理由 App 负责。
+  const harness = layoutHarness();
+  harness.select("models");
+  const models = harness.page("models");
+  models.edit("unsaved-route");
+  harness.render(false, false);
+  assert.equal(harness.page("models").active, false);
+  assert.equal(harness.page("models").instance, models.instance);
+  assert.equal(harness.page("models").draft, "unsaved-route");
+  harness.render();
+  assert.equal(harness.page("models").active, true);
+  assert.equal(harness.page("models").instance, models.instance);
   assert.deepEqual(harness.unmounts, []);
 });

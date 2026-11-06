@@ -26,6 +26,7 @@ type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"];
 type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
+  active?: boolean;
   brand?: ReactNode;
   hidden?: boolean;
   sections: Record<SettingsPageId, SettingsSection>;
@@ -55,7 +56,7 @@ function SettingsPageContent({ children, contentRef, labelledBy }: {
   );
 }
 
-export function SettingsLayout({ brand, sections, sidebarFooter, contentRef, hidden = false }: SettingsLayoutProps) {
+export function SettingsLayout({ active: layoutActive = true, brand, sections, sidebarFooter, contentRef, hidden = false }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -101,7 +102,7 @@ export function SettingsLayout({ brand, sections, sidebarFooter, contentRef, hid
       <div className="settings-content" id="codey-settings-content" tabIndex={-1}>
         {/* 首次访问时挂载模块，之后保留草稿、展开状态和异步加载结果。 */}
         {SETTINGS_PAGES.map((page) => {
-          const active = !hidden && activePage === page.id;
+          const active = layoutActive && !hidden && activePage === page.id;
           const content = sections[page.id];
           return (
             <section

@@ -242,6 +242,28 @@ async function accountPanelHarness(context, ids = ["old"]) {
   return { h, calls, loaded, changed, remembered, notices, downloads, invalidateUsage };
 }
 
+test("deactivating a retained account page stops queued usage requests and reopening refreshes", async context => {
+  const { h, calls } = await accountPanelHarness(context, ["one", "two", "three"]);
+  h.props.active = true;
+  h.render();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "query_official_account_usage");
+  h.props.active = false;
+  h.render();
+  calls[0].resolve({ status: "ok" });
+  await flush();
+  h.render();
+  assert.equal(calls.length, 1, "hidden pages must not query the remaining accounts");
+  h.props.active = true;
+  h.render();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].args.accountId, "one");
+  h.props.active = false;
+  h.render();
+  calls[1].resolve({ status: "ok" });
+  await flush();
+});
+
 for (const completion of ["resolve", "reject"]) {
   test(`account mutation supersedes an earlier route refresh ${completion}`, async context => {
     const { h, calls, changed, remembered, invalidateUsage } = await accountPanelHarness(context);
