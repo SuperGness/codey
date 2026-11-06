@@ -3,10 +3,7 @@ import { IconChevronLeft, IconChevronRight } from "@tabler/icons-react";
 import { Button } from "./components/ui";
 import { formatUsageNumber, usageTrend, type LogAnalytics } from "./usageAnalysis";
 import { usageTimelineView } from "./usageTimelineView";
-
-const utc = (timestamp: number) => new Date(timestamp).toLocaleString("zh-CN", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-const shortDate = (timestamp: number, includeYear: boolean) => new Date(timestamp).toLocaleString("zh-CN", { timeZone: "UTC", ...(includeYear ? { year: "numeric" as const } : {}), month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-const compactNumber = (value: number | null) => value == null ? "—" : Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+import { formatUsageUtcMinute as utc, formatUsageShortDate as shortDate, formatCompactUsageNumber as compactNumber } from "./usageFormatters";
 
 export function UsageTimeline({ stats }: { stats: LogAnalytics }) {
   const view = useMemo(() => usageTimelineView(stats), [stats]);

@@ -9,8 +9,7 @@ import styles from "./styles.usage-analysis.css?inline";
 import { UsageHeatmap } from "./UsageHeatmap";
 import { UsageTimeline } from "./UsageTimeline";
 import { UsageDateFilter, usageDatesLabel, usageDatesQuery, usagePresetDates, type UsageDates } from "./UsageDateFilter";
-
-const utc = (timestamp: number) => new Date(timestamp).toLocaleString("zh-CN", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+import { formatUsageUtcMinute as utc } from "./usageFormatters";
 
 export function UsageAnalysisHeader({ onBack }: { onBack: () => void }) {
   const heading = useRef<HTMLHeadingElement>(null);
