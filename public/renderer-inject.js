@@ -138,8 +138,13 @@
       #${accountUsageId}[data-state="stale"] .codey-usage-details-updated::before { content: "上次成功数据 · "; }
       #${accountUsageId}[data-state="error"] { padding-block: 8px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; }
       #${accountUsageId} .codey-usage-list { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); }
-      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#248a3d, #30d158); --codey-usage-accent-bg: light-dark(rgba(52, 199, 89, .14), rgba(48, 209, 88, .22)); min-width: 0; }
+      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#00a37a, #37d9a1); --codey-usage-accent-bg: light-dark(rgba(0, 163, 122, .14), rgba(55, 217, 161, .22)); min-width: 0; }
       #${accountUsageId} .codey-usage-segment { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 3px; }
+      #${accountUsageId}[data-window-count="1"]:has(.codey-usage-segment[data-window="weekly"]) { padding: 15px 17px; border-radius: 16px; box-shadow: 0 3px 9px light-dark(rgba(36, 36, 38, .03), rgba(0, 0, 0, .15)), 0 1px 2px light-dark(rgba(36, 36, 38, .015), rgba(0, 0, 0, .1)); }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] { row-gap: 5px; }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-value { text-shadow: none; }
+      #${accountUsageId} .codey-usage-border-progress { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+      #${accountUsageId} .codey-usage-border-progress rect { width: calc(100% - 2px); height: calc(100% - 2px); fill: none; stroke: var(--codey-usage-accent); stroke-width: 1.6px; stroke-linecap: round; filter: drop-shadow(0 0 2px color-mix(in srgb, var(--codey-usage-accent) 42%, transparent)) drop-shadow(0 0 5px color-mix(in srgb, var(--codey-usage-accent) 16%, transparent)); }
       #${accountUsageId} .codey-usage-segment + .codey-usage-segment { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--codey-usage-line); }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-segment + .codey-usage-segment { margin-top: 0; padding-top: 0; border-top: 0; padding-inline-start: 12px; border-inline-start: 1px solid var(--codey-usage-line); }
@@ -159,9 +164,9 @@
       #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; box-shadow: inset 0 0.5px 1px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .25)); }
       #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, color-mix(in srgb, var(--codey-usage-accent) 80%, white 20%), var(--codey-usage-accent)); box-shadow: 0 0 6px color-mix(in srgb, var(--codey-usage-accent) 45%, transparent), inset 0 0.5px 0 rgba(255, 255, 255, .4); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; transition: transform .25s ease-out; }
       #${accountUsageId} .codey-usage-reset { display: block; grid-area: 2 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: color-mix(in srgb, var(--codey-usage-ink) 62%, transparent); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 500; line-height: 1.3; white-space: nowrap; }
-      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#0071e3, #0a84ff); --codey-usage-accent-bg: light-dark(rgba(0, 113, 227, .12), rgba(10, 132, 255, .20)); }
-      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#c96400, #ff9f0a); --codey-usage-accent-bg: light-dark(rgba(201, 100, 0, .14), rgba(255, 159, 10, .20)); }
-      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#d70015, #ff453a); --codey-usage-accent-bg: light-dark(rgba(215, 0, 21, .14), rgba(255, 69, 58, .22)); }
+      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#3478f6, #72a8ff); --codey-usage-accent-bg: light-dark(rgba(52, 120, 246, .12), rgba(114, 168, 255, .20)); }
+      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#d68100, #ffc05c); --codey-usage-accent-bg: light-dark(rgba(214, 129, 0, .14), rgba(255, 192, 92, .20)); }
+      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#f04452, #ff7d89); --codey-usage-accent-bg: light-dark(rgba(240, 68, 82, .14), rgba(255, 125, 137, .22)); }
       #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 8px; bottom: calc(100% + 7px); left: 8px; box-sizing: border-box; min-width: 0; padding: 14px 15px 15px; border: 0; border-radius: 14px; background: light-dark(#ffffff, #222226); box-shadow: 0 18px 44px -10px light-dark(rgba(20, 40, 70, .2), rgba(0, 0, 0, .6)), 0 4px 14px -4px light-dark(rgba(20, 40, 70, .1), rgba(0, 0, 0, .4)); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(6px) scale(.97); transition: opacity .2s cubic-bezier(.16, 1, .3, 1), transform .2s cubic-bezier(.16, 1, .3, 1), visibility .2s cubic-bezier(.16, 1, .3, 1); visibility: hidden; }
       #${accountUsageId}:hover .codey-usage-details, #${accountUsageId}:focus-visible .codey-usage-details { opacity: 1; transform: translateY(0) scale(1); visibility: visible; pointer-events: auto; }
       #${accountUsageId} .codey-usage-details::after { content: ""; position: absolute; inset: 100% 0 auto; height: 9px; }
@@ -609,7 +614,7 @@
     return hours ? `${days} 天 ${hours} 小时后重置` : `${days} 天后重置`;
   };
 
-  const accountUsageDayTimeLabel = (resetsAt) => {
+  const accountUsageDayTimeLabel = (resetsAt, calendarDate = false) => {
     const timestamp = Number(resetsAt);
     if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
     const resetAt = new Date(timestamp * 1000);
@@ -633,8 +638,8 @@
       minute: "2-digit",
       hour12: false,
     });
-    if (dayOffset === 0) return `今天 ${time}`;
-    if (dayOffset === 1) return `明天 ${time}`;
+    if (!calendarDate && dayOffset === 0) return `今天 ${time}`;
+    if (!calendarDate && dayOffset === 1) return `明天 ${time}`;
     return `${resetAt.getMonth() + 1}月${resetAt.getDate()}日 ${time}`;
   };
 
@@ -692,7 +697,7 @@
     ? "critical"
     : remaining <= 40 ? "warning" : remaining <= 70 ? "normal" : "healthy";
 
-  const accountUsageWindowSegment = (window, kind, plan = "", creditDot = false) => {
+  const accountUsageWindowSegment = (window, kind, plan = "", creditDot = false, borderProgress = false) => {
     if (!window || accountUsageWindowKind(window) !== kind) return null;
     const proTier = /^Pro (100|200|500)$/.exec(plan)?.[1];
     const remaining = Math.max(0, Math.min(100, 100 - Number(window.usedPercent)));
@@ -700,8 +705,10 @@
     const ariaLabel = kind === "weekly" ? "周额度" : "5 小时额度";
     const label = kind === "weekly" ? "每周" : "5 小时";
     const reset = accountUsageResetLabel(window.resetsAt);
-    // 摘要只放紧凑时间，完整的“X 重置”留在悬浮卡片。
-    const resetTime = accountUsageDayTimeLabel(window.resetsAt).replace(/^(\d+)月(\d+)日/, "$1/$2");
+    const dayTime = accountUsageDayTimeLabel(window.resetsAt, borderProgress);
+    const resetTime = borderProgress
+      ? dayTime && `${dayTime} 重置`
+      : dayTime.replace(/^(\d+)月(\d+)日/, "$1/$2");
     const tone = accountUsageTone(roundedRemaining);
     return {
       aria: `${ariaLabel}剩余 ${roundedRemaining}%${reset ? `，${reset}` : ""}`,
@@ -714,6 +721,7 @@
           </span>
           <span class="codey-usage-value">${roundedRemaining}<span class="codey-usage-unit">%</span></span>
           ${resetTime ? `<span class="codey-usage-reset">${resetTime}</span>` : ""}
+          ${borderProgress ? `<svg class="codey-usage-border-progress" aria-hidden="true" focusable="false"${remaining === 0 ? ' opacity="0"' : ""}><rect x="1" y="1" rx="15" pathLength="100" stroke-dasharray="${remaining} 100" /></svg>` : ""}
         </span>
       `,
     };
@@ -733,6 +741,7 @@
         kind,
         index === 0 ? plan : "",
         index === 0 && creditExpiring,
+        windowsByKind.size === 1 && kind === "weekly",
       ));
   };
 

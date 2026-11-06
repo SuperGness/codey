@@ -332,10 +332,12 @@ fn handle_hook_for_runtime_at(
                     state_root,
                     runtime_id,
                     &input.session_id,
-                    agent_id,
-                    nonempty(input.agent_type.as_deref()),
-                    nonempty(input.transcript_path.as_deref()),
-                    nonempty(input.turn_id.as_deref()),
+                    crate::subagent_orchestrator::SubagentLifecycleContext {
+                        agent_id,
+                        agent_type: nonempty(input.agent_type.as_deref()),
+                        transcript_path: nonempty(input.transcript_path.as_deref()),
+                        turn_id: nonempty(input.turn_id.as_deref()),
+                    },
                     now_ms,
                 )?;
                 if should_track {
@@ -365,10 +367,12 @@ fn handle_hook_for_runtime_at(
                     state_root,
                     runtime_id,
                     &input.session_id,
-                    agent_id,
-                    nonempty(input.agent_type.as_deref()),
-                    nonempty(input.agent_transcript_path.as_deref()),
-                    nonempty(input.turn_id.as_deref()),
+                    crate::subagent_orchestrator::SubagentLifecycleContext {
+                        agent_id,
+                        agent_type: nonempty(input.agent_type.as_deref()),
+                        transcript_path: nonempty(input.agent_transcript_path.as_deref()),
+                        turn_id: nonempty(input.turn_id.as_deref()),
+                    },
                     now_ms,
                 )?;
                 if should_remove {

@@ -96,10 +96,12 @@ fn stopped_turn_final_usage_is_recorded_before_completion_trace() {
                 root,
                 "runtime",
                 session,
-                "worker",
-                Some("codey_worker"),
-                None,
-                Some("turn-a"),
+                SubagentLifecycleContext {
+                    agent_id: "worker",
+                    agent_type: Some("codey_worker"),
+                    transcript_path: None,
+                    turn_id: Some("turn-a"),
+                },
                 30,
             )
             .unwrap();
@@ -311,10 +313,12 @@ fn scoped_pure_text_stop_settles_followup_before_or_after_ack() {
                 root,
                 "runtime",
                 session,
-                "worker",
-                Some("codey_worker"),
-                None,
-                Some("turn-a"),
+                SubagentLifecycleContext {
+                    agent_id: "worker",
+                    agent_type: Some("codey_worker"),
+                    transcript_path: None,
+                    turn_id: Some("turn-a"),
+                },
                 32
             )
             .unwrap()
@@ -324,10 +328,12 @@ fn scoped_pure_text_stop_settles_followup_before_or_after_ack() {
                 root,
                 "runtime",
                 session,
-                "worker",
-                Some("codey_worker"),
-                None,
-                Some("turn-b"),
+                SubagentLifecycleContext {
+                    agent_id: "worker",
+                    agent_type: Some("codey_worker"),
+                    transcript_path: None,
+                    turn_id: Some("turn-b"),
+                },
                 33
             )
             .unwrap()
@@ -635,10 +641,12 @@ fn live_usage_can_refine_a_first_turn_that_stopped_before_turn_context() {
         temp.path(),
         "runtime",
         session,
-        "worker",
-        Some("codey_worker"),
-        None,
-        None,
+        SubagentLifecycleContext {
+            agent_id: "worker",
+            agent_type: Some("codey_worker"),
+            transcript_path: None,
+            turn_id: None,
+        },
         12,
     )
     .unwrap();
@@ -676,10 +684,12 @@ fn first_turn_terminal_observation_can_establish_its_turn() {
         temp.path(),
         "runtime",
         session,
-        "worker",
-        Some("codey_worker"),
-        None,
-        None,
+        SubagentLifecycleContext {
+            agent_id: "worker",
+            agent_type: Some("codey_worker"),
+            transcript_path: None,
+            turn_id: None,
+        },
         12,
     )
     .unwrap();
@@ -716,10 +726,12 @@ fn followup_rejects_prior_terminal_until_the_new_turn_is_established() {
         temp.path(),
         "runtime",
         session,
-        "worker",
-        Some("codey_worker"),
-        None,
-        None,
+        SubagentLifecycleContext {
+            agent_id: "worker",
+            agent_type: Some("codey_worker"),
+            transcript_path: None,
+            turn_id: None,
+        },
         12,
     )
     .unwrap();
@@ -841,10 +853,12 @@ fn anonymous_stop_and_completion_cannot_finish_an_unresolved_followup() {
         temp.path(),
         "runtime",
         session,
-        "worker",
-        Some("codey_worker"),
-        None,
-        None,
+        SubagentLifecycleContext {
+            agent_id: "worker",
+            agent_type: Some("codey_worker"),
+            transcript_path: None,
+            turn_id: None,
+        },
         12,
     )
     .unwrap();
@@ -915,19 +929,20 @@ fn anonymous_stop_and_completion_cannot_finish_an_unresolved_followup() {
             .unwrap()
             .is_none()
     );
-    assert_eq!(
+    assert!(
         subagent_started_with_context(
             temp.path(),
             "runtime",
             session,
-            "worker",
-            Some("codey_worker"),
-            None,
-            Some("turn-b"),
+            SubagentLifecycleContext {
+                agent_id: "worker",
+                agent_type: Some("codey_worker"),
+                transcript_path: None,
+                turn_id: Some("turn-b"),
+            },
             36,
         )
-        .unwrap(),
-        true
+        .unwrap()
     );
     observe_status_response(
         temp.path(),
@@ -997,19 +1012,20 @@ fn first_turn_text_completion_still_settles_after_a_followup() {
         31,
     )
     .unwrap();
-    assert_eq!(
+    assert!(
         subagent_started_with_context(
             temp.path(),
             "runtime",
             session,
-            "worker",
-            Some("codey_worker"),
-            None,
-            Some("turn-b"),
+            SubagentLifecycleContext {
+                agent_id: "worker",
+                agent_type: Some("codey_worker"),
+                transcript_path: None,
+                turn_id: Some("turn-b"),
+            },
             32,
         )
-        .unwrap(),
-        true
+        .unwrap()
     );
     observe_status_response(
         temp.path(),
@@ -1048,10 +1064,12 @@ fn late_explicit_stop_from_the_old_turn_cannot_finish_followup() {
         temp.path(),
         "runtime",
         session,
-        "worker",
-        Some("codey_worker"),
-        None,
-        None,
+        SubagentLifecycleContext {
+            agent_id: "worker",
+            agent_type: Some("codey_worker"),
+            transcript_path: None,
+            turn_id: None,
+        },
         12,
     )
     .unwrap();
@@ -1091,47 +1109,50 @@ fn late_explicit_stop_from_the_old_turn_cannot_finish_followup() {
     )
     .unwrap();
 
-    assert_eq!(
-        subagent_stopped_with_context(
+    assert!(
+        !subagent_stopped_with_context(
             temp.path(),
             "runtime",
             session,
-            "worker",
-            Some("codey_worker"),
-            None,
-            Some("turn-a"),
+            SubagentLifecycleContext {
+                agent_id: "worker",
+                agent_type: Some("codey_worker"),
+                transcript_path: None,
+                turn_id: Some("turn-a"),
+            },
             32,
         )
-        .unwrap(),
-        false
+        .unwrap()
     );
-    assert_eq!(
+    assert!(
         subagent_started_with_context(
             temp.path(),
             "runtime",
             session,
-            "worker",
-            Some("codey_worker"),
-            None,
-            Some("turn-b"),
+            SubagentLifecycleContext {
+                agent_id: "worker",
+                agent_type: Some("codey_worker"),
+                transcript_path: None,
+                turn_id: Some("turn-b"),
+            },
             33,
         )
-        .unwrap(),
-        true
+        .unwrap()
     );
-    assert_eq!(
-        subagent_stopped_with_context(
+    assert!(
+        !subagent_stopped_with_context(
             temp.path(),
             "runtime",
             session,
-            "worker",
-            Some("codey_worker"),
-            None,
-            Some("turn-a"),
+            SubagentLifecycleContext {
+                agent_id: "worker",
+                agent_type: Some("codey_worker"),
+                transcript_path: None,
+                turn_id: Some("turn-a"),
+            },
             34,
         )
-        .unwrap(),
-        false
+        .unwrap()
     );
     let running = LedgerStore::open(temp.path(), session)
         .unwrap()
@@ -1142,19 +1163,20 @@ fn late_explicit_stop_from_the_old_turn_cannot_finish_followup() {
         running.reservations["worker"].state,
         ReservationState::Running
     );
-    assert_eq!(
+    assert!(
         subagent_stopped_with_context(
             temp.path(),
             "runtime",
             session,
-            "worker",
-            Some("codey_worker"),
-            None,
-            Some("turn-b"),
+            SubagentLifecycleContext {
+                agent_id: "worker",
+                agent_type: Some("codey_worker"),
+                transcript_path: None,
+                turn_id: Some("turn-b"),
+            },
             36,
         )
-        .unwrap(),
-        true
+        .unwrap()
     );
     let terminal = LedgerStore::open(temp.path(), session)
         .unwrap()
@@ -1330,14 +1352,11 @@ fn review_and_writer_run_concurrently_in_the_same_workspace() {
             "{name}"
         );
     }
-    for name in ["apply_patch"] {
-        assert!(
-            tool(temp.path(), "review-session", "review", name)
-                .unwrap()
-                .is_some(),
-            "{name}"
-        );
-    }
+    assert!(
+        tool(temp.path(), "review-session", "review", "apply_patch")
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
         tool(temp.path(), "review-session", "review", "mcp__cua_repl__js").unwrap(),
         None

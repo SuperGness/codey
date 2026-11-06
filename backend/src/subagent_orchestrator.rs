@@ -1477,23 +1477,15 @@ pub(crate) fn subagent_started_with_context(
     state_root: &Path,
     runtime_id: &str,
     session_id: &str,
-    agent_id: &str,
-    agent_type: Option<&str>,
-    transcript_path: Option<&str>,
-    turn_id: Option<&str>,
+    context: SubagentLifecycleContext<'_>,
     now_ms: u64,
 ) -> Result<bool> {
     update_reservation_lifecycle(
         state_root,
         runtime_id,
         session_id,
-        LifecycleContext {
-            agent_id,
-            agent_type,
-            transcript_path,
-            turn_id,
-            state: ReservationState::Running,
-        },
+        context,
+        ReservationState::Running,
         now_ms,
     )
 }
@@ -1507,7 +1499,16 @@ pub(crate) fn subagent_stopped(
     now_ms: u64,
 ) -> Result<()> {
     subagent_stopped_with_context(
-        state_root, runtime_id, session_id, agent_id, None, None, None, now_ms,
+        state_root,
+        runtime_id,
+        session_id,
+        SubagentLifecycleContext {
+            agent_id,
+            agent_type: None,
+            transcript_path: None,
+            turn_id: None,
+        },
+        now_ms,
     )
     .map(|_| ())
 }
@@ -1516,23 +1517,15 @@ pub(crate) fn subagent_stopped_with_context(
     state_root: &Path,
     runtime_id: &str,
     session_id: &str,
-    agent_id: &str,
-    agent_type: Option<&str>,
-    transcript_path: Option<&str>,
-    turn_id: Option<&str>,
+    context: SubagentLifecycleContext<'_>,
     now_ms: u64,
 ) -> Result<bool> {
     update_reservation_lifecycle(
         state_root,
         runtime_id,
         session_id,
-        LifecycleContext {
-            agent_id,
-            agent_type,
-            transcript_path,
-            turn_id,
-            state: ReservationState::Terminal,
-        },
+        context,
+        ReservationState::Terminal,
         now_ms,
     )
 }
@@ -1586,27 +1579,26 @@ pub(crate) fn settle_unique_anonymous_stop(
     Ok(Some(AnonymousStopSettlement { agent_id_hash }))
 }
 
-struct LifecycleContext<'a> {
-    agent_id: &'a str,
-    agent_type: Option<&'a str>,
-    transcript_path: Option<&'a str>,
-    turn_id: Option<&'a str>,
-    state: ReservationState,
+pub(crate) struct SubagentLifecycleContext<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) agent_type: Option<&'a str>,
+    pub(crate) transcript_path: Option<&'a str>,
+    pub(crate) turn_id: Option<&'a str>,
 }
 
 fn update_reservation_lifecycle(
     state_root: &Path,
     runtime_id: &str,
     session_id: &str,
-    context: LifecycleContext<'_>,
+    context: SubagentLifecycleContext<'_>,
+    state: ReservationState,
     now_ms: u64,
 ) -> Result<bool> {
-    let LifecycleContext {
+    let SubagentLifecycleContext {
         agent_id,
         agent_type,
         transcript_path,
         turn_id,
-        state,
     } = context;
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
@@ -1935,10 +1927,8 @@ pub(crate) fn observe_status_response(
                     reservation.token_usage = Some(cumulative_usage);
                     usage_only_changed = true;
                 }
-            } else if full_usage_refresh {
-                if reservation.bind_explicit_turn(turn_hash, now_ms) {
-                    usage_only_changed = true;
-                }
+            } else if full_usage_refresh && reservation.bind_explicit_turn(turn_hash, now_ms) {
+                usage_only_changed = true;
             }
         }
     }

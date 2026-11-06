@@ -21,10 +21,12 @@ fn legacy_ledger(root: &Path, version: u32, writable: bool) -> PathBuf {
         root,
         "runtime",
         "session",
-        "agent-a",
-        Some("codey_worker"),
-        None,
-        None,
+        SubagentLifecycleContext {
+            agent_id: "agent-a",
+            agent_type: Some("codey_worker"),
+            transcript_path: None,
+            turn_id: None,
+        },
         12,
     )
     .unwrap();

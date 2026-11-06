@@ -729,6 +729,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(summaryHtml, /重置/);
   assert.doesNotMatch(summaryHtml, /余额|>42</);
   assert.doesNotMatch(summaryHtml, /codey-usage-meter/);
+  assert.doesNotMatch(summaryHtml, /codey-usage-border-progress/);
   assert.match(usage.innerHTML, /class="codey-usage-details" role="tooltip"/);
   assert.match(usage.innerHTML, /5 小时额度[\s\S]*?今天 \d{2}:\d{2} 重置[\s\S]*?codey-usage-detail-percent">85%/);
   assert.match(usage.innerHTML, /周额度[\s\S]*?明天 \d{2}:\d{2} 重置[\s\S]*?codey-usage-detail-percent">60%/);
@@ -757,7 +758,10 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
 
   accountUsageResult = {
     ...accountUsageResult,
-    primary: accountUsageResult.secondary,
+    primary: {
+      ...accountUsageResult.secondary,
+      resetsAt: Math.floor(new Date(2030, 10, 11, 15, 3).getTime() / 1000),
+    },
     secondary: null,
     credits: { hasCredits: false, unlimited: false, balance: "0" },
     resetCredits: { availableCount: 0, nextExpiresAt: Math.floor(Date.now() / 1000) + 3600 },
@@ -768,6 +772,9 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
   assert.doesNotMatch(usage.innerHTML, /Credits 余额|剩余重置次数|codey-usage-credit-dot/);
   assert.equal(usage.dataset.creditExpiring, undefined);
+  assert.match(usage.innerHTML, /class="codey-usage-reset">11月11日 15:03 重置<\/span>/);
+  assert.match(usage.innerHTML, /class="codey-usage-border-progress" aria-hidden="true" focusable="false"/);
+  assert.match(usage.innerHTML, /pathLength="100" stroke-dasharray="15 100"/);
 
   accountUsageResult = { status: "error", message: "官方额度接口返回 401", authGeneration: 1 };
   appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
@@ -819,6 +826,8 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   const remountedSummaryHtml = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
   assert.doesNotMatch(remountedSummaryHtml, /data-window="five-hour"/);
   assert.match(remountedSummaryHtml, /class="codey-usage-plan-tag" data-plan="plus">Plus<\/span>/);
+  assert.match(remountedSummaryHtml, /class="codey-usage-reset">\d+月\d+日 \d{2}:\d{2} 重置<\/span>/);
+  assert.doesNotMatch(remountedSummaryHtml, /今天|明天/);
 
   for (const [planType, expectedLabel, expectedTier] of [
     ["prolite", "Pro 100", "100"],
@@ -865,6 +874,32 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     );
     assert.equal(findById("codey-account-usage"), remountedUsage);
   }
+
+  for (const [remaining, tone] of [[100, "healthy"], [71, "healthy"], [70, "normal"], [57, "normal"], [40, "warning"], [20, "critical"], [0, "critical"]]) {
+    accountUsageResult = {
+      ...accountUsageResult,
+      primary: { ...accountUsageResult.primary, usedPercent: 100 - remaining },
+    };
+    await window.__codeyRefreshAccountUsage();
+    const summary = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
+    assert.ok(summary.includes(`data-window="weekly" data-tone="${tone}"`));
+    assert.ok(summary.includes(`stroke-dasharray="${remaining} 100"`));
+    assert.equal(summary.includes('opacity="0"'), remaining === 0, "zero remaining hides the rounded border endpoint");
+  }
+
+  accountUsageResult = {
+    ...accountUsageResult,
+    secondary: { usedPercent: 64, windowMinutes: 300, resetsAt: Math.floor(todayResetAt.getTime() / 1000) },
+  };
+  await window.__codeyRefreshAccountUsage();
+  assert.equal(remountedUsage.dataset.windowCount, "2");
+  assert.doesNotMatch(remountedUsage.innerHTML, /codey-usage-border-progress/);
+
+  accountUsageResult = { ...accountUsageResult, primary: null };
+  await window.__codeyRefreshAccountUsage();
+  assert.equal(remountedUsage.dataset.windowCount, "1");
+  assert.doesNotMatch(remountedUsage.innerHTML, /codey-usage-border-progress/);
+  assert.match(remountedUsage.innerHTML, /data-window="five-hour"/);
 
   accountUsageResult = { status: "disabled" };
   await window.__codeyRefreshAccountUsage();
