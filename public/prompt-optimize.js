@@ -63,6 +63,8 @@
   };
   let scanTimer = 0;
   let scanTimerDelay = 0;
+  let buttonStateTimer = 0;
+  let buttonStateElement = null;
   let repositionTimer = 0;
   let configLoadTimer = 0;
   let configLoadBackoffMs = 120;
@@ -606,19 +608,47 @@
     measureInput(context.element)?.visible === true &&
     readComposerText(context.element) === context.text;
 
-  const updateButtonState = () => {
+  const updateButtonState = (element = inputElement) => {
     if (!button) return;
-    const empty = !readComposerText().trim();
+    const empty = !readComposerText(element).trim();
     const disabled = busy || empty;
-    button.disabled = disabled;
-    button.dataset.busy = String(busy);
-    button.dataset.empty = String(empty);
-    button.setAttribute("aria-busy", String(busy));
-    button.setAttribute("aria-disabled", String(disabled));
-    button.setAttribute(
-      "aria-label",
-      busy ? "正在优化提示词" : empty ? "请输入内容后优化" : "优化提示词",
-    );
+    const busyValue = String(busy);
+    const emptyValue = String(empty);
+    const disabledValue = String(disabled);
+    const label = busy
+      ? "正在优化提示词"
+      : empty
+        ? "请输入内容后优化"
+        : "优化提示词";
+    if (button.disabled !== disabled) button.disabled = disabled;
+    if (button.dataset.busy !== busyValue) button.dataset.busy = busyValue;
+    if (button.dataset.empty !== emptyValue) button.dataset.empty = emptyValue;
+    if (button.getAttribute("aria-busy") !== busyValue) {
+      button.setAttribute("aria-busy", busyValue);
+    }
+    if (button.getAttribute("aria-disabled") !== disabledValue) {
+      button.setAttribute("aria-disabled", disabledValue);
+    }
+    if (button.getAttribute("aria-label") !== label) {
+      button.setAttribute("aria-label", label);
+    }
+  };
+
+  const scheduleButtonStateUpdate = (element = inputElement) => {
+    if (!enabled || !element) return;
+    if (buttonStateTimer && buttonStateElement === element) return;
+    clearTimeout(buttonStateTimer);
+    buttonStateElement = element;
+    // innerText can force layout. Read only the current composer after the
+    // observer callback has returned, so input handlers remain synchronous.
+    buttonStateTimer = setTimeout(() => {
+      buttonStateTimer = 0;
+      const scheduledElement = buttonStateElement;
+      buttonStateElement = null;
+      if (enabled && inputElement === scheduledElement) {
+        updateButtonState(scheduledElement);
+      }
+    }, 0);
   };
 
   const showError = (message) => {
@@ -744,6 +774,7 @@
       updateButtonPosition(geometryCache);
       return;
     }
+    const inputChanged = inputElement !== (input || null);
     inputElement = input || null;
     if (!inputElement) {
       if (button) {
@@ -755,6 +786,7 @@
     if (!button) {
       button = createButton();
     }
+    if (inputChanged) updateButtonState();
     updateButtonPosition(geometryCache);
   };
 
@@ -853,18 +885,18 @@
       ...(mutation?.addedNodes || []),
       ...(mutation?.removedNodes || []),
     ];
-    const composerScope = document.querySelector(composerAnchorSelector)
-      ?.parentElement;
     if (
       findComposerAnchorNode(mutation?.target) ||
       changedNodes.some(findComposerAnchorNode)
     ) {
       return true;
     }
+    // 只有 childList 记录需要比对输入框容器，避免每条属性变化都查询整页。
     if (
       mutation?.type === "childList" &&
-      (mutation.target === composerScope ||
-        mutation.target === inputElement?.parentElement)
+      (mutation.target === inputElement?.parentElement ||
+        mutation.target ===
+          document.querySelector(composerAnchorSelector)?.parentElement)
     ) {
       return true;
     }
@@ -953,7 +985,7 @@
         continue;
       }
       if (mutationInsideTrackedInput(mutation)) {
-        updateButtonState();
+        scheduleButtonStateUpdate();
         if (isPlainTrackedInputMutation(mutation)) continue;
       }
       if (
@@ -1031,8 +1063,11 @@
     }
 
     disconnectComposerObserver();
+    clearTimeout(buttonStateTimer);
     clearTimeout(scanTimer);
     clearTimeout(repositionTimer);
+    buttonStateTimer = 0;
+    buttonStateElement = null;
     scanTimer = 0;
     repositionTimer = 0;
     refreshButton();

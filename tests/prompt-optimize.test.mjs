@@ -1236,6 +1236,151 @@ test("ignores unrelated DOM mutations while the composer remains connected", asy
   assert.equal(env.getComposerQueryCount(), queryCount);
 });
 
+test("【自动化测试】合并观察器状态更新并只修复实际变化的按钮属性", async () => {
+  const env = createEnvironment({ anchors: false, newChatComposer: true });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  let reads = 0;
+  Object.defineProperty(env.newChatInput, "innerText", {
+    get() {
+      reads += 1;
+      return "draft";
+    },
+  });
+  const mutation = {
+    type: "characterData",
+    target: env.newChatInput,
+    addedNodes: [],
+    removedNodes: [],
+  };
+  const writes = { attributes: 0, disabled: 0 };
+  const setAttribute = button.setAttribute.bind(button);
+  button.setAttribute = (...args) => {
+    if (args[0] === "aria-busy") writes.attributes += 1;
+    return setAttribute(...args);
+  };
+  let disabledValue = button.disabled;
+  Object.defineProperty(button, "disabled", {
+    configurable: true,
+    get() {
+      return disabledValue;
+    },
+    set(value) {
+      writes.disabled += 1;
+      disabledValue = value;
+    },
+  });
+
+  for (let index = 0; index < 100; index += 1) env.emitMutation([mutation]);
+  assert.equal(reads, 0, "观察器回调不得同步读取 innerText");
+  await flush();
+  assert.equal(reads, 1);
+  assert.deepEqual(
+    writes,
+    { attributes: 0, disabled: 1 },
+    "按钮状态变化时允许一次 disabled 写入，随后不得重复写入",
+  );
+  assert.equal(button.disabled, false, "非空内容应立即启用优化按钮");
+
+  writes.disabled = 0;
+  button.setAttribute("aria-busy", "stale");
+  writes.attributes = 0;
+  env.emitInput(env.newChatInput);
+  assert.equal(button.getAttribute("aria-busy"), "false");
+  assert.deepEqual(writes, { attributes: 1, disabled: 0 });
+
+  writes.attributes = 0;
+  env.emitInput(env.newChatInput);
+  assert.deepEqual(
+    writes,
+    { attributes: 0, disabled: 0 },
+    "属性恢复后重复同步输入不得再次写入",
+  );
+});
+
+test("【自动化测试】禁用提示词优化时取消排队的状态读取", async () => {
+  const env = createEnvironment({ anchors: false, newChatComposer: true });
+  await flush();
+  let reads = 0;
+  Object.defineProperty(env.newChatInput, "innerText", {
+    get() {
+      reads += 1;
+      return "draft";
+    },
+  });
+  env.emitMutation([{
+    type: "characterData",
+    target: env.newChatInput,
+    addedNodes: [],
+    removedNodes: [],
+  }]);
+  env.setConfig({
+    promptOptimization: { enabled: false, apiKeyConfigured: true },
+  });
+  env.emitConfigChanged();
+  await flush();
+  assert.equal(reads, 0);
+});
+
+test("【自动化测试】输入框切换后丢弃旧输入框排队的状态读取", async () => {
+  const env = createEnvironment({
+    anchors: false,
+    newChatComposer: true,
+    newChatInitialText: "旧输入框",
+  });
+  await flush();
+  const oldInput = env.newChatInput;
+  let oldReads = 0;
+  let nextReads = 0;
+  Object.defineProperty(oldInput, "innerText", {
+    configurable: true,
+    get() {
+      oldReads += 1;
+      return "";
+    },
+  });
+  const mutation = {
+    type: "characterData",
+    target: oldInput,
+    addedNodes: [],
+    removedNodes: [],
+  };
+
+  // 先证明当前输入框的变化确实安排了异步读取。
+  env.emitMutation([mutation]);
+  assert.equal(oldReads, 0);
+  await flush();
+  assert.equal(oldReads, 1);
+  assert.equal(env.getElementById("codey-prompt-optimize-button").disabled, true);
+
+  oldReads = 0;
+  env.emitMutation([mutation]);
+  assert.equal(oldReads, 0);
+  oldInput.visible = false;
+  const nextInput = new FakeElement("div");
+  nextInput.setAttribute("contenteditable", "true");
+  nextInput.setAttribute("role", "textbox");
+  env.scope.appendChild(nextInput);
+  env.setFallbackInputs([nextInput]);
+  Object.defineProperty(nextInput, "innerText", {
+    configurable: true,
+    get() {
+      nextReads += 1;
+      return "新输入框";
+    },
+  });
+  // 设置更新会在 Promise 微任务中重新识别输入框，先于旧的定时任务。
+  env.emitConfigChanged();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(nextReads > 0, "新输入框应在旧定时任务执行前成为当前输入框");
+  await flush();
+
+  assert.equal(oldReads, 0, "旧输入框的排队任务失效后不得读取或回写状态");
+  assert.equal(env.getElementById("codey-prompt-optimize-button").disabled, false);
+});
+
 test("clicking the button calls the bridge and replaces the composer text", async () => {
   const env = createEnvironment({
     enabled: true,
