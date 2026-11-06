@@ -787,13 +787,13 @@
     `;
   };
 
-  // 充值卡在最近一次过期 12 小时内进入预警：详情行转红色并加呼吸灯，
+  // 充值卡在最近一次过期 18 小时内进入预警：详情行转红色并加呼吸灯，
   // 侧栏摘要也亮一颗红点。
   const accountUsageResetExpiring = (resetCredits) => {
     if (!(Number(resetCredits?.availableCount) > 0)) return false;
     const expiresAt = Number(resetCredits?.nextExpiresAt) * 1000;
     const now = Date.now();
-    return Number.isFinite(expiresAt) && expiresAt > now && expiresAt - now <= 12 * 60 * 60 * 1000;
+    return Number.isFinite(expiresAt) && expiresAt > now && expiresAt - now <= 18 * 60 * 60 * 1000;
   };
 
   const accountUsageResetCreditsDetail = (resetCredits) => {

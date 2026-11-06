@@ -199,6 +199,21 @@ test("adds an accessible close button to an existing quota notice", () => {
   assert.equal(runtime.window.__codeyQuotaNoticeDismiss.snapshot().observerInstalled, true);
 });
 
+test("matches the English out-of-usage banner and closes it", () => {
+  const runtime = createRuntime();
+  const { notice } = appendNotice(runtime.body, {
+    title: "You're out of Codex and Work usage",
+    bodyText: "Your rate limit resets on 22:37. Upgrade or use one of your rate limit resets now.",
+    resetLabel: "Reset usage",
+  });
+  runtime.emit([{ addedNodes: [notice], target: runtime.body, type: "childList" }]);
+
+  const close = findCloseButton(notice);
+  assert.ok(close);
+  close.click();
+  assert.equal(notice.style.display, "none:important");
+});
+
 test("native click hides the notice and repeated scans do not inject it again", () => {
   const runtime = createRuntime();
   const { notice } = appendNotice(runtime.body);
@@ -283,6 +298,62 @@ test("dismiss removes the pure wrapper shell instead of leaving an empty box", (
   close.click();
   assert.equal(shell.style.display, "none:important");
   assert.equal(composer.style.display, undefined);
+});
+
+test("matches the Team limit banner and dismisses its request action with the whole surface", () => {
+  const runtime = createRuntime();
+  const row = runtime.body.appendChild(createElement("div"));
+  const banner = row.appendChild(createElement("section"));
+  const textBlock = banner.appendChild(createElement("div"));
+  textBlock.appendChild(createElement("h2", "已达到使用额度上限"));
+  textBlock.appendChild(createElement(
+    "p",
+    "如需获得更多使用额度，请向管理员发送请求，或等到 11月9日 14:24。",
+  ));
+  const actions = banner.appendChild(createElement("div"));
+  const request = actions.appendChild(createElement("button", "申请更多使用额度"));
+  const composer = row.appendChild(createElement("form"));
+  composer.appendChild(createElement("textarea"));
+
+  runtime.emit([{ addedNodes: [banner], target: row, type: "childList" }]);
+
+  const close = findCloseButton(banner);
+  assert.ok(close);
+  assert.equal(close.parentElement, banner);
+  assert.equal(findCloseButton(textBlock), null);
+  assert.equal(runtime.window.__codeyQuotaNoticeDismiss.dismiss(textBlock), true);
+  assert.equal(banner.style.display, "none:important");
+  assert.equal(composer.style.display, undefined);
+  assert.equal(request.clicks, 0);
+});
+
+test("matches a Team banner when only the title and request action are present", () => {
+  const runtime = createRuntime();
+  const banner = runtime.body.appendChild(createElement("section"));
+  banner.appendChild(createElement("h2", "已达到使用额度上限"));
+  banner.appendChild(createElement("button", "申请更多使用额度"));
+  runtime.window.__codeyQuotaNoticeDismiss.scan(banner);
+
+  const close = findCloseButton(banner);
+  assert.ok(close);
+  close.click();
+  assert.equal(banner.style.display, "none:important");
+});
+
+test("a generic limit title or request action alone does not match", () => {
+  const runtime = createRuntime();
+  const panel = runtime.body.appendChild(createElement("section"));
+  panel.appendChild(createElement("h2", "已达到使用额度上限"));
+  panel.appendChild(createElement("p", "普通说明"));
+  runtime.window.__codeyQuotaNoticeDismiss.scan(panel);
+  assert.equal(findCloseButton(panel), null);
+  assert.equal(runtime.window.__codeyQuotaNoticeDismiss.dismiss(panel), false);
+
+  panel.children[0].textContent = "本月使用额度";
+  panel.appendChild(createElement("button", "申请更多使用额度"));
+  runtime.window.__codeyQuotaNoticeDismiss.scan(panel);
+  assert.equal(findCloseButton(panel), null);
+  assert.equal(runtime.window.__codeyQuotaNoticeDismiss.dismiss(panel), false);
 });
 
 test("ordinary quota panels and unrelated upgrade controls remain untouched", () => {

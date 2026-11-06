@@ -1,4 +1,4 @@
-// Adds an accessible close control to the native Codex and Work quota notice.
+// Adds an accessible close control to native Codex, Work and Team quota notices.
 (() => {
   if (window.__codeyQuotaNoticeDismissInstalled) return;
   window.__codeyQuotaNoticeDismissInstalled = true;
@@ -30,12 +30,16 @@
   const controlLabels = [
     /^(?:reset\s+usage(?:\s+limit)?|reset\s+(?:my\s+)?(?:rate\s+limit|limit)|reset\s+limit)$/i,
     /^(?:重新?置使用量|使用一次(?:速率限制)?重置(?:机会)?|重置(?:速率限制|使用量))$/,
+    /^申请更多使用额度$/,
   ];
   const titlePatterns = [
+    /已达到使用额度上限/,
+    /you're\s+out\s+of\s+codex\s+and\s+work\s+usage/i,
     /codex\s*(?:和|与|及|and|&)\s*(?:work|工作(?:区)?)[\s\S]{0,80}(?:使用\s*)?额度[\s\S]{0,40}(?:用完|耗尽|用尽|上限|达到限制|exhausted|reached|used\s+up)/i,
     /codex\s*(?:和|与|及|and|&)\s*(?:work|工作(?:区)?)[\s\S]{0,80}(?:usage\s+limits?|limits?|quota)[\s\S]{0,40}(?:exhausted|reached|used\s+up)/i,
   ];
-  const resetSupportPatterns = [
+  const noticeSupportPatterns = [
+    /请向管理员发送请求/,
     /(?:速率限制|使用额度|额度|配额)[\s\S]{0,80}(?:重置|恢复)/,
     /(?:重置使用量|使用一次[\s\S]{0,30}重置机会)/,
     /(?:rate\s+limit|usage\s+limit|quota)[\s\S]{0,100}(?:reset|renew)/i,
@@ -71,7 +75,7 @@
     control?.textContent,
   ].filter(Boolean).join(" "));
 
-  const isResetControl = (control) => (
+  const isNoticeControl = (control) => (
     control instanceof Element
     && control.matches?.(controlSelector)
     && control.getAttribute?.(closeAttribute) !== "true"
@@ -103,9 +107,9 @@
     ));
   };
 
-  const hasResetControl = (element) => (
+  const hasNoticeControl = (element) => (
     typeof element?.querySelectorAll === "function"
-    && [...element.querySelectorAll(controlSelector)].some(isResetControl)
+    && [...element.querySelectorAll(controlSelector)].some(isNoticeControl)
   );
 
   const isQuotaNotice = (element) => {
@@ -113,11 +117,11 @@
     if (element === document.body || element === document.documentElement) return false;
     const text = normalizedText(element);
     if (!matchesAny(text, titlePatterns)) return false;
-    return matchesAny(text, resetSupportPatterns) || hasResetControl(element);
+    return matchesAny(text, noticeSupportPatterns) || hasNoticeControl(element);
   };
 
   const createNoticeDetector = () => {
-    const resetControlCache = new WeakMap();
+    const noticeControlCache = new WeakMap();
     const textCache = new WeakMap();
     return (element) => {
       if (!(element instanceof Element)) return false;
@@ -128,13 +132,13 @@
         textCache.set(element, text);
       }
       if (!matchesAny(text, titlePatterns)) return false;
-      if (matchesAny(text, resetSupportPatterns)) return true;
-      let hasReset = resetControlCache.get(element);
-      if (hasReset === undefined) {
-        hasReset = hasResetControl(element);
-        resetControlCache.set(element, hasReset);
+      if (matchesAny(text, noticeSupportPatterns)) return true;
+      let hasControl = noticeControlCache.get(element);
+      if (hasControl === undefined) {
+        hasControl = hasNoticeControl(element);
+        noticeControlCache.set(element, hasControl);
       }
-      return hasReset;
+      return hasControl;
     };
   };
 
@@ -156,7 +160,7 @@
 
   const anchorsWithin = (root, { continuation = null, remaining = null } = {}) => {
     const titleAnchors = [];
-    const resetControls = [];
+    const noticeControls = [];
     const state = continuation || createContinuation(
       root instanceof Element ? root : document.documentElement,
     );
@@ -179,7 +183,7 @@
         if (remaining) remaining.value -= 1;
         visited += 1;
         if (matchesAny(directText(element), titlePatterns)) titleAnchors.push(element);
-        if (isResetControl(element)) resetControls.push(element);
+        if (isNoticeControl(element)) noticeControls.push(element);
       }
       if (remaining?.value <= 0) break;
       if (frame.nextChildIndex < element.children.length) {
@@ -196,7 +200,7 @@
       continuation: {
         segments: state.segments.filter((segment) => segment.length > 0),
       },
-      resetControls,
+      noticeControls,
       titleAnchors,
     };
   };
@@ -223,23 +227,23 @@
     const notice = nearestNotice(start, isNotice);
     if (!notice) return null;
     const {
-      resetControls,
+      noticeControls,
       titleAnchors,
     } = anchorsWithin(notice);
     const nested = innermostNotices(
-      [...titleAnchors, ...resetControls]
+      [...titleAnchors, ...noticeControls]
         .map((anchor) => nearestNotice(anchor, isNotice))
         .filter(Boolean),
     );
     return completeNotice(nested[0] || notice, isNotice);
   };
 
-  // 标题和说明文字组成的子块会单独命中通知规则，真正的重置按钮在兄弟
-  // 容器里。把关闭按钮锚到最近一个带重置控件的祖先，而不是文字块的角落。
+  // 标题和说明可能单独成块，重置或申请额度按钮在兄弟容器里。
+  // 关闭按钮应放在包含这些操作的完整提示框上。
   const completeNotice = (resolved, isNotice) => {
-    if (!resolved || hasResetControl(resolved)) return resolved;
+    if (!resolved || hasNoticeControl(resolved)) return resolved;
     return nearestNotice(resolved.parentElement, (candidate) => (
-      isNotice(candidate) && hasResetControl(candidate)
+      isNotice(candidate) && hasNoticeControl(candidate)
     )) || resolved;
   };
 
@@ -414,12 +418,12 @@
     addStyle();
     const {
       continuation: nextContinuation,
-      resetControls,
+      noticeControls,
       titleAnchors,
     } = anchorsWithin(root, { continuation, remaining });
     const starts = [
       ...titleAnchors,
-      ...resetControls,
+      ...noticeControls,
     ];
     const matches = innermostNotices(
       starts.map((start) => nearestNotice(start, detector)).filter(Boolean),

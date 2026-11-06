@@ -747,6 +747,18 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(usage.getAttribute("aria-label"), /周额度剩余 60%/);
   assert.match(usage.getAttribute("aria-label"), /5 小时额度剩余 85%/);
 
+  const originalResetCredits = accountUsageResult.resetCredits;
+  for (const [hours, expiring] of [[17, true], [19, false]]) {
+    accountUsageResult.resetCredits = {
+      availableCount: 3,
+      nextExpiresAt: Math.floor(Date.now() / 1000) + hours * 3600,
+    };
+    await window.__codeyRefreshAccountUsage();
+    assert.equal(usage.dataset.creditExpiring === "true", expiring);
+    assert.equal(usage.innerHTML.includes("codey-usage-credit-dot"), expiring);
+  }
+  accountUsageResult.resetCredits = originalResetCredits;
+
   accountUsageResult = {
     ...accountUsageResult,
     primary: { ...accountUsageResult.primary, usedPercent: 65 },
@@ -818,7 +830,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   await window.__codeyRefreshAccountUsage();
   const remountedUsage = findById("codey-account-usage");
   assert.ok(remountedUsage);
-  assert.equal(accountUsageCalls, 6);
+  assert.equal(accountUsageCalls, 8);
   assert.equal(appServerUsageCalls, 1);
   assert.equal(remountedUsage.parentElement, sidebarFooterHost);
   assert.equal(remountedUsage.nextElementSibling, nativeProfileFooter);
