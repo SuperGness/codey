@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 12;
+  const VERSION = 14;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -145,22 +145,22 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 62%, transparent); --cs-soft: color-mix(in srgb, var(--cs-text) 84%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 9%, transparent); --cs-line-strong: color-mix(in srgb, var(--cs-text) 15%, transparent); --cs-fill: color-mix(in srgb, var(--cs-text) 4.5%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 88%, var(--cs-text) 4%); --cs-live: light-dark(#248a3d, #30d158); --cs-accent: light-dark(#007aff, #0a84ff); --cs-cyan: light-dark(#0891b2, #22d3ee); --cs-violet: light-dark(#7c3aed, #a78bfa); --cs-amber: light-dark(#c46a00, #ff9f0a); --cs-seg-cached: color-mix(in srgb, var(--cs-text) 26%, transparent); --cs-seg-input: var(--cs-accent); --cs-seg-output: var(--cs-violet); --cs-seg-write: var(--cs-amber); --cs-seg-model: var(--cs-accent); --cs-seg-tool: var(--cs-cyan); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 6px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
+      ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 58%, transparent); --cs-soft: color-mix(in srgb, var(--cs-text) 84%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 9%, transparent); --cs-line-strong: color-mix(in srgb, var(--cs-text) 14%, transparent); --cs-fill: color-mix(in srgb, var(--cs-text) 5%, transparent); --cs-platter: light-dark(color-mix(in srgb, var(--cs-text) 4.2%, #ffffff80), color-mix(in srgb, var(--cs-text) 5.5%, #ffffff05)); --cs-shine: light-dark(#ffffffb3, #ffffff1f); --cs-surface: light-dark(color-mix(in srgb, var(--bg-primary, Canvas) 82%, #ffffff), color-mix(in srgb, var(--bg-primary, Canvas) 80%, #242428)); --cs-live: light-dark(#248a3d, #30d158); --cs-accent: light-dark(#007aff, #0a84ff); --cs-cyan: light-dark(#0088a3, #32ade6); --cs-violet: light-dark(#8944ab, #bf5af2); --cs-amber: light-dark(#c46a00, #ff9f0a); --cs-seg-cached: color-mix(in srgb, var(--cs-text) 24%, transparent); --cs-seg-input: var(--cs-accent); --cs-seg-output: var(--cs-violet); --cs-seg-write: var(--cs-amber); --cs-seg-model: var(--cs-accent); --cs-seg-tool: var(--cs-cyan); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 6px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
       ${styleScope} *, ${styleScope} *::before, ${styleScope} *::after { box-sizing: border-box; }
       ${styleScope}[hidden], ${styleScope} [hidden] { display: none !important; }
-      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px; width: fit-content; max-width: 100%; margin: 0 auto; padding: 2px; border-radius: 999px; background: var(--cs-fill); box-shadow: inset 0 0 0 .5px var(--cs-line); }
-      ${styleScope} .codey-cs-divider { width: 1px; height: 11px; margin: 0 1px; background: var(--cs-line-strong); opacity: .6; }
+      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px; width: fit-content; max-width: 100%; margin: 0 auto; padding: 2px; border-radius: 999px; background: var(--cs-fill); box-shadow: inset 0 0 0 .5px var(--cs-line), inset 0 .5px 0 var(--cs-shine); }
+      ${styleScope} .codey-cs-divider { width: .5px; height: 11px; margin: 0 1px; background: var(--cs-line-strong); }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
       ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 11px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; transition: background-color .18s cubic-bezier(.32, .72, 0, 1), color .18s cubic-bezier(.32, .72, 0, 1), box-shadow .18s cubic-bezier(.32, .72, 0, 1), opacity .2s ease; }
-      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: color-mix(in srgb, var(--bg-primary, Canvas) 90%, var(--cs-text) 6%); color: var(--cs-text); box-shadow: 0 1px 3px #0000001f, inset 0 .5px 0 color-mix(in srgb, #fff 18%, transparent); }
-      #${barId}[data-running="true"] .codey-cs-activity-summary { background: color-mix(in srgb, var(--cs-live) 8%, transparent); color: var(--cs-soft); }
+      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: color-mix(in srgb, var(--bg-primary, Canvas) 88%, var(--cs-text) 6%); color: var(--cs-text); box-shadow: 0 1px 3px #0000001f, inset 0 .5px 0 var(--cs-shine); }
+      #${barId}[data-running="true"] .codey-cs-activity-summary { background: color-mix(in srgb, var(--cs-live) 9%, transparent); color: var(--cs-soft); }
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-accent); outline-offset: 2px; }
       ${styleScope} .codey-cs-icon { display: inline-block; width: 13.5px; height: 13.5px; flex: 0 0 13.5px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; transition: color .18s ease; }
       ${styleScope} .codey-cs-activity-summary:is(:hover, [aria-expanded="true"]) .codey-cs-icon { color: var(--cs-accent); }
       ${styleScope} .codey-cs-tokens-summary:is(:hover, [aria-expanded="true"]) .codey-cs-icon { color: var(--cs-violet); }
       #${barId}[data-running="true"] .codey-cs-activity-summary .codey-cs-icon { color: var(--cs-live); }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
-      ${styleScope} .codey-cs-sep { opacity: .4; }
+      ${styleScope} .codey-cs-sep { opacity: .38; }
       ${styleScope} .codey-cs-speed, ${styleScope} .codey-cs-total { color: var(--cs-text); font-weight: 600; letter-spacing: -.01em; }
       ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4.5px; }
       ${styleScope} .codey-cs-cache-rate { color: var(--cs-soft); font-weight: 560; }
@@ -171,50 +171,51 @@
       #${barId}[data-state="stale"] .codey-cs-summary { opacity: .55; }
       @keyframes codey-cs-pulse { from { transform: scale(1); opacity: .6; } to { transform: scale(2.8); opacity: 0; } }
       @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-live::after { animation: none; } ${styleScope} .codey-cs-summary, ${styleScope} .codey-cs-icon { transition: none; } }
-      ${styleScope} .codey-cs-details { --cs-badge-tint: var(--cs-accent); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(364px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 14px 15px 13px; color: var(--cs-text); background: var(--cs-surface); backdrop-filter: saturate(180%) blur(28px); -webkit-backdrop-filter: saturate(180%) blur(28px); border: 1px solid var(--cs-line-strong); border-radius: 18px; box-shadow: 0 14px 40px -12px #0000004d, 0 2px 8px #00000014, inset 0 .5px 0 color-mix(in srgb, #fff 18%, transparent); user-select: text; }
-      ${styleScope} .codey-cs-tokens-details { --cs-badge-tint: var(--cs-violet); }
-      ${styleScope} .codey-cs-activity-details[data-running="true"] { --cs-badge-tint: var(--cs-live); }
-      ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
-      ${styleScope} .codey-cs-badge { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border-radius: 9px; background: color-mix(in srgb, var(--cs-badge-tint) 12%, transparent); color: var(--cs-badge-tint); }
-      ${styleScope} .codey-cs-titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
-      ${styleScope} .codey-cs-titles strong { font-size: 13px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
+      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(384px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 13px; color: var(--cs-text); background: var(--cs-surface); backdrop-filter: saturate(190%) blur(32px); -webkit-backdrop-filter: saturate(190%) blur(32px); border: .5px solid var(--cs-line-strong); border-radius: 20px; box-shadow: 0 18px 44px -12px #0000004d, 0 3px 10px #00000014, inset 0 .5px 0 var(--cs-shine); user-select: text; }
+      ${styleScope} .codey-cs-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 1px 3px 10px; }
+      ${styleScope} .codey-cs-titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; line-height: 1.25; }
+      ${styleScope} .codey-cs-titles strong { font-size: 13.5px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
       ${styleScope} .codey-cs-subtitle { color: var(--cs-muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       ${styleScope} .codey-cs-heading-meta { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 5px; }
-      ${styleScope} .codey-cs-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 1px 8px; border-radius: 999px; background: var(--cs-fill); color: var(--cs-soft); font-size: 11px; font-weight: 560; white-space: nowrap; }
+      ${styleScope} .codey-cs-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 1px 8.5px; border-radius: 999px; background: var(--cs-platter); box-shadow: inset 0 0 0 .5px var(--cs-line), inset 0 .5px 0 var(--cs-shine); color: var(--cs-soft); font-size: 11px; font-weight: 560; white-space: nowrap; }
       ${styleScope} .codey-cs-coverage-pill { color: var(--cs-muted); font-weight: 500; }
       ${styleScope} .codey-cs-coverage-pill[data-tone="warn"] { background: color-mix(in srgb, var(--cs-amber) 14%, transparent); color: var(--cs-amber); }
       ${styleScope} .codey-cs-heading-stat { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; line-height: 1.2; text-align: right; }
       ${styleScope} .codey-cs-heading-caption { color: var(--cs-muted); font-size: 10px; font-weight: 500; white-space: nowrap; }
       ${styleScope} .codey-cs-heading-total { font-size: 13.5px; font-weight: 650; color: var(--cs-text); letter-spacing: -.01em; text-align: right; white-space: nowrap; }
       ${styleScope} .codey-cs-pill.codey-cs-heading-total { font-size: 11px; font-weight: 600; color: var(--cs-soft); }
-      ${styleScope} .codey-cs-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; row-gap: 0; }
-      ${styleScope} dl { display: contents; margin: 0; }
+      ${styleScope} .codey-cs-body { display: flex; flex-direction: column; gap: 8px; }
+      ${styleScope} dl { margin: 0; }
       ${styleScope} dt { color: var(--cs-muted); }
       ${styleScope} dd { margin: 0; color: var(--cs-soft); overflow-wrap: anywhere; }
-      ${styleScope} .codey-cs-detail-row[data-tier="primary"] { display: flex; flex-direction: column; justify-content: space-between; gap: 4px; margin-bottom: 10px; padding: 10px 12px; border-radius: 12px; background: var(--cs-fill); }
-      ${styleScope} .codey-cs-detail-row[data-key="speed"] { background: color-mix(in srgb, var(--cs-badge-tint) 8%, var(--cs-fill)); }
-      ${styleScope} .codey-cs-detail-row[data-tier="primary"] dt { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 500; line-height: 1.3; }
-      ${styleScope} .codey-cs-detail-row[data-key="outputTokens"] dt::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--cs-seg-output); }
-      ${styleScope} .codey-cs-detail-row[data-tier="primary"] dd { font-size: 15.5px; font-weight: 650; color: var(--cs-text); line-height: 1.25; letter-spacing: -.02em; }
-      ${styleScope} .codey-cs-composition { grid-column: 1 / -1; grid-row: 2; display: flex; gap: 2.5px; height: 6px; margin: 0 0 7px; border-radius: 999px; overflow: hidden; background: var(--cs-fill); }
-      ${styleScope} .codey-cs-seg { flex: 0 1 0; min-width: 4px; border-radius: 999px; background: var(--cs-dot); }
+      ${styleScope} .codey-cs-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 13px; background: var(--cs-platter); box-shadow: inset 0 0 0 .5px var(--cs-line), inset 0 .5px 0 var(--cs-shine); overflow: hidden; }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] { display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; padding: 10px 12px; }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] + .codey-cs-detail-row[data-tier="primary"] { border-left: .5px solid var(--cs-line); }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] dt { display: inline-flex; align-items: center; gap: 5.5px; font-size: 11px; font-weight: 500; line-height: 1.3; white-space: nowrap; }
+      ${styleScope} .codey-cs-detail-row:is([data-key="inputTokens"], [data-key="outputTokens"]) dt::before { content: ""; display: inline-block; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--cs-dot); }
+      ${styleScope} .codey-cs-detail-row[data-tier="primary"] dd { font-size: 14px; font-weight: 650; color: var(--cs-text); line-height: 1.3; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      ${styleScope} .codey-cs-group { display: flex; flex-direction: column; padding: 10px 12px 4px; border-radius: 13px; background: var(--cs-platter); box-shadow: inset 0 0 0 .5px var(--cs-line), inset 0 .5px 0 var(--cs-shine); }
+      ${styleScope} .codey-cs-composition { display: flex; gap: 1.5px; height: 6px; margin: 0 0 5px; border-radius: 999px; overflow: hidden; background: var(--cs-fill); }
+      ${styleScope} .codey-cs-seg { flex: 0 1 0; min-width: 3px; background: var(--cs-dot); }
       ${styleScope} [data-key="modelDurationMs"] { --cs-dot: var(--cs-seg-model); }
       ${styleScope} [data-key="toolDurationMs"] { --cs-dot: var(--cs-seg-tool); }
+      ${styleScope} [data-key="inputTokens"] { --cs-dot: var(--cs-seg-input); }
       ${styleScope} [data-key="cachedInputTokens"] { --cs-dot: var(--cs-seg-cached); }
       ${styleScope} [data-key="uncachedInputTokens"] { --cs-dot: var(--cs-seg-input); }
       ${styleScope} [data-key="outputTokens"] { --cs-dot: var(--cs-seg-output); }
       ${styleScope} [data-key="cacheWriteInputTokens"] { --cs-dot: var(--cs-seg-write); }
       ${styleScope} [data-key="cacheRate"] { --cs-dot: var(--cs-cyan); }
-      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 5.5px 2px; border-top: 1px solid color-mix(in srgb, var(--cs-line) 70%, transparent); }
-      ${styleScope} .codey-cs-detail-row:is([data-key="modelDurationMs"], [data-key="cachedInputTokens"]) { border-top: 0; padding-top: 3px; }
-      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dt { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--cs-soft); font-size: 12px; font-weight: 500; line-height: 1.4; }
+      ${styleScope} .codey-cs-breakdown { display: flex; flex-direction: column; }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 0; }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] + .codey-cs-detail-row[data-tier="breakdown"]::before { content: ""; position: absolute; top: 0; left: 13.5px; right: 0; height: .5px; background: var(--cs-line); }
+      ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dt { display: inline-flex; align-items: center; gap: 6.5px; min-width: 0; color: var(--cs-soft); font-size: 12px; font-weight: 500; line-height: 1.35; }
       ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dt::before { content: ""; display: inline-block; width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--cs-dot, transparent); }
       ${styleScope} .codey-cs-detail-row[data-tier="breakdown"] dd { color: var(--cs-text); font-size: 12.5px; font-weight: 600; text-align: right; white-space: nowrap; flex: none; }
       ${styleScope} .codey-cs-detail-row[data-key="cacheRate"] dd { color: var(--cs-cyan); font-weight: 650; }
-      ${styleScope} .codey-cs-note { margin: 10px 0 0; padding-top: 9px; border-top: 1px solid var(--cs-line); color: var(--cs-muted); font-size: 10.5px; line-height: 1.55; }
+      ${styleScope} .codey-cs-note { margin: 8px 3px 0; color: var(--cs-muted); font-size: 10.5px; line-height: 1.5; }
       ${styleScope} .codey-cs-note:empty { display: none; }
-      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-divider { display: none; } ${styleScope} .codey-cs-summary { padding-inline: 8px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 12px; } }
-      @media (max-width: 360px) { ${styleScope} .codey-cs-body { grid-template-columns: 1fr; } }
+      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-divider { display: none; } ${styleScope} .codey-cs-summary { padding-inline: 8px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 11px; } }
+      @media (max-width: 360px) { ${styleScope} .codey-cs-kpis { grid-template-columns: 1fr; } ${styleScope} .codey-cs-detail-row[data-tier="primary"] + .codey-cs-detail-row[data-tier="primary"] { border-left: 0; border-top: .5px solid var(--cs-line); } }
     `;
     document.documentElement.appendChild(style);
   };
@@ -291,16 +292,17 @@
         if (typeof panel.showPopover === "function") panel.setAttribute("popover", "manual");
         panel.setAttribute("aria-label", title);
         const heading = make("div", "codey-cs-heading", "", panel);
-        icon(kind, make("span", "codey-cs-badge", "", heading));
         const titles = make("div", "codey-cs-titles", "", heading);
         make("strong", "", title, titles);
         refs.subtitles[kind] = make("span", "codey-cs-subtitle", "", titles);
         const body = make("div", "codey-cs-body", "", panel);
+        const kpis = make("dl", "codey-cs-kpis", "", body);
+        const group = make("div", "codey-cs-group", "", body);
         if (kind === "activity") {
           const meta = make("div", "codey-cs-heading-meta", "", heading);
           refs.turnCoverage = make("span", "codey-cs-pill codey-cs-coverage-pill", "统计范围未知", meta);
           refs.headingTotal = make("span", "codey-cs-pill codey-cs-heading-total", "—", meta);
-          refs.activityComposition = make("div", "codey-cs-composition codey-cs-activity-composition", "", body);
+          refs.activityComposition = make("div", "codey-cs-composition codey-cs-activity-composition", "", group);
           refs.activityComposition.setAttribute("aria-hidden", "true");
           refs.activityComposition.hidden = true;
           for (const key of ["modelDurationMs", "toolDurationMs"]) {
@@ -313,7 +315,7 @@
           make("span", "codey-cs-heading-caption", "累计总量", stat);
           refs.fields.totalTokens = make("span", "codey-cs-heading-total", "—", stat);
           refs.fields.totalTokens.setAttribute("data-field", "totalTokens");
-          refs.composition = make("div", "codey-cs-composition", "", body);
+          refs.composition = make("div", "codey-cs-composition", "", group);
           refs.composition.setAttribute("aria-hidden", "true");
           refs.composition.hidden = true;
           for (const key of compositionKeys) {
@@ -321,11 +323,12 @@
             refs.segments[key].setAttribute("data-key", key);
           }
         }
-        const list = make("dl", "", "", body);
+        const list = make("dl", "codey-cs-breakdown", "", group);
         for (const [index, [key, label]] of fields.entries()) {
-          const row = make("div", "codey-cs-detail-row", "", list);
+          const primary = index < 2;
+          const row = make("div", "codey-cs-detail-row", "", primary ? kpis : list);
           row.setAttribute("data-key", key);
-          row.setAttribute("data-tier", index < 2 ? "primary" : "breakdown");
+          row.setAttribute("data-tier", primary ? "primary" : "breakdown");
           make("dt", "", label, row);
           refs.rows[key] = row;
           refs.fields[key] = make("dd", "", "—", row);
