@@ -193,5 +193,10 @@ test("rspack draft defaults patch the split factory and every settings hook chun
 test("unrelated rspack chunks are skipped by the patch anchors", async () => {
   const { logs, patch } = await installPatch();
   assert.equal(patch('export const __rspack_esm_id=1;export const __webpack_modules__={a(e,t){t.A="icon"}};'), null);
+  assert.equal(
+    patch('(0,u.useEffect)(()=>{l||t0.O1.dispatchMessage("electron-avatar-overlay-restore-ready",{onDemandEnabled:k,shouldPrewarmAvatarOverlay:t&&eP})},[k,t,l,eP]);'),
+    null,
+    "pet-only anchors stay inactive when pet slimming is disabled",
+  );
   assert.deepEqual(logs, []);
 });

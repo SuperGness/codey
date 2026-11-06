@@ -71,6 +71,14 @@ const UNCHANGED_STORES_PER_PRUNE: usize = 256;
 /// 页面补丁里前置字面量表的起止标记，后端据此预筛资源。
 const PATCH_ANCHORS_START: &str = "/*codey-renderer-patch-anchors*/";
 const PATCH_ANCHORS_END: &str = "/*end-codey-renderer-patch-anchors*/";
+/// 仅在开启宠物精简时才生效的前置字面量；精简关闭时不加入扫描与预筛。
+const PET_ONLY_PATCH_ANCHORS: [&str; 5] = [
+    "codex-avatar",
+    "codex-pet-assets",
+    "avatar-mascot-button",
+    "use-avatar-options",
+    "shouldPrewarmAvatarOverlay:",
+];
 const CACHE_DIR_NAME: &str = "renderer-patch-cache";
 
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -178,6 +186,12 @@ struct PageEntry {
 
 type PendingAssetScan = tokio::task::JoinHandle<Result<crate::renderer_asset_scan::ScanOutcome>>;
 
+struct CachedSelectedPet {
+    home: PathBuf,
+    stamp: crate::pet_slim_patch::GlobalStateStamp,
+    pet_id: String,
+}
+
 struct ServiceContext {
     install_script: Arc<str>,
     /// 当前拦截规则。离线扫描完成后换成精确地址，并下发给已挂上的页面。
@@ -185,6 +199,8 @@ struct ServiceContext {
     disable_pet: bool,
     /// Codex 数据目录；读取当前选中的宠物。
     codex_home: Option<PathBuf>,
+    /// 按全局状态文件元数据缓存的选中宠物 id，避免每次拦截精灵图重复读盘解析。
+    selected_pet: tokio::sync::Mutex<Option<CachedSelectedPet>>,
     /// 与连接调试端点并行进行的资源扫描，服务开始时取走。
     pending_scan: Mutex<Option<PendingAssetScan>>,
     /// 页面补丁的前置字面量；资源一个都不含时不必送进页面求值。
@@ -204,8 +220,9 @@ impl ServiceContext {
             patterns: Mutex::new(fetch_patterns(disable_pet, None)),
             disable_pet,
             codex_home: None,
+            selected_pet: tokio::sync::Mutex::new(None),
             pending_scan: Mutex::new(None),
-            anchors: renderer_patch_anchors(RENDERER_ASSET_PATCH_SCRIPT)
+            anchors: renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, disable_pet)
                 .expect("renderer_asset_patch.js 内置前置字面量表无效"),
             pages: Mutex::new(HashMap::new()),
             permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_PATCHES),
@@ -320,6 +337,14 @@ fn renderer_patch_anchors(script: &str) -> Result<Vec<String>> {
     Ok(anchors)
 }
 
+fn renderer_patch_anchors_for_mode(script: &str, disable_pet: bool) -> Result<Vec<String>> {
+    let mut anchors = renderer_patch_anchors(script)?;
+    if !disable_pet {
+        anchors.retain(|anchor| !PET_ONLY_PATCH_ANCHORS.contains(&anchor.as_str()));
+    }
+    Ok(anchors)
+}
+
 fn default_cache_dir() -> PathBuf {
     codey_runtime_core::paths::default_app_state_dir().join(CACHE_DIR_NAME)
 }
@@ -401,16 +426,43 @@ async fn selected_pet_id(context: &ServiceContext) -> String {
     let Some(home) = context.codex_home.clone() else {
         return DEFAULT_AVATAR_ID.to_string();
     };
-    match tokio::task::spawn_blocking(move || crate::pet_slim_patch::selected_avatar_id(&home))
-        .await
+    let mut cached = context.selected_pet.lock().await;
+    let previous = cached.take();
+    match tokio::task::spawn_blocking(move || -> (Option<CachedSelectedPet>, String) {
+        let stamp = crate::pet_slim_patch::global_state_stamp(&home);
+        if let Some(entry) = previous
+            && entry.home == home
+            && entry.stamp == stamp
+        {
+            let pet_id = entry.pet_id.clone();
+            return (Some(entry), pet_id);
+        }
+        match crate::pet_slim_patch::selected_avatar_id(&home) {
+            Ok(selected) => {
+                let pet_id = selected.unwrap_or_else(|| DEFAULT_AVATAR_ID.to_string());
+                (
+                    Some(CachedSelectedPet {
+                        home,
+                        stamp,
+                        pet_id: pet_id.clone(),
+                    }),
+                    pet_id,
+                )
+            }
+            Err(error) => {
+                log_service_event(
+                    "renderer_asset_patch.selected_pet_unreadable",
+                    json!({ "message": format!("{error:#}") }),
+                );
+                (None, DEFAULT_AVATAR_ID.to_string())
+            }
+        }
+    })
+    .await
     {
-        Ok(Ok(selected)) => selected.unwrap_or_else(|| DEFAULT_AVATAR_ID.to_string()),
-        Ok(Err(error)) => {
-            log_service_event(
-                "renderer_asset_patch.selected_pet_unreadable",
-                json!({ "message": format!("{error:#}") }),
-            );
-            DEFAULT_AVATAR_ID.to_string()
+        Ok((next_cache, pet_id)) => {
+            *cached = next_cache;
+            pet_id
         }
         Err(_) => DEFAULT_AVATAR_ID.to_string(),
     }
@@ -1850,6 +1902,19 @@ mod tests {
                 anchors.iter().any(|anchor| anchor == required),
                 "{required}"
             );
+        }
+        let slim_anchors =
+            renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, true).unwrap();
+        let full_pet_anchors =
+            renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, false).unwrap();
+        assert_eq!(slim_anchors.len(), anchors.len());
+        assert_eq!(
+            full_pet_anchors.len() + PET_ONLY_PATCH_ANCHORS.len(),
+            slim_anchors.len()
+        );
+        for pet_anchor in PET_ONLY_PATCH_ANCHORS {
+            assert!(slim_anchors.iter().any(|anchor| anchor == pet_anchor));
+            assert!(!full_pet_anchors.iter().any(|anchor| anchor == pet_anchor));
         }
         assert!(renderer_patch_anchors("const a=[];").is_err());
         assert!(

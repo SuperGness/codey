@@ -63,24 +63,40 @@
     "i",
   );
   const controlSelector = "button, [role=button], [role=menuitem], [role=option], [role=tab]";
+  const controlVerdictCache = typeof WeakMap === "function" ? new WeakMap() : null;
 
   const isPetControlId = (value) =>
     petControlIds.has(value)
       || petControlIdPrefixes.some((prefix) => value.startsWith(prefix));
+
+  const reactPayloadSnapshot = (control) => {
+    const internals = window.__codeySharedRuntime?.reactInternals?.(control);
+    if (!Array.isArray(internals) || internals.length === 0) return [];
+    return internals.map((internal) => internal?.memoizedProps ?? internal);
+  };
 
   const isPetControl = (control) => {
     if (!(control instanceof HTMLElement)) return false;
     const descriptor = window.__codeyMutationDispatcher.controlDescriptor(control);
     if (fallbackLabelPattern.test(descriptor)) return true;
 
-    // Deliberately not memoised. React reuses host elements and swaps both
-    // __reactProps$ and __reactFiber$ independently, so the walk runs on every
-    // live control. The lifecycle's mutation filtering and scan budgets keep
-    // streamed turns away from this path.
-    return window.__codeySharedRuntime.reactInternalGraphIncludes(
+    const payloads = reactPayloadSnapshot(control);
+    if (payloads.length === 0) return false;
+    const cached = controlVerdictCache?.get(control);
+    if (
+      cached
+      && cached.payloads.length === payloads.length
+      && cached.payloads.every((payload, index) => payload === payloads[index])
+    ) {
+      return cached.verdict;
+    }
+
+    const verdict = window.__codeySharedRuntime.reactInternalGraphIncludes(
       control,
       isPetControlId,
     );
+    controlVerdictCache?.set(control, { payloads, verdict });
+    return verdict;
   };
 
   const createElementWalker = (root) => {

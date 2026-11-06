@@ -393,8 +393,18 @@
     "electron-app-state-snapshot-request",
     "activeInteractions=new Map"
   ]/*end-codey-renderer-patch-anchors*/;
+  const petOnlyPatchAnchors = new Set([
+    "codex-avatar",
+    "codex-pet-assets",
+    "avatar-mascot-button",
+    "use-avatar-options",
+    "shouldPrewarmAvatarOverlay:",
+  ]);
+  const activeRendererPatchAnchors = disablePet
+    ? rendererPatchAnchors
+    : rendererPatchAnchors.filter((anchor) => !petOnlyPatchAnchors.has(anchor));
   const patchCodexRendererAsset = (source) => {
-    if (!rendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
+    if (!activeRendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
     let patched = source;
     if (source.includes("isNewThreadDraft:")
       && source.includes("modelSettingsPersistAsDefault:")

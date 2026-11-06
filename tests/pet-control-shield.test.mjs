@@ -433,6 +433,68 @@ test("pet control verdicts are re-evaluated when React repurposes the element", 
   assert.equal(evaluate(), false, "verdicts must also drop back when React swaps props again");
 });
 
+test("unchanged React props reuse the cached verdict without walking the prop graph again", () => {
+  const runtime = loadShield(true);
+  let nestedPropReads = 0;
+  const createProps = (id) => {
+    const nested = {};
+    Object.defineProperty(nested, "id", {
+      enumerable: true,
+      get() {
+        nestedPropReads += 1;
+        return id;
+      },
+    });
+    return { children: { props: nested } };
+  };
+  let currentProps = createProps("codex.command.somethingElse");
+  let currentFiber = { memoizedProps: currentProps };
+  const control = new FakeElement("打开设置");
+  Object.defineProperty(control, "__reactProps$test", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return currentProps;
+    },
+  });
+  Object.defineProperty(control, "__reactFiber$test", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return currentFiber;
+    },
+  });
+
+  const evaluate = () => runtime.window.__codeyPetControlShield.isPetControl(control);
+  assert.equal(evaluate(), false);
+  const readsAfterFirstEvaluation = nestedPropReads;
+  assert.ok(readsAfterFirstEvaluation > 0);
+
+  assert.equal(evaluate(), false);
+  runtime.listeners.get("pointerdown")({
+    target: control,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    stopImmediatePropagation: () => {},
+  });
+  runtime.listeners.get("click")({
+    target: control,
+    preventDefault: () => {},
+    stopPropagation: () => {},
+    stopImmediatePropagation: () => {},
+  });
+  assert.equal(
+    nestedPropReads,
+    readsAfterFirstEvaluation,
+    "repeated evaluations with identical React prop references must hit the cache",
+  );
+
+  currentProps = createProps("codex.command.openPetOverlay");
+  currentFiber = { memoizedProps: currentProps };
+  assert.equal(evaluate(), true);
+  assert.ok(nestedPropReads > readsAfterFirstEvaluation);
+});
+
 test("pet control text changes are picked up without a React update", () => {
   const runtime = loadShield(true);
   const control = new FakeElement("打开设置");
