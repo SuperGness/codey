@@ -261,6 +261,7 @@ fn aggregate_output_speed_uses_total_tokens_over_total_generation_time() {
     let mut slow = sample_entry("slow");
     slow.request_id = "slow".into();
     slow.trace_id = "slow".into();
+    slow.timestamp_unix_ms = DAY_MS + 2 * (DAY_MS / 24);
     slow.total_duration_ms = 5_000;
     slow.downstream_first_content_ms = Some(1_000);
     slow.router_pre_upstream_ms = Some(200);
@@ -273,14 +274,17 @@ fn aggregate_output_speed_uses_total_tokens_over_total_generation_time() {
         RouteRequestLogBackend::Sqlite,
         RouteRequestLogQuery {
             from_unix_ms: Some(0),
-            to_unix_ms: Some(10_000),
+            to_unix_ms: Some(DAY_MS + 3 * (DAY_MS / 24)),
             ..Default::default()
         },
     )
     .unwrap();
-    // fast 为 1 秒 100 token，slow 为 4 秒 500 token；汇总按总量相除，
-    // 不像逐条求平均那样让短请求等权。
+    // fast 为 1 秒 100 token，slow 为 4 秒 500 token，且落在不同时间桶。
+    // 汇总仍按合格输出总量 600 除以总生成时长 5 秒，分别计算则为 100 和 125。
     assert_eq!(stats.summary.avg_output_tokens_per_second, Some(120.0));
+    assert_eq!(stats.trend.len(), 2);
+    assert_eq!(stats.trend[0].avg_output_tokens_per_second, Some(100.0));
+    assert_eq!(stats.trend[1].avg_output_tokens_per_second, Some(125.0));
 }
 
 #[test]
@@ -398,6 +402,149 @@ fn sqlite_daily_trend_preserves_utc_days_filters_and_unknown_usage() {
     )
     .unwrap();
     assert!(absent.daily_trend.is_empty());
+}
+
+// 【自动化测试】本地历史 SQLite 对负数原始总和转换为 0，NULL 保持 None。
+// 复用时间桶时须保持该口径、AVG 有效样本计数和官方账号筛选。
+#[test]
+fn statistics_bucket_reuse_preserves_signed_tokens_null_and_valid_samples() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(SQLITE_FILE_NAME);
+    let mut sink = SqliteSink::open(&path, 30).unwrap();
+    let from = DAY_MS;
+    let to = 2 * DAY_MS;
+    let entries = [
+        (
+            "negative",
+            1,
+            -40_i64,
+            Some(400),
+            Some((-1_i64).to_string()),
+        ),
+        ("zero", 1, 0, Some(400), Some((-1_i64).to_string())),
+        ("positive", 1, 10, Some(800), Some((-1_i64).to_string())),
+        ("null", 1, 0, Some(800), None),
+        ("null-average", 1, 0, Some(800), Some("2".into())),
+        ("evening-a", 1, 20, Some(1_600), Some("3".into())),
+        ("evening-b", 1, -20, Some(1_600), Some("3".into())),
+    ]
+    .map(|(id, day_offset, total_tokens, duration, interval)| {
+        let mut entry = sample_entry(id);
+        entry.timestamp_unix_ms = DAY_MS * day_offset
+            + match id {
+                "evening-a" => 12 * (DAY_MS / 24),
+                "evening-b" => 13 * (DAY_MS / 24),
+                _ => 0,
+            };
+        entry.token_usage.total_tokens = if id == "null" {
+            None
+        } else {
+            Some(total_tokens as u64)
+        };
+        entry.total_duration_ms = duration.unwrap();
+        if let Some(interval) = interval {
+            entry.upstream_header_ms = interval.parse().ok();
+        }
+        queued(entry)
+    });
+    sink.write_batch(&entries).unwrap();
+    sink.finish().unwrap();
+    drop(sink);
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE route_request_logs SET total_tokens=-40 WHERE request_id='negative';
+             UPDATE route_request_logs SET total_tokens=NULL WHERE request_id='null';
+             UPDATE route_request_logs SET total_tokens=-20 WHERE request_id='evening-b';
+             UPDATE route_request_logs SET upstream_header_ms=-1 WHERE request_id='negative';
+             UPDATE route_request_logs SET upstream_header_ms=-1 WHERE request_id='zero';
+             UPDATE route_request_logs SET upstream_header_ms=2 WHERE request_id='positive';
+             UPDATE route_request_logs SET upstream_header_ms=NULL WHERE request_id='null';
+             UPDATE route_request_logs SET upstream_header_ms=-1 WHERE request_id='null-average';
+             UPDATE route_request_logs SET upstream_header_ms=3 WHERE request_id='evening-a';
+             UPDATE route_request_logs SET upstream_header_ms=3 WHERE request_id='evening-b';",
+        )
+        .unwrap();
+    drop(connection);
+
+    let stats = query_route_request_log_stats(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery {
+            from_unix_ms: Some(from),
+            to_unix_ms: Some(to),
+            include_daily_trend: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stats.summary.total, 7);
+    assert_eq!(stats.summary.total_tokens_sum, Some(0));
+    assert_eq!(stats.summary.total_tokens_known_count, 6);
+    // 负值和 NULL 不计入样本：有效值 2、3、3 分属三个时间桶，合并后为 8 / 3。
+    assert_eq!(stats.summary.avg_upstream_header, Some(8.0 / 3.0));
+    assert_eq!(stats.daily_trend.len(), 1);
+    assert_eq!(stats.daily_trend[0].total, 7);
+    assert_eq!(stats.daily_trend[0].total_tokens_sum, Some(0));
+    assert_eq!(stats.daily_trend[0].total_tokens_known_count, 6);
+    assert_eq!(stats.trend.len(), 3);
+    let start_trend = stats
+        .trend
+        .iter()
+        .find(|trend| trend.timestamp_unix_ms == DAY_MS)
+        .unwrap_or_else(|| panic!("missing start bucket: {stats:?}"));
+    let evening_trend = stats
+        .trend
+        .iter()
+        .find(|trend| trend.timestamp_unix_ms == DAY_MS + 13 * (DAY_MS / 24))
+        .unwrap();
+    assert_eq!(start_trend.total_tokens_sum, Some(0));
+    assert_eq!(evening_trend.total_tokens_sum, Some(0));
+    assert_eq!(evening_trend.avg_duration, Some(1_600.0));
+
+    let negative_only = query_route_request_log_stats(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery {
+            request_id: Some("negative".into()),
+            from_unix_ms: Some(from),
+            to_unix_ms: Some(to),
+            include_daily_trend: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(negative_only.summary.total_tokens_sum, Some(0));
+    assert_eq!(negative_only.daily_trend[0].total_tokens_sum, Some(0));
+    assert_eq!(negative_only.trend[0].total_tokens_sum, Some(0));
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE route_request_logs SET official_account_id='account-a'
+             WHERE request_id IN ('negative', 'positive');
+             UPDATE route_request_logs SET official_account_id='account-b'
+             WHERE request_id IN ('zero', 'null', 'null-average', 'evening-a', 'evening-b');",
+        )
+        .unwrap();
+    drop(connection);
+    let filtered = query_route_request_log_stats(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery {
+            from_unix_ms: Some(from),
+            to_unix_ms: Some(to),
+            official_account_id: Some("account-a".into()),
+            include_daily_trend: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(filtered.summary.total, 2);
+    assert_eq!(filtered.summary.total_tokens_sum, Some(0));
+    assert_eq!(filtered.daily_trend.len(), 1);
+    assert_eq!(filtered.daily_trend[0].total, 2);
 }
 
 #[test]

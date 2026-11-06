@@ -95,10 +95,13 @@ impl RouteRequestLogModelAliases {
     }
 }
 
-/// 上游响应阶段每秒输出 Token 数，口径与写入侧的 `output_tokens_per_second` 一致。
+/// 只对计时合法、输出与生成时长都达到下限的请求返回 `$then`，否则为 NULL。
 /// 上游首字节时间以发送上游请求为起点，先加路由前置耗时，再从请求总耗时扣除。
-/// 分步减法及非负校验避免非法历史计时与整数加法溢出，条件不足时返回 NULL。
-const OUTPUT_SPEED_SQL: &str = "CASE
+/// 分步减法及非负校验避免非法历史计时与整数加法溢出。
+macro_rules! qualified_generation_case {
+    ($then:literal) => {
+        concat!(
+            "CASE
         WHEN total_duration_ms >= 0
             AND router_pre_upstream_ms >= 0
             AND upstream_first_byte_ms >= 0
@@ -106,28 +109,43 @@ const OUTPUT_SPEED_SQL: &str = "CASE
             AND upstream_first_byte_ms <= total_duration_ms - router_pre_upstream_ms
             AND output_tokens >= 100
             AND total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms >= 100
-        THEN output_tokens * 1000.0 / (total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms)
-    END";
+        THEN ",
+            $then,
+            " END"
+        )
+    };
+}
+
+/// 上游响应阶段每秒输出 Token 数，口径与写入侧的 `output_tokens_per_second` 一致。
+const OUTPUT_SPEED_SQL: &str = qualified_generation_case!(
+    "output_tokens * 1000.0 / (total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms)"
+);
+const QUALIFIED_OUTPUT_TOKENS_SQL: &str = qualified_generation_case!("output_tokens");
+const QUALIFIED_GENERATION_MS_SQL: &str = qualified_generation_case!(
+    "total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms"
+);
 
 /// 汇总速度与单条速度口径一致，但按合格请求的输出总量除以生成总时长，
 /// 逐条取平均会被短请求带偏。
-const OUTPUT_SPEED_SUM_SQL: &str = "SUM(CASE
-        WHEN total_duration_ms >= 0
-            AND router_pre_upstream_ms >= 0
-            AND upstream_first_byte_ms >= 0
-            AND router_pre_upstream_ms <= total_duration_ms
-            AND upstream_first_byte_ms <= total_duration_ms - router_pre_upstream_ms
-            AND output_tokens >= 100
-            AND total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms >= 100
-        THEN output_tokens END) * 1000.0 / SUM(CASE
-        WHEN total_duration_ms >= 0
-            AND router_pre_upstream_ms >= 0
-            AND upstream_first_byte_ms >= 0
-            AND router_pre_upstream_ms <= total_duration_ms
-            AND upstream_first_byte_ms <= total_duration_ms - router_pre_upstream_ms
-            AND output_tokens >= 100
-            AND total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms >= 100
-        THEN total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms END)";
+const OUTPUT_SPEED_SUM_SQL: &str = concat!(
+    "SUM(",
+    qualified_generation_case!("output_tokens"),
+    ") * 1000.0 / SUM(",
+    qualified_generation_case!(
+        "total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms"
+    ),
+    ")"
+);
+
+const SUMMARY_TIMINGS: [&str; 7] = [
+    "total_duration_ms",
+    "COALESCE(downstream_first_content_ms, ttft_ms)",
+    "router_pre_upstream_ms",
+    "upstream_header_ms",
+    "upstream_first_byte_ms",
+    "downstream_first_content_ms",
+    "queue_delay_ms",
+];
 
 impl Default for RouteRequestLogQuery {
     fn default() -> Self {
@@ -799,6 +817,148 @@ fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLog
     })
 }
 
+fn optional_u64_from_i64(value: Option<i64>) -> Option<u64> {
+    value.map(|value| u64::try_from(value).unwrap_or_default())
+}
+
+/// 每个时间桶同时保留原始总和与有效计数，汇总时由同一批值重建平均值。
+/// token 总和保持 SQLite 返回的有符号值，最终转换成公开字段时沿用
+/// `row_optional_u64` 对负数和 NULL 的历史语义。
+fn statistics_bucket_columns() -> String {
+    let timings = SUMMARY_TIMINGS
+        .map(|column| {
+            let value = format!("CASE WHEN {column} >= 0 THEN {column} END");
+            format!("TOTAL({value}), COUNT({value})")
+        })
+        .join(", ");
+    format!(
+        "COUNT(*),
+        COALESCE(SUM(status = 'succeeded'), 0), COALESCE(SUM(status = 'failed'), 0),
+        COALESCE(SUM(status = 'incomplete'), 0), COALESCE(SUM(status = 'cancelled'), 0),
+        COALESCE(SUM(usage_reported != 0), 0), COUNT(total_tokens), {timings},
+        SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(cached_input_tokens),
+        SUM({QUALIFIED_OUTPUT_TOKENS_SQL}), SUM({QUALIFIED_GENERATION_MS_SQL})"
+    )
+}
+
+#[derive(Default)]
+struct StatisticsAggregate {
+    counts: [u64; 7],
+    timings: [(f64, u64); SUMMARY_TIMINGS.len()],
+    token_sums: [Option<i64>; 6],
+}
+
+impl StatisticsAggregate {
+    /// `statistics_bucket_columns` 的列数；时间桶列紧随其后。
+    const COLUMNS: usize = 7 + 2 * SUMMARY_TIMINGS.len() + 6;
+
+    fn total_tokens_known_count(&self) -> u64 {
+        self.counts[6]
+    }
+
+    fn total_tokens_sum(&self) -> Option<i64> {
+        self.token_sums[2]
+    }
+
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let mut aggregate = Self::default();
+        let mut index = 0;
+        for count in &mut aggregate.counts {
+            *count = row_u64(row, index)?;
+            index += 1;
+        }
+        for (sum, count) in &mut aggregate.timings {
+            *sum = row.get(index)?;
+            *count = row_u64(row, index + 1)?;
+            index += 2;
+        }
+        for sum in &mut aggregate.token_sums {
+            *sum = row.get(index)?;
+            index += 1;
+        }
+        debug_assert_eq!(index, Self::COLUMNS);
+        Ok(aggregate)
+    }
+
+    fn merge(&mut self, other: &Self) -> anyhow::Result<()> {
+        for (count, other_count) in self.counts.iter_mut().zip(other.counts) {
+            *count += other_count;
+        }
+        for ((sum, count), (other_sum, other_count)) in self.timings.iter_mut().zip(other.timings) {
+            *sum += other_sum;
+            *count += other_count;
+        }
+        for (sum, other_sum) in self.token_sums.iter_mut().zip(other.token_sums) {
+            if let Some(other_sum) = other_sum {
+                *sum =
+                    Some(sum.unwrap_or(0).checked_add(other_sum).ok_or_else(|| {
+                        anyhow::anyhow!("请求日志 token 统计值超出 SQLite 整数上限")
+                    })?);
+            }
+        }
+        Ok(())
+    }
+
+    fn summary(&self) -> RouteRequestLogSummary {
+        let [
+            total,
+            succeeded_count,
+            failed_count,
+            incomplete_count,
+            cancelled_count,
+            usage_reported_count,
+            total_tokens_known_count,
+        ] = self.counts;
+        let [
+            avg_duration,
+            avg_ttft,
+            avg_router_pre_upstream,
+            avg_upstream_header,
+            avg_upstream_first_byte,
+            avg_downstream_first_content,
+            avg_queue_delay,
+        ] = self
+            .timings
+            .map(|(sum, count)| (count > 0).then(|| sum / count as f64));
+        let [
+            input_tokens_sum,
+            output_tokens_sum,
+            total_tokens_sum,
+            cached_tokens_sum,
+            speed_tokens,
+            speed_generation,
+        ] = self.token_sums.map(optional_u64_from_i64);
+        let avg_output_tokens_per_second =
+            speed_tokens
+                .zip(speed_generation)
+                .and_then(|(tokens, generation)| {
+                    (generation > 0).then(|| tokens as f64 * 1_000.0 / generation as f64)
+                });
+        RouteRequestLogSummary {
+            total,
+            succeeded_count,
+            failed_count,
+            incomplete_count,
+            cancelled_count,
+            avg_duration,
+            avg_ttft,
+            avg_router_pre_upstream,
+            avg_upstream_header,
+            avg_upstream_first_byte,
+            avg_downstream_first_content,
+            avg_queue_delay,
+            avg_output_tokens_per_second,
+            success_rate: (total > 0).then(|| succeeded_count as f64 * 100.0 / total as f64),
+            input_tokens_sum,
+            output_tokens_sum,
+            total_tokens_sum,
+            cached_tokens_sum,
+            usage_reported_count,
+            total_tokens_known_count,
+        }
+    }
+}
+
 pub(crate) fn query_route_request_log_models(
     root: &Path,
     backend: RouteRequestLogBackend,
@@ -947,11 +1107,65 @@ pub(crate) fn query_route_request_log_stats_with_model_aliases(
     }
     let (where_clause, values) = sqlite_query_filters(&query, optional_columns.official_account);
     let summary_columns = summary_columns();
-    result.summary = transaction.query_row(
-        &format!("SELECT {summary_columns} FROM route_request_logs{where_clause}"),
-        params_from_iter(values.iter()),
-        summary_from_row,
-    )?;
+    let bucket_ms = result.bucket_ms;
+    let daily_from_bucket = query.include_daily_trend && bucket_ms <= DAY_MS;
+    let sql = format!(
+        "SELECT {}, timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket
+        FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket",
+        statistics_bucket_columns(),
+    );
+    let mut totals = StatisticsAggregate::default();
+    let mut daily_tokens_sum: Option<i64> = None;
+    {
+        let mut statement = transaction.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values.iter()))?;
+        while let Some(row) = rows.next()? {
+            let aggregate = StatisticsAggregate::from_row(row)?;
+            let trend = {
+                let summary = aggregate.summary();
+                RouteRequestLogTrend {
+                    timestamp_unix_ms: row_u64(row, StatisticsAggregate::COLUMNS)?,
+                    total: summary.total,
+                    total_tokens_sum: summary.total_tokens_sum,
+                    avg_duration: summary.avg_duration,
+                    avg_ttft: summary.avg_ttft,
+                    avg_output_tokens_per_second: summary.avg_output_tokens_per_second,
+                    avg_downstream_first_content: summary.avg_downstream_first_content,
+                }
+            };
+            totals.merge(&aggregate)?;
+            if daily_from_bucket {
+                let day_timestamp = trend.timestamp_unix_ms / DAY_MS * DAY_MS;
+                if result
+                    .daily_trend
+                    .last()
+                    .is_none_or(|day| day.timestamp_unix_ms != day_timestamp)
+                {
+                    result.daily_trend.push(RouteRequestLogDailyTrend {
+                        timestamp_unix_ms: day_timestamp,
+                        total: 0,
+                        total_tokens_sum: None,
+                        total_tokens_known_count: 0,
+                    });
+                    daily_tokens_sum = None;
+                }
+                let day = result.daily_trend.last_mut().unwrap();
+                day.total += trend.total;
+                day.total_tokens_known_count += aggregate.total_tokens_known_count();
+                if let Some(tokens) = aggregate.total_tokens_sum() {
+                    daily_tokens_sum = Some(
+                        daily_tokens_sum
+                            .unwrap_or(0)
+                            .checked_add(tokens)
+                            .ok_or_else(|| anyhow::anyhow!("每日 token 总数超出统计上限"))?,
+                    );
+                }
+                day.total_tokens_sum = optional_u64_from_i64(daily_tokens_sum);
+            }
+            result.trend.push(trend);
+        }
+    }
+    result.summary = totals.summary();
     if let Some(group_by) = &query.group_by
         && (group_by != "official_account" || optional_columns.official_account)
     {
@@ -987,29 +1201,7 @@ pub(crate) fn query_route_request_log_stats_with_model_aliases(
         result.groups_truncated = result.groups.len() > 50;
         result.groups.truncate(50);
     }
-    // The range and adaptive UTC bucket width produce at most 367 buckets.
-    let bucket_ms = result.bucket_ms;
-    let sql = format!("SELECT timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket,
-        COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
-        AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0 THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
-        {OUTPUT_SPEED_SUM_SQL},
-        AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END)
-        FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket");
-    result.trend = transaction
-        .prepare(&sql)?
-        .query_map(params_from_iter(values.iter()), |row| {
-            Ok(RouteRequestLogTrend {
-                timestamp_unix_ms: row_u64(row, 0)?,
-                total: row_u64(row, 1)?,
-                total_tokens_sum: row_optional_u64(row, 2)?,
-                avg_duration: row.get(3)?,
-                avg_ttft: row.get(4)?,
-                avg_output_tokens_per_second: row.get(5)?,
-                avg_downstream_first_content: row.get(6)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if query.include_daily_trend {
+    if query.include_daily_trend && !daily_from_bucket {
         let sql = format!(
             "SELECT timestamp_unix_ms / {DAY_MS} * {DAY_MS} AS day,
             COUNT(*), SUM(total_tokens), COUNT(total_tokens)
@@ -1370,3 +1562,7 @@ fn append_clear_error(target: &mut Option<String>, error: String) {
 #[cfg(test)]
 #[path = "query_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "query_bench.rs"]
+mod benchmark;
