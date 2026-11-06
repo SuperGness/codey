@@ -122,7 +122,7 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-14
+            runner: macos-15
 
     steps:
       - name: Checkout Codey
@@ -247,7 +247,7 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-14
+            runner: macos-15
 
     steps:
       - name: Checkout Codey
@@ -579,7 +579,7 @@ jobs:
       - macos-check
       - windows
       - windows-check
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
       CLOUDFLARE_R2_PUBLIC_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
