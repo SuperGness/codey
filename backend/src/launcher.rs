@@ -1844,12 +1844,14 @@ async fn prepare_startup_storage(
     stage_timings: &mut StartupStageTimings,
 ) -> Result<(StartupStorageState, Option<StartupModelCatalog>)> {
     let started = Instant::now();
+    let mut app_resolved_done = None;
     let mut stop_codex_done = None;
     let mut session_maintenance_done = None;
     let mut model_catalog_done = None;
     let mut storage_guards_done = None;
     let preparation = async {
         let app_dir = resolve_configured_codex_app_dir(config).await?;
+        app_resolved_done = Some(started.elapsed());
         // Session repair must never race a live Codex writer. Stopping the old
         // runtime first also gives SQLite and rollout buffers a chance to flush
         // before any permanent maintenance is applied.
@@ -1901,6 +1903,7 @@ async fn prepare_startup_storage(
     let (preparation, storage_guards) = tokio::join!(preparation, storage_guards);
     // Offsets from the stage start: the branches overlap.
     for (stage, done) in [
+        ("storage.appResolvedMs", app_resolved_done),
         ("storage.stopCodexDoneMs", stop_codex_done),
         ("storage.sessionMaintenanceDoneMs", session_maintenance_done),
         ("storage.modelCatalogDoneMs", model_catalog_done),

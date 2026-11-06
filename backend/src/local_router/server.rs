@@ -374,6 +374,8 @@ pub(super) async fn verify_router_endpoint(
         let client = tokio::task::spawn_blocking(|| {
             reqwest::Client::builder()
                 .no_proxy()
+                // 仅访问回环 HTTP，无需读取系统 TLS 证书。
+                .tls_built_in_root_certs(false)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
         })

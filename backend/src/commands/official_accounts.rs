@@ -18,7 +18,7 @@ use crate::config::{
 };
 use crate::official_accounts::{
     LoginPhase, OfficialAccountInvalid, OfficialAccountRecord, OfficialAccountStore,
-    SiwcLoginPhase, agent_host_id, refresh_if_stale_cached, refresh_siwc_if_stale,
+    SiwcCredential, SiwcLoginPhase, agent_host_id, refresh_if_stale_cached, refresh_siwc_if_stale,
     revoke_siwc_session, start_login, start_siwc_login,
 };
 
@@ -203,7 +203,8 @@ pub(super) async fn start_official_account_login(state: &Arc<AppState>) -> Resul
     tokio::task::yield_now().await;
     let session = start_login(
         state
-            .http_client
+            .http_client()
+            .await?
             .current(crate::official_accounts::OAUTH_TOKEN_URL)
             .await,
     )
@@ -311,7 +312,8 @@ pub(super) async fn start_official_account_siwc(
     tokio::task::yield_now().await;
     let session = start_siwc_login(
         state
-            .http_client
+            .http_client()
+            .await?
             .current(crate::official_accounts::OAUTH_TOKEN_URL)
             .await,
         &record,
@@ -424,6 +426,17 @@ pub(super) async fn cancel_official_account_siwc(
     Ok(json!({ "status": "ok" }))
 }
 
+async fn revoke_account_siwc(state: &AppState, credential: &SiwcCredential) -> Result<(), String> {
+    let client = state
+        .http_client()
+        .await?
+        .current(crate::official_accounts::OAUTH_TOKEN_URL)
+        .await;
+    revoke_siwc_session(&client, credential)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
 /// 停用官方直连：尽力撤销远端 refresh token 后清掉本地凭据槽；撤销未被
 /// 确认时不阻塞本地清理，把提示带回前端。
 pub(super) async fn remove_official_account_siwc(
@@ -442,15 +455,7 @@ pub(super) async fn remove_official_account_siwc(
         .map_err(|error| format!("{error:#}"))?
         .ok_or_else(|| format!("找不到官方账号：{account_id}"))?;
     let remote_confirmed = match record.siwc.as_ref() {
-        Some(credential) => revoke_siwc_session(
-            &state
-                .http_client
-                .current(crate::official_accounts::OAUTH_TOKEN_URL)
-                .await,
-            credential,
-        )
-        .await
-        .is_ok(),
+        Some(credential) => revoke_account_siwc(state, credential).await.is_ok(),
         None => true,
     };
     let clear_store = state.official_accounts();
@@ -486,7 +491,8 @@ pub(super) async fn import_official_account_credential(
 ) -> Result<Value, String> {
     let record = crate::official_accounts::official_account_from_manual_input(
         &state
-            .http_client
+            .http_client()
+            .await?
             .current(crate::official_accounts::OAUTH_TOKEN_URL)
             .await,
         &credential,
@@ -600,7 +606,8 @@ pub(super) async fn refresh_official_account_tokens(
             let proxy = super::official_account_usage_proxy(state, account_id).await;
             match refresh_if_stale_cached(
                 &state
-                    .http_client
+                    .http_client()
+                    .await?
                     .current(crate::official_accounts::OAUTH_TOKEN_URL)
                     .await,
                 &mut record,
@@ -673,7 +680,8 @@ pub(super) async fn refresh_official_account_tokens(
     if !record.invalid() && record.siwc.is_some() {
         match refresh_siwc_if_stale(
             &state
-                .http_client
+                .http_client()
+                .await?
                 .current(crate::official_accounts::OAUTH_TOKEN_URL)
                 .await,
             &store,
@@ -849,14 +857,7 @@ pub(super) async fn remove_official_account(
         .map_err(|error| format!("移除官方账号任务异常退出：{error}"))?
         .map_err(|error| format!("{error:#}"))?;
     if let Some(credential) = siwc_credential
-        && let Err(error) = revoke_siwc_session(
-            &state
-                .http_client
-                .current(crate::official_accounts::OAUTH_TOKEN_URL)
-                .await,
-            &credential,
-        )
-        .await
+        && let Err(error) = revoke_account_siwc(state, &credential).await
     {
         error_log::record_failure(
             "official_siwc_revoke_failed",

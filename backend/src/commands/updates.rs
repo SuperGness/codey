@@ -659,7 +659,7 @@ async fn fetch_release_admin_update(
     let client = if identity.is_some() {
         device_http_client(endpoint.as_str()).await?
     } else {
-        state.http_client.current(endpoint.as_str()).await
+        state.http_client().await?.current(endpoint.as_str()).await
     };
     let mut request = client.get(endpoint).query(&query);
     if let Some(identity) = &identity {
@@ -805,7 +805,7 @@ async fn download_update_candidate_with_mode(
         .as_ref()
         .ok_or_else(|| "没有适用于当前系统的可安装更新包".to_string())?;
     let file_path = match download_update_asset(
-        &state.http_client.current(&asset.url).await,
+        &state.http_client().await?.current(&asset.url).await,
         &state.store,
         &candidate.check.latest_version,
         asset,
@@ -1043,7 +1043,8 @@ async fn fetch_configured_update_manifest(
     }
 
     let response = state
-        .http_client
+        .http_client()
+        .await?
         .current(url.as_str())
         .await
         .get(url)
@@ -1676,7 +1677,8 @@ mod tests {
                 store: ConfigStore::new(directory.path().join("config.json")),
                 http_client: crate::system_proxy_client::SystemProxyClient::fixed(
                     reqwest::Client::builder().no_proxy().build().unwrap(),
-                ),
+                )
+                .into(),
                 ..AppState::default()
             };
             TEST_DEVICE_VERSIONS
@@ -1717,6 +1719,8 @@ mod tests {
             assert!(
                 state
                     .http_client
+                    .get()
+                    .unwrap()
                     .cached()
                     .get(&source_url)
                     .send()
@@ -2065,7 +2069,8 @@ mod tests {
             store: ConfigStore::new(directory.path().join("config.json")),
             http_client: crate::system_proxy_client::SystemProxyClient::fixed(
                 reqwest::Client::builder().no_proxy().build().unwrap(),
-            ),
+            )
+            .into(),
             ..AppState::default()
         };
         // AppState::default() 会读取真实用户配置，更新策略必须显式固定。
@@ -2199,7 +2204,8 @@ mod tests {
             store: ConfigStore::new(directory.path().join("config.json")),
             http_client: crate::system_proxy_client::SystemProxyClient::fixed(
                 reqwest::Client::builder().no_proxy().build().unwrap(),
-            ),
+            )
+            .into(),
             ..AppState::default()
         };
         state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Stable;

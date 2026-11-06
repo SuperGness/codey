@@ -130,8 +130,8 @@ pub struct AppState {
     /// changes arrive on plugin threads, which cannot see that runtime via
     /// `Handle::try_current`.
     runtime_handle: Option<tokio::runtime::Handle>,
-    /// 官方账号授权、更新检查与模型拉取共用的客户端，随系统代理变化重建。
-    pub http_client: crate::system_proxy_client::SystemProxyClient,
+    /// 官方账号授权、更新检查与模型拉取共用的客户端；证书加载与启动准备并行。
+    http_client: tokio::sync::OnceCell<crate::system_proxy_client::SystemProxyClient>,
     /// Official token refresh clients keyed by account proxy URL.
     official_proxied_clients: BlockingMutex<HashMap<String, reqwest::Client>>,
     #[cfg(test)]
@@ -288,10 +288,7 @@ impl AppState {
             config_apply: BlockingMutex::new(config_apply::ApplyQueue::default()),
             model_delivery_lock: Mutex::new(()),
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
-            http_client: crate::system_proxy_client::SystemProxyClient::new_blocking(
-                shared_http_client_builder,
-            )
-            .expect("shared Codey HTTP client should be constructible"),
+            http_client: tokio::sync::OnceCell::new(),
             official_proxied_clients: BlockingMutex::new(HashMap::new()),
             #[cfg(test)]
             webhook_http_client_override: None,
@@ -353,6 +350,18 @@ impl AppState {
             restart_operation_pending: Notify::new(),
             shutdown_reason,
         }
+    }
+
+    pub(crate) async fn http_client(
+        &self,
+    ) -> Result<&crate::system_proxy_client::SystemProxyClient, String> {
+        self.http_client
+            .get_or_try_init(|| async {
+                crate::system_proxy_client::SystemProxyClient::new(shared_http_client_builder)
+                    .await
+                    .map_err(|error| format!("创建共享 HTTP 客户端失败：{error:#}"))
+            })
+            .await
     }
 }
 
@@ -3267,3 +3276,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod startup_bench;

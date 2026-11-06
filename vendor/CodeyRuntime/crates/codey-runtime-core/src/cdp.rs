@@ -87,6 +87,8 @@ fn cdp_http_client() -> anyhow::Result<&'static reqwest::Client> {
     }
     let client = reqwest::Client::builder()
         .no_proxy()
+        // CDP 发现只访问回环 HTTP，避免在异步线程上读取系统 TLS 证书。
+        .tls_built_in_root_certs(false)
         .timeout(CDP_HTTP_TIMEOUT)
         .build()
         .context("failed to build CDP HTTP client")?;
