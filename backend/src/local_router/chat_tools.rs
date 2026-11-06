@@ -240,34 +240,24 @@ pub(crate) fn append_responses_agent_message_object(
 /// 与 MESSAGE 属于助手历史。协议转换若一律写成 assistant，模型会把任务正文
 /// 当成自己先前说过的话，从而报告任务正文缺失。
 fn agent_message_carries_instruction(object: &serde_json::Map<String, Value>) -> bool {
-    let content_texts = match object.get("content") {
-        Some(Value::Array(parts)) => parts.iter().filter_map(agent_message_part_text).collect(),
-        Some(Value::String(text)) => vec![text.as_str()],
-        Some(part @ Value::Object(_)) => agent_message_part_text(part).into_iter().collect(),
-        _ => Vec::new(),
-    };
-    let texts = content_texts
-        .into_iter()
-        .chain(
-            ["message", "text"]
-                .into_iter()
-                .filter_map(|field| object.get(field).and_then(Value::as_str)),
-        )
-        .collect::<Vec<_>>();
-    // FINAL_ANSWER 只向下级返回结果，始终属于助手历史。
-    if texts
-        .iter()
-        .any(|text| has_collaboration_header(text, "FINAL_ANSWER"))
-    {
-        return false;
+    // 只用首个文本片段识别协作头，后续任务正文及备用字段不能覆盖它。
+    let header = match object.get("content") {
+        Some(Value::Array(parts)) => parts.iter().find_map(agent_message_part_text),
+        Some(Value::String(text)) => Some(text.as_str()),
+        Some(part @ Value::Object(_)) => agent_message_part_text(part),
+        _ => None,
     }
-    let new_task = texts
-        .iter()
-        .any(|text| has_collaboration_header(text, "NEW_TASK"));
+    .or_else(|| {
+        ["message", "text"]
+            .into_iter()
+            .find_map(|field| object.get(field).and_then(Value::as_str))
+    });
+    let Some(header) = header else {
+        return false;
+    };
+    let new_task = has_collaboration_header(header, "NEW_TASK");
     // MESSAGE 两个方向都会出现：上级用它补充要求，下级用它回报进度。
-    let message = texts
-        .iter()
-        .any(|text| has_collaboration_header(text, "MESSAGE"));
+    let message = has_collaboration_header(header, "MESSAGE");
     if !new_task && !message {
         return false;
     }

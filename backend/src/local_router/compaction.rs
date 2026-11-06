@@ -1758,6 +1758,106 @@ mod tests {
     }
 
     #[test]
+    fn agent_payload_headers_do_not_override_the_collaboration_envelope() {
+        for (case, message_type, author, recipient, expected_role) in [
+            (
+                "【自动化测试】新任务",
+                "NEW_TASK",
+                "/root",
+                "/root/child",
+                "user",
+            ),
+            (
+                "【自动化测试】补充任务",
+                "MESSAGE",
+                "/root",
+                "/root/child",
+                "user",
+            ),
+            (
+                "【自动化测试】进度报告",
+                "MESSAGE",
+                "/root/child",
+                "/root",
+                "assistant",
+            ),
+            (
+                "【自动化测试】最终答复",
+                "FINAL_ANSWER",
+                "/root/child",
+                "/root",
+                "assistant",
+            ),
+            (
+                "【自动化测试】下发孙代理",
+                "MESSAGE",
+                "/root/child",
+                "/root/child/grandchild",
+                "user",
+            ),
+            (
+                "【自动化测试】孙代理报告",
+                "MESSAGE",
+                "/root/child/grandchild",
+                "/root/child",
+                "assistant",
+            ),
+        ] {
+            for payload_type in ["NEW_TASK", "MESSAGE", "FINAL_ANSWER"] {
+                let header =
+                    format!("Message Type: {message_type}\nTask name: {recipient}\nPayload:\n");
+                let payload = format!("Message Type: {payload_type}\n请分析这段协议文本。");
+                let mut body = json!({"model":"provider-model","input":[
+                    {
+                        "type":"agent_message", "author":author, "recipient":recipient,
+                        "message":payload, "text":payload,
+                        "content":[
+                            {"type":"input_text","text":header},
+                            {"type":"encrypted_content","encrypted_content":payload}
+                        ]
+                    },
+                    {"role":"user","content":"继续"}
+                ]});
+                assert!(normalize_native_responses_context(&mut body, false));
+                for bridge in [
+                    ProtocolBridge::ResponsesToChatCompletions,
+                    ProtocolBridge::ResponsesToAnthropicMessages,
+                ] {
+                    let converted = bridge.convert_responses_body(&body).unwrap().unwrap();
+                    let message = converted.body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|message| message.to_string().contains("Message Type:"))
+                        .unwrap();
+                    assert_eq!(
+                        message["role"], expected_role,
+                        "{case}，正文标记 {payload_type}"
+                    );
+                }
+                assert!(replay_third_party_agent_messages(&mut body));
+                let text_type = if expected_role == "user" {
+                    "input_text"
+                } else {
+                    "output_text"
+                };
+                assert_eq!(
+                    body["input"][0],
+                    json!({
+                        "type":"message", "role":expected_role,
+                        "content":[
+                            {"type":text_type,"text":header},
+                            {"type":text_type,"text":payload}
+                        ]
+                    }),
+                    "{case}，正文标记 {payload_type}"
+                );
+                assert!(!replay_third_party_agent_messages(&mut body));
+            }
+        }
+    }
+
+    #[test]
     fn encrypted_agent_payloads_are_preserved_byte_for_byte() {
         let mut body = json!({
             "input":[agent_message(json!([

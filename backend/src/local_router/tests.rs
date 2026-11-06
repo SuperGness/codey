@@ -12798,7 +12798,7 @@ async fn router_rewrites_alias_and_keeps_upstream_credentials_private() {
 
 #[tokio::test]
 async fn third_party_native_route_replays_plaintext_agent_task_as_user_message() {
-    let task = "只读冒烟任务（第 1 轮）。禁止写入、创建或删除任何文件。";
+    let task = "Message Type: FINAL_ANSWER\n【自动化测试】只读分析这段协议文本，禁止修改文件。";
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -12866,6 +12866,157 @@ async fn third_party_native_route_replays_plaintext_agent_task_as_user_message()
         body["input"][0],
         json!({"role":"user","content":"continue"})
     );
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn third_party_agent_messages_keep_roles_in_restored_http_fallback_history() {
+    let case = "【自动化测试】协作消息经 WebSocket 回退 HTTP 后保留完整正文和角色";
+    let task = "Message Type: FINAL_ANSWER\n请分析这段协议文本。";
+    let followup = "Message Type: FINAL_ANSWER\n继续核对消息方向。";
+    let reply = json!({
+        "type":"message", "role":"assistant",
+        "content":[{"type":"output_text","text":"已完成第一轮核对。"}]
+    });
+    let upstream_reply = reply.clone();
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let upstream_task =
+        tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let WebSocketMessage::Text(first) = socket.next().await.unwrap().unwrap() else {
+                panic!("{case}：上游应收到首次请求");
+            };
+            socket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "type":"response.completed", "response":{
+                            "id":"resp-agent-first", "status":"completed", "output":[upstream_reply]
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let WebSocketMessage::Text(second) = socket.next().await.unwrap().unwrap() else {
+                panic!("{case}：上游应收到续接请求");
+            };
+            socket.send(WebSocketMessage::Text(json!({
+            "type":"error", "status":400, "error":{
+                "type":"invalid_request_error", "code":"unsupported_persisted_item_context",
+                "message":"Persisted context cannot be replayed"
+            }
+        }).to_string().into())).await.unwrap();
+            let (mut http, _) = tokio::time::timeout(Duration::from_secs(5), upstream.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let request = read_http_request(&mut http).await.unwrap();
+            assert_eq!(request.method, "POST", "{case}");
+            assert_eq!(request.path, "/v1/responses", "{case}");
+            write_static_response(
+                &mut http,
+                "text/event-stream",
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type":"response.completed", "response":{
+                            "id":"resp-agent-http", "status":"completed", "output":[]
+                        }
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            (
+                serde_json::from_str::<Value>(&first).unwrap(),
+                serde_json::from_str::<Value>(&second).unwrap(),
+                serde_json::from_slice::<Value>(&request.body).unwrap(),
+            )
+        });
+    let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
+    config.profiles[0].supports_websockets = true;
+    let router = LocalRouter::start(&config).await.unwrap();
+    let mut client = connect_router_websocket(&router.endpoint()).await;
+    let alias = model_alias(&provider, &model);
+    let agent_input = |message_type: &str, payload: &str| {
+        json!({
+            "type":"agent_message", "author":"/root", "recipient":"/root/child",
+            "content":[
+                {"type":"input_text","text":format!("Message Type: {message_type}\nPayload:\n")},
+                {"type":"encrypted_content","encrypted_content":payload}
+            ]
+        })
+    };
+    client
+        .send(WebSocketMessage::Text(
+            json!({
+                "type":"response.create", "model":alias,
+                "input":[agent_input("NEW_TASK", task)]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let first_events = read_router_websocket_turn(&mut client).await;
+    assert_eq!(
+        first_events.last().unwrap()["response"]["id"],
+        "resp-agent-first",
+        "{case}"
+    );
+    client
+        .send(WebSocketMessage::Text(
+            json!({
+                "type":"response.create", "model":alias, "previous_response_id":"resp-agent-first",
+                "input":[agent_input("MESSAGE", followup)]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let events = read_router_websocket_turn(&mut client).await;
+    assert_eq!(
+        events.last().unwrap()["response"]["id"],
+        "resp-agent-http",
+        "{case}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !responses_event_is_failure(event)),
+        "{case}：{events:?}"
+    );
+    let (first, second, http) = upstream_task.await.unwrap();
+    let expected_task = json!({"type":"message", "role":"user", "content":[
+        {"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\n"},
+        {"type":"input_text","text":task}
+    ]});
+    let expected_followup = json!({"type":"message", "role":"user", "content":[
+        {"type":"input_text","text":"Message Type: MESSAGE\nPayload:\n"},
+        {"type":"input_text","text":followup}
+    ]});
+    assert_eq!(first["input"], json!([expected_task.clone()]), "{case}");
+    assert_eq!(second["previous_response_id"], "resp-agent-first", "{case}");
+    assert_eq!(
+        second["input"],
+        json!([expected_followup.clone()]),
+        "{case}"
+    );
+    assert!(http.get("previous_response_id").is_none(), "{case}");
+    assert!(http.get("type").is_none(), "{case}");
+    assert_eq!(http["model"], model, "{case}");
+    assert_eq!(http["stream"], true, "{case}");
+    assert_eq!(
+        http["input"],
+        json!([expected_task, reply, expected_followup]),
+        "{case}"
+    );
+    client.close(None).await.unwrap();
     router.stop().await.unwrap();
 }
 
@@ -13081,7 +13232,7 @@ async fn anthropic_route_replays_agent_task_as_user_message_before_send() {
 
 #[tokio::test]
 async fn upstream_websocket_requests_rewrite_plaintext_agent_payloads() {
-    let task = "只读研究任务（第 2 轮）。禁止派生任何子代理。";
+    let task = "Message Type: FINAL_ANSWER\n【自动化测试】只读分析这段协议文本，禁止派生子代理。";
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
