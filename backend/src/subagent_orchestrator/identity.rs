@@ -16,7 +16,8 @@ use crate::subagent::protocol;
 
 use super::{
     AGENT_ID_COLLISION_ERROR_CODE, MAX_SPAWN_RESPONSE_JSON_BYTES,
-    MAX_TRANSCRIPT_METADATA_LINE_BYTES, SessionLedger,
+    MAX_TRANSCRIPT_METADATA_LINE_BYTES, SessionLedger, StatusResponseSource,
+    TerminalTaskObservation,
 };
 
 pub(super) fn response_is_explicit_failure(value: &Value) -> bool {
@@ -105,9 +106,12 @@ pub(super) fn spawn_task_name_matches(task_name: &str, expected_task_id: &str) -
 pub(super) fn collect_terminal_task_outcomes(
     value: &Value,
     ledger: &mut SessionLedger,
-    terminal_tasks: &mut BTreeMap<String, ExecutionOutcome>,
+    terminal_tasks: &mut BTreeMap<String, TerminalTaskObservation>,
+    usage_by_task_turn: &mut BTreeMap<String, BTreeMap<String, crate::subagent::api::TokenUsage>>,
+    source: StatusResponseSource,
     now_ms: u64,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut needs_snapshot = false;
     let mut observations = Vec::new();
     protocol::collect_terminal_observations(value, &mut observations);
     for observation in observations {
@@ -124,13 +128,56 @@ pub(super) fn collect_terminal_task_outcomes(
         let Some(task_id) = candidates.into_iter().next() else {
             continue;
         };
+        let turn_hash = observation.turn_id.as_deref().map(hash_component);
+        let Some(reservation) = ledger.reservations.get(&task_id) else {
+            continue;
+        };
+        // 等待队列中的匿名终态无法区分续派轮；当前状态查询才可确认归属。
+        if matches!(source, StatusResponseSource::Notification)
+            && observation.turn_id.is_none()
+            && reservation.followup_count > 0
+        {
+            needs_snapshot = true;
+            continue;
+        }
+        let snapshot_confirms_anonymous_turn = matches!(source, StatusResponseSource::Snapshot(_))
+            && turn_hash.is_none()
+            && reservation.followup_turn_is_unresolved();
+        if !snapshot_confirms_anonymous_turn
+            && !reservation.accepts_terminal_turn(turn_hash.as_deref())
+        {
+            continue;
+        }
         let outcome = ExecutionOutcome::from(observation.outcome);
         terminal_tasks
             .entry(task_id)
-            .and_modify(|current| *current = stricter_outcome(*current, outcome))
-            .or_insert(outcome);
+            .and_modify(|current| {
+                current.outcome = stricter_outcome(current.outcome, outcome);
+                current.turn_hash = current.turn_hash.clone().or_else(|| turn_hash.clone());
+            })
+            .or_insert(TerminalTaskObservation { outcome, turn_hash });
     }
-    Ok(())
+    let mut usage_observations = Vec::new();
+    protocol::collect_native_usage_observations(value, &mut usage_observations);
+    for observation in usage_observations {
+        let candidates = identity_task_candidates(ledger, &observation.identifier);
+        if candidates.len() != 1 {
+            continue;
+        }
+        let Some(task_id) = candidates.into_iter().next() else {
+            continue;
+        };
+        let turn_hash = hash_component(&observation.turn_id);
+        usage_by_task_turn
+            .entry(task_id)
+            .or_default()
+            .entry(turn_hash)
+            .and_modify(|current| {
+                *current = super::merge_cumulative_usage(current, observation.usage.clone());
+            })
+            .or_insert(observation.usage);
+    }
+    Ok(needs_snapshot)
 }
 
 pub(super) fn stricter_outcome(

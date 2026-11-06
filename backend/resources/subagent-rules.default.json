@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": 12,
+  "revision": 13,
   "conflictResolution": "highest_priority_deny_wins",
   "fallback": "deny",
   "roles": {
@@ -33,7 +33,16 @@
       "actors": ["child"],
       "roles": ["codey_explorer", "codey_worker", "codey_reviewer", "default"],
       "toolClasses": ["read", "write", "command", "network", "collaboration", "visual", "unknown"],
-      "explanation": "角色仅用于任务分工和模型选择，均可调用读写、命令、网络、视觉、协作和未归类工具；实际操作仍受任务范围、生命周期与 Codex 原生权限约束。"
+      "explanation": "角色按任务分工选择模型；工具仍受生命周期、角色能力和 Codex 原生权限约束。"
+    },
+    {
+      "id": "deny-unknown-tool-class",
+      "priority": 900,
+      "effect": "deny",
+      "actors": ["child"],
+      "roles": ["codey_explorer"],
+      "toolClasses": ["unknown"],
+      "explanation": "未归类工具无法证明只读，检索子代理不得调用。"
     },
     {
       "id": "allow-unbound-collaboration",

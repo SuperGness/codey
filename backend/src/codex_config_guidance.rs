@@ -542,7 +542,19 @@ root agent validates the combined result and either continues the work or finish
 is active, Codey's gate blocks non-collaboration tools and Stop. If collaboration tools are unavailable, \
 do not loop on an unregistered tool.";
 
-pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = r#####"Explorer's native sandbox is read-only. Reviewer uses workspace-write for tests, builds and render outputs and remains a potential writer; it must not repair source. The root may write only after the gate confirms every active Explorer's current native turn is read-only.
+
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct commentary tools in native clients; never call them through `functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a transport-only endpoint, use that endpoint with the exact catalog name and argument schema; a catalog-listed tool is available even without a same-named direct schema. Do not invent wrappers or bypass lifecycle and permission checks. Delegate only independent parts when parallel work, context isolation, or specialized evidence can reduce end-to-end time or preserve useful context after counting dispatch, task text, waiting and acceptance. Keep a clear bounded task in the root when several tool calls are enough to finish it. Never add classification or synthesis agents, split tasks to fill slots, or spawn just to fill slots. Always set `agent_type`. Use `codey_explorer` for multi-step read-only research, `codey_worker` for implementation, and `codey_reviewer` for independent verification of completed stable input. Assign distinct files to parallel writers and have them re-read a file before editing it. When writers must change the same files, serialize them or use an isolated worktree or copy when the work benefits from isolation; Git may expose merge conflicts. Pass `fork_turns: "none"` for every role and make `message` self-contained: goal, scope, paths, quick/medium/thorough boundary and stopping condition, constraints, expected output, absolute paths of user attachments and screenshots, the user's stated preferences and settled decisions, and what has already been checked or ruled out. Workers run checks for their changed scope, including rendered UI evidence when available. Reviewer checks the stated revision or diff and required behavior. The root spot-checks key and conflicting evidence plus integration and uncovered checks; do not repeat the whole investigation or every successful targeted check. Never put passwords, tokens or keys in `message`; keep work needing them in the root. Omit `fork_turns` only when the task depends on conversation content that cannot be restated as text or paths. Do not request interim progress: children message only for blockers or plan-changing facts, and final answers arrive through `agents.wait_agent`; use `agents.send_message` only for facts that change a child's task. When the gate confirms every active Explorer's current native turn is read-only, keep working on independent files, writes and commands included, and wait when you need its findings; tell an explorer if you edit files it is reading. Any other active child limits you to `agents.*` tools and the read tools `read_file`, `inspect_local_file`, `grep`, `glob`, and `view_image`, to prepare review, not redo delegated work. After followup, an unscoped final notification needs a current list_agents snapshot before accepting its outcome. Stop waits for every attempt. After a terminal or fenced update, dispatch the next planned, unspawned task with a new `task_name` if a slot is free; otherwise return to `agents.wait_agent` with `timeout_ms: 120000`. Call unfiltered `agents.list_agents` only when a wait completes without per-agent terminal details or Codey's gate shows that an attempt left the active list, or the gate requests a current-turn snapshot for an unscoped followup completion. `MESSAGE` and mailbox updates are not completion. Treat `FINAL_ANSWER`, `task_complete`, `completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` as terminal. Use `agents.followup_task` to continue a child's own earlier work, even from a later turn: it keeps the child's context, so prefer it over a fresh spawn. Give one `codey_explorer` all related questions about an area and follow up with it on that area; spawn fresh only for unrelated work. If `CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry or wait for that target; take over or use a fresh `task_name`. A successful root interrupt permanently abandons and fences that attempt, revokes its tool access and settles it for the lifecycle ledger; do not wait for or follow up that target. Match evidence to the exact task and attempt; never reuse another attempt's no-change claim or infer a stall from elapsed time alone. If a child cannot decrypt its task body, restate the complete task with `agents.send_message` exactly once; do not interrupt or respawn it, and take over if that fails. On `CODEY_SUBAGENT_DUPLICATE_TASK_ID`, call unfiltered `agents.list_agents` once: wait for the original if present, otherwise take over; only a materially changed task may retry once with a fresh `task_name`. If every spawn fails, take over; if collaboration tools are unavailable, do not loop on an unregistered tool. Continue until all planned work has been performed and every attempt is terminal or fenced, then validate the combined result and the integration or uncovered checks required by project risk before continuing or finishing."#####;
+
+const PRE_SCOPED_COMPLETION_COLLABORATION_USAGE_HINT: &str = r#####"Explorer's native sandbox is read-only. Reviewer uses workspace-write for tests, builds and render outputs and remains a potential writer; it must not repair source. The root may write only after the gate confirms every active Explorer's current native turn is read-only.
+
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct commentary tools in native clients; never call them through `functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a transport-only endpoint, use that endpoint with the exact catalog name and argument schema; a catalog-listed tool is available even without a same-named direct schema. Do not invent wrappers or bypass lifecycle and permission checks. Delegate only independent parts when parallel work, context isolation, or specialized evidence can reduce end-to-end time or preserve useful context after counting dispatch, task text, waiting and acceptance. Keep a clear bounded task in the root when several tool calls are enough to finish it. Never add classification or synthesis agents, split tasks to fill slots, or spawn just to fill slots. Always set `agent_type`. Use `codey_explorer` for multi-step read-only research, `codey_worker` for implementation, and `codey_reviewer` for independent verification of completed stable input. Assign distinct files to parallel writers and have them re-read a file before editing it. When writers must change the same files, serialize them or use an isolated worktree or copy when the work benefits from isolation; Git may expose merge conflicts. Pass `fork_turns: "none"` for every role and make `message` self-contained: goal, scope, paths, quick/medium/thorough boundary and stopping condition, constraints, expected output, absolute paths of user attachments and screenshots, the user's stated preferences and settled decisions, and what has already been checked or ruled out. Workers run checks for their changed scope, including rendered UI evidence when available. Reviewer checks the stated revision or diff and required behavior. The root spot-checks key and conflicting evidence plus integration and uncovered checks; do not repeat the whole investigation or every successful targeted check. Never put passwords, tokens or keys in `message`; keep work needing them in the root. Omit `fork_turns` only when the task depends on conversation content that cannot be restated as text or paths. Do not request interim progress: children message only for blockers or plan-changing facts, and final answers arrive through `agents.wait_agent`; use `agents.send_message` only for facts that change a child's task. When the gate confirms every active Explorer's current native turn is read-only, keep working on independent files, writes and commands included, and wait when you need its findings; tell an explorer if you edit files it is reading. Any other active child limits you to `agents.*` tools and the read tools `read_file`, `inspect_local_file`, `grep`, `glob`, and `view_image`, to prepare review, not redo delegated work. Stop waits for every attempt. After a terminal or fenced update, dispatch the next planned, unspawned task with a new `task_name` if a slot is free; otherwise return to `agents.wait_agent` with `timeout_ms: 120000`. Call unfiltered `agents.list_agents` only when a wait completes without per-agent terminal details or Codey's gate shows that an attempt left the active list. `MESSAGE` and mailbox updates are not completion. Treat `FINAL_ANSWER`, `task_complete`, `completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` as terminal. Use `agents.followup_task` to continue a child's own earlier work, even from a later turn: it keeps the child's context, so prefer it over a fresh spawn. Give one `codey_explorer` all related questions about an area and follow up with it on that area; spawn fresh only for unrelated work. If `CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry or wait for that target; take over or use a fresh `task_name`. A successful root interrupt permanently abandons and fences that attempt, revokes its tool access and settles it for the lifecycle ledger; do not wait for or follow up that target. Match evidence to the exact task and attempt; never reuse another attempt's no-change claim or infer a stall from elapsed time alone. If a child cannot decrypt its task body, restate the complete task with `agents.send_message` exactly once; do not interrupt or respawn it, and take over if that fails. On `CODEY_SUBAGENT_DUPLICATE_TASK_ID`, call unfiltered `agents.list_agents` once: wait for the original if present, otherwise take over; only a materially changed task may retry once with a fresh `task_name`. If every spawn fails, take over; if collaboration tools are unavailable, do not loop on an unregistered tool. Continue until all planned work has been performed and every attempt is terminal or fenced, then validate the combined result and the integration or uncovered checks required by project risk before continuing or finishing."#####;
+
+pub(crate) fn root_agent_collaboration_usage_hint() -> String {
+    ROOT_AGENT_COLLABORATION_USAGE_HINT.to_string()
+}
+
+const PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
 `agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct \
 commentary tools in native clients; never call them through `functions.exec` as a JavaScript \
 aggregate. If a client explicitly exposes a tool catalog through a transport-only endpoint, use \
@@ -661,6 +673,21 @@ materially changed task may retry once with a fresh `task_name`. This \
 mode remains active until a later multi-agent mode developer message changes it.";
 
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "\
+Sub-agents never spawn and report only to the root. The root handles clear bounded work directly, \
+including a few searches, a known edit, short commands and checks, and raw output it must read. \
+Delegate independent work only when parallel progress, context isolation, specialized evidence, \
+or reusable child context outweighs startup, task description, waiting, validation and merge costs. \
+Use `codey_explorer` for multi-step read-only research, `codey_worker` for implementation, and \
+`codey_reviewer` for independent verification of completed stable input that is clearly larger \
+than a handful of tool calls and returns compact evidence the root will not repeat. \
+Always set `agent_type`. Quick, medium and thorough state scope and stopping conditions; none \
+implies a cheaper model is better. Do not delegate to fill slots or add classification or summary \
+agents. Keep related questions in one explorer context and follow up there; split only genuinely \
+unrelated work. At most two sub-agents run at once; \
+`CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot. This mode remains active until a later \
+multi-agent mode developer message changes it.";
+
+const PREVIOUS_ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "\
 Sub-agents never spawn and report only to the root. The root works by default; any earlier rule \
 requiring an explicit user request before spawning is relaxed only as follows, and an explicit \
 user request to delegate always applies. Keep in the root: a single search or read, Git status, \
@@ -695,6 +722,7 @@ slot. This mode remains active until a later multi-agent mode developer message 
 /// Detect Codey-owned mode hints written by earlier releases.
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_MULTI_AGENT_MODE_HINT,
+    PREVIOUS_ROOT_AGENT_MULTI_AGENT_MODE_HINT,
     FIVE_ROLE_MULTI_AGENT_MODE_HINT,
     EARLY_DELEGATION_MULTI_AGENT_MODE_HINT,
 ];
@@ -702,6 +730,8 @@ pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS: &[&str] = &[
 /// Remove the previous owned paragraph when installing the current guidance.
 pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    PRE_SCOPED_COMPLETION_COLLABORATION_USAGE_HINT,
+    PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT,
     FIVE_ROLE_COLLABORATION_USAGE_HINT,
     SELECTIVE_FORK_COLLABORATION_USAGE_HINT,
     WAIT_120S_COLLABORATION_USAGE_HINT,
@@ -743,10 +773,10 @@ developer_instructions = """
 pub(crate) const EXPLORER_AGENT_CONFIG: &str = r#####"name = "codey_explorer"
 
 description = "Read-only research across code, logs and documents, from quick lookups to thorough cross-directory synthesis at the depth the task states."
-sandbox_mode = "workspace-write"
+sandbox_mode = "read-only"
 
 developer_instructions = """
-你是检索子代理，只读：不修改、创建或删除文件，不做方案取舍，也不派生其他子代理。可以运行搜索、查看文件、`git status/diff/log`、日志查询等只读命令；仅在任务需要截图、页面或渲染证据时使用视觉工具。实际操作受 Codex 原生权限约束。
+你是检索子代理，只读：不修改、创建或删除文件，不做方案取舍，也不派生其他子代理。优先使用读取、搜索和查看现有图片的工具；只有当前轮原生只读沙箱已确认时，才可执行 `git status/diff/log`、日志查询等命令。通用执行包装、界面操作和未归类工具不可用，需要这些操作时交回主代理。
 按任务写明的深度工作，未写明时按中等：快速——只定位确切位置与事实，找到即止；中等——沿调用和引用读关键片段；彻底——覆盖给定范围内的依赖、测试与配置。实际范围明显超出任务预期时，先交回已确认部分并说明剩余范围，不要自行扩大。
 你的输出交给没有读过这些文件的主代理：给出 `file:line`、符号名、确切取值和必要原文，区分事实与推断，不寒暄、不复述过程。
 首行写 `status: completed | partial | blocked`；只保留会影响决策的结论、最多 5 条关键证据和明确的未覆盖范围。
@@ -760,7 +790,7 @@ sandbox_mode = "workspace-write"
 
 developer_instructions = """
 你是开发子代理。负责主代理明确授权、边界清晰、可回滚且可测试的实现，前端界面与交互、后端、数据、算法、命令行、脚本和构建工具都在范围内；不扩大范围，不做跨模块架构取舍，也不派生其他子代理。
-修改前读取将要编辑的确切代码，保留并适配其他人的并行改动。按任务需要运行覆盖本次改动的针对性构建、测试和检查；改动影响用户可见界面时，优先用客户端已授权的渲染或截图工具核验实际呈现，无法捕获时明确说明只有代码层验证，不要声称已核验渲染效果。不要格式化或批量改写本次未修改的文件，全量测试和全仓库格式化留给主代理汇合后统一执行。检查失败在你未修改的文件或其他写入者正在修改的代码时不要去修，在回报中写明失败位置和输出摘要。实际文件与命令访问受 Codex 原生权限约束，命令被拒绝或无法运行时，列出需要主代理执行的检查。
+修改前读取将要编辑的确切代码，保留并适配其他人的并行改动。按任务需要运行覆盖本次改动的针对性构建、测试和检查；改动影响用户可见界面时，优先用客户端已授权的渲染或截图工具核验实际呈现，无法捕获时明确说明只有代码层验证，不要声称已核验渲染效果。不要格式化或批量改写本次未修改的文件；主代理汇合后补充集成和未覆盖检查，仅在项目要求或变更风险需要时运行全量检查，不重复已通过且输入未变化的检查。检查失败在你未修改的文件或其他写入者正在修改的代码时不要去修，在回报中写明失败位置和输出摘要。实际文件与命令访问受 Codex 原生权限约束，命令被拒绝或无法运行时，列出需要主代理执行的检查。
 遇到需要产品选择、破坏性操作或范围不明确时停止修改，把阻塞点交回主代理。
 首行写 `status: completed | partial | blocked`；紧凑列出修改文件、关键位置、验证结果（含界面证据或明确的验证缺口）和未完成项，不回传冗长日志。
 """
@@ -784,7 +814,7 @@ pub(crate) const SUBAGENT_TASK_BOUNDARY_GUARD: &str = "\
 不得凭继承对话或旧任务猜测目标，也不要扫描工作区或尝试写入。按本次任务指定的路径、工具和清理分工执行；\
 任务未要求时不要做全仓库哈希。中止后即使收到排队任务，也不能恢复已撤销的工具权限。\
 完成后收到追派时沿用已有上下文，但相关文件可能已被他人修改，引用或编辑前先重新读取。\
-返回时区分本次实际修改、已清理内容和未完成要求，不能用其他尝试的结果代替本次证据。\
+返回时注明本次任务和依据的版本或差异范围，区分实际修改、已清理内容、验证命令及结果和未完成要求，不能用其他尝试的结果代替本次证据。\
 协作工具只能用 `agents.send_message` 向 `/root` 回报，不能联系其他子代理；需要其他子代理配合时，把依赖写进回报，由主代理协调。\
 只在遇到阻塞、需要主代理决定，或发现会改变主代理计划或其他并行任务的事实时立即发消息，例如任务前提不成立、范围明显超出预期、其他写入者的改动导致你的检查失败；常规进度、中间发现和最终结果都写进最终回报，不要单独发送进度消息。";
 
@@ -900,8 +930,8 @@ fn dynamic_codey_fastctx_guidance_at(
 }
 
 pub(crate) fn append_root_agent_collaboration_usage_hint(existing: &str) -> String {
-    let current_is_present =
-        guidance_paragraph_start(existing, ROOT_AGENT_COLLABORATION_USAGE_HINT).is_some();
+    let collaboration_hint = root_agent_collaboration_usage_hint();
+    let current_is_present = guidance_paragraph_start(existing, &collaboration_hint).is_some();
     let mut updated = existing.to_string();
     for &guidance in ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS {
         if current_is_present && guidance == ROOT_AGENT_COLLABORATION_USAGE_HINT {
@@ -918,7 +948,7 @@ pub(crate) fn append_root_agent_collaboration_usage_hint(existing: &str) -> Stri
     if !updated.is_empty() {
         updated.push_str("\n\n");
     }
-    updated.push_str(ROOT_AGENT_COLLABORATION_USAGE_HINT);
+    updated.push_str(&collaboration_hint);
     updated
 }
 
@@ -1076,7 +1106,7 @@ mod tests {
             let output = append_root_agent_collaboration_usage_hint(&input);
             assert_eq!(
                 output,
-                format!("{custom}\n\n{ROOT_AGENT_COLLABORATION_USAGE_HINT}")
+                format!("{custom}\n\n{}", root_agent_collaboration_usage_hint())
             );
             assert!(!output.contains("CODEY_DELEGATION_V2"));
             assert!(!output.contains("resolve_batch"));
@@ -1106,13 +1136,15 @@ mod tests {
 
         assert!(combined.contains(custom));
         assert!(combined.contains("`agents.spawn_agent`"));
-        assert!(combined.contains("Spawn one child per part that justifies one"));
+        assert!(combined.contains("after counting dispatch"));
         assert!(combined.contains("direct commentary tools"));
         assert!(combined.contains("`timeout_ms: 120000`"));
         assert!(combined.contains("mailbox updates are not completion"));
         assert!(combined.contains("`MESSAGE`"));
-        assert!(combined.contains("never fill the two slots"));
+        assert!(combined.contains("spawn just to fill slots"));
         assert!(combined.contains("Give one `codey_explorer` all related"));
+        assert!(combined.contains("Explorer's native sandbox is read-only"));
+        assert!(combined.contains("Reviewer uses workspace-write"));
         for retired in [
             "claim their complete target paths",
             "claim workspace writing",
@@ -1124,8 +1156,8 @@ mod tests {
             assert!(!combined.contains(retired), "{retired}");
         }
         assert!(combined.contains("re-read a file before editing it"));
-        assert!(combined.contains("give each an isolated worktree"));
-        assert!(combined.contains("serialize them or give each an isolated worktree"));
+        assert!(combined.contains("isolated worktree or copy"));
+        assert!(combined.contains("serialize them or use an"));
         assert!(!combined.contains("`CODEY_SUBAGENT_WORKSPACE_BUSY`"));
         assert!(combined.contains("`agents.send_message`"));
         assert!(combined.contains("prefer it over a fresh spawn"));
@@ -1180,8 +1212,10 @@ mod tests {
             )),
             combined
         );
-        let current_before_user =
-            format!("{ROOT_AGENT_COLLABORATION_USAGE_HINT}\n\nPreserve this position.");
+        let current_before_user = format!(
+            "{}\n\nPreserve this position.",
+            root_agent_collaboration_usage_hint()
+        );
         assert_eq!(
             append_root_agent_collaboration_usage_hint(&current_before_user),
             current_before_user
@@ -1253,11 +1287,22 @@ mod tests {
     fn multi_agent_mode_hint_fits_codex_byte_budget() {
         // Codex keeps only the first and last 800 bytes of a longer
         // `multi_agent_mode_hint_text`, silently dropping the middle.
+        let bytes = ROOT_AGENT_MULTI_AGENT_MODE_HINT.as_bytes();
         assert!(
             ROOT_AGENT_MULTI_AGENT_MODE_HINT.len() <= 1600,
             "{}",
             ROOT_AGENT_MULTI_AGENT_MODE_HINT.len()
         );
+        let head = std::str::from_utf8(&bytes[..bytes.len().min(800)]).unwrap_or_else(|error| {
+            panic!(
+                "mode hint first 800 bytes split UTF-8: {error}; prefix bytes: {:?}",
+                String::from_utf8_lossy(
+                    &bytes[error.valid_up_to().saturating_sub(24)
+                        ..bytes.len().min(error.valid_up_to() + 24)]
+                )
+            )
+        });
+        assert!(head.contains("The root handles clear bounded work directly"));
     }
 
     #[test]
@@ -1269,22 +1314,26 @@ mod tests {
     #[test]
     fn mode_hint_defaults_to_root_work_and_names_what_stays_there() {
         let hint = ROOT_AGENT_MULTI_AGENT_MODE_HINT;
-        assert!(hint.contains("The root works by default"));
+        assert!(hint.contains("The root handles clear bounded work directly"));
+        assert!(hint.contains("including a few searches, a known edit"));
+        assert!(hint.contains("startup, task description, waiting, validation and merge costs"));
         assert!(hint.contains("clearly larger than a handful of tool calls"));
-        assert!(hint.contains("Keep in the root: a single search or read"));
-        assert!(hint.contains("research that takes several steps"));
-        assert!(hint.contains("at any size"));
+        assert!(hint.contains("Quick, medium and thorough state scope and stopping conditions"));
+        assert!(hint.contains("none implies a cheaper model is better"));
+        assert!(hint.contains("Keep related questions in one explorer context"));
+        assert!(hint.contains("split only genuinely unrelated work"));
+        assert!(hint.contains("Do not delegate to fill slots"));
+        assert!(hint.contains("classification or summary agents"));
         for kept in [
-            "Git status, diff and commits",
-            "release or version checks",
-            "a single host or",
-            "raw output you must",
+            "multi-step read-only research",
+            "implementation",
+            "completed stable input",
+            "raw output it must read",
         ] {
             assert!(hint.contains(kept), "{kept}");
         }
-        assert!(hint.contains("explicit user request to"));
         assert!(!hint.contains("Proactive multi-agent delegation is active"));
-        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("never fill the two slots"));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("spawn just to fill slots"));
         assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("dispatch independent tasks up to"));
         assert!(
             ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("Never put passwords, tokens or keys")
@@ -1293,7 +1342,7 @@ mod tests {
             append_root_agent_collaboration_usage_hint(&format!(
                 "Keep this.\n\n{FIVE_ROLE_COLLABORATION_USAGE_HINT}"
             ))
-            .matches(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+            .matches(&root_agent_collaboration_usage_hint())
             .count(),
             1
         );
@@ -1338,7 +1387,7 @@ mod tests {
             }
         }
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("Assign distinct files"));
-        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("let Git surface the conflict"));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("Git may expose merge conflicts"));
     }
 
     #[test]
@@ -1353,7 +1402,7 @@ mod tests {
         assert!(!upgraded.contains("If a wait times"));
         assert_eq!(
             upgraded
-                .matches(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+                .matches(&root_agent_collaboration_usage_hint())
                 .count(),
             1
         );
@@ -1370,7 +1419,7 @@ mod tests {
         assert!(upgraded.contains("Keep this.") && !upgraded.contains("`timeout_ms: 30000`"));
         assert_eq!(
             upgraded
-                .matches(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+                .matches(&root_agent_collaboration_usage_hint())
                 .count(),
             1
         );
@@ -1392,7 +1441,7 @@ mod tests {
         assert!(upgraded.contains("Keep this."));
         assert_eq!(
             upgraded
-                .matches(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+                .matches(&root_agent_collaboration_usage_hint())
                 .count(),
             1
         );
@@ -1411,8 +1460,9 @@ mod tests {
         assert!(WORKER_AGENT_CONFIG.contains("其他写入者正在修改的代码时不要去修"));
         assert!(
             ROOT_AGENT_COLLABORATION_USAGE_HINT
-                .contains("full tests and formatting that workers leave to the root")
+                .contains("Workers run checks for their changed scope")
         );
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("integration or uncovered checks"));
     }
 
     #[test]
@@ -1423,7 +1473,9 @@ mod tests {
         );
         assert!(EXPLORER_AGENT_CONFIG.contains("你是检索子代理，只读"));
         assert!(EXPLORER_AGENT_CONFIG.contains("未写明时按中等"));
-        assert!(EXPLORER_AGENT_CONFIG.contains("仅在任务需要截图、页面或渲染证据时使用视觉工具"));
+        assert!(EXPLORER_AGENT_CONFIG.contains("优先使用读取、搜索和查看现有图片的工具"));
+        assert!(EXPLORER_AGENT_CONFIG.contains("只有当前轮原生只读沙箱已确认时"));
+        assert!(EXPLORER_AGENT_CONFIG.contains("通用执行包装、界面操作和未归类工具不可用"));
         assert!(WORKER_AGENT_CONFIG.contains("前端界面与交互、后端"));
         assert!(
             WORKER_AGENT_CONFIG
@@ -1454,8 +1506,13 @@ mod tests {
 `inspect_local_file`, `grep`, `glob`, and `view_image`";
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(expected));
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(
-            "While only `codey_explorer` children run, keep working, writes and commands included"
+            "When the gate confirms every active Explorer's current native turn is read-only"
         ));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("keep working on independent files"));
+        assert!(
+            ROOT_AGENT_COLLABORATION_USAGE_HINT
+                .contains("Any other active child limits you to `agents.*` tools")
+        );
         assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(r"\n"));
     }
 
@@ -1488,16 +1545,16 @@ mod tests {
     }
 
     #[test]
-    fn every_task_role_has_a_named_editable_source_template() {
+    fn role_sandboxes_match_their_actual_capabilities() {
         for role in crate::config::SUBAGENT_ROLE_IDS {
             let source = subagent_source_config(role).unwrap();
             assert!(source.contains(&format!("name = \"{role}\"")));
             assert!(source.contains("description = \""));
-            assert!(
-                source.contains("sandbox_mode = \"workspace-write\""),
-                "{role}"
-            );
         }
+        assert!(EXPLORER_AGENT_CONFIG.contains("sandbox_mode = \"read-only\""));
+        assert!(REVIEWER_AGENT_CONFIG.contains("sandbox_mode = \"workspace-write\""));
+        assert!(WORKER_AGENT_CONFIG.contains("sandbox_mode = \"workspace-write\""));
+        assert!(DEFAULT_AGENT_CONFIG.contains("sandbox_mode = \"workspace-write\""));
     }
 
     #[test]

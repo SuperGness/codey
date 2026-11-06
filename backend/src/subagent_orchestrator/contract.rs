@@ -59,10 +59,11 @@ pub(super) fn prepare_task_capsule(
     if workspace_root.is_none() {
         return Err(contract_error("子代理缺少可信工作目录"));
     }
-    // Roles share capabilities except that the explorer never edits files:
-    // that lets the root keep writing while only explorers run. Commands stay
-    // available to every role. Only trusted native workspace metadata
-    // establishes the workspace identity; task text cannot change it.
+    // The explorer never edits files. Its command capability becomes usable
+    // only when the child turn's native rollout proves a read-only sandbox.
+    // Workers and reviewers retain commands for tests and build products.
+    // Only trusted native workspace metadata establishes workspace identity;
+    // task text cannot change it.
     let mut capabilities = vec![
         "command.execute".to_string(),
         "files.read".to_string(),

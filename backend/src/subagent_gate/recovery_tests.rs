@@ -519,6 +519,7 @@ fn reader_tool(session: &str, event: &str) -> HookInput {
     let mut child = input(event, session);
     child.agent_id = Some("/root/reader".into());
     child.agent_type = Some("codey_explorer".into());
+    child.turn_id = Some("child-turn-a".into());
     child.tool_name = Some("mcp__codey_fastctx__inspect_local_file".into());
     child
 }

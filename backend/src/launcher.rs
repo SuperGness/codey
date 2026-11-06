@@ -1926,13 +1926,13 @@ fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
 }
 
 fn reconciled_native_subagent_runtime_config(
-    config: &CodeyConfig,
+    saved_config: &CodeyConfig,
     home: &std::path::Path,
 ) -> CodeyConfig {
-    let mut runtime_config = native_subagent_runtime_config(config);
+    let mut runtime_config = native_subagent_runtime_config(saved_config);
     // Read selection state from the original selectors. The runtime copy has
     // already expanded them once, and its raw ids can also look like aliases.
-    if let Ok(model_state) = crate::commands::native_subagent_model_state(config, home) {
+    if let Ok(model_state) = crate::commands::native_subagent_model_state(saved_config, home) {
         subagent_policy::reconcile_with_model_state(&mut runtime_config, Some(&model_state));
     }
     runtime_config
@@ -1976,7 +1976,7 @@ async fn prepare_native_runtime_state(
     .map_err(|error| {
         anyhow::Error::new(error).context("应用原生 Provider 运行配置任务异常退出")
     })??;
-    let mut runtime_config = config.clone();
+    let mut runtime_config = reconciled_native_subagent_runtime_config(config, home);
     runtime_config.fast_context_tools = applied.fast_context_tools_active;
     Ok(PreparedProviderState {
         runtime_config,

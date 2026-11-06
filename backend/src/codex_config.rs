@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value, value};
 
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT,
-    ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS, ROOT_AGENT_MULTI_AGENT_MODE_HINT,
-    ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS, SUBAGENT_TASK_BOUNDARY_GUARD,
-    append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
-    remove_subagent_guidance, subagent_source_config,
+    CODEY_FASTCTX_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
+    ROOT_AGENT_MULTI_AGENT_MODE_HINT, ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS,
+    SUBAGENT_TASK_BOUNDARY_GUARD, append_root_agent_collaboration_usage_hint,
+    remove_codey_fastctx_guidance, remove_subagent_guidance, root_agent_collaboration_usage_hint,
+    subagent_source_config,
 };
 use crate::config::{
     CodeyConfig, SUBAGENT_REASONING_EFFORTS, SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS,
@@ -508,11 +508,11 @@ fn apply_isolated_runtime_router_config(
         // rewritten from the current definitions; nothing there needs an
         // upgrade path. Only text injected into Codex's `config.toml` keeps
         // migration lists, because that file belongs to the user.
+        let collaboration_hint = root_agent_collaboration_usage_hint();
         rebuild_constraint_file(
             &constraints_dir.join(CODEY_COLLABORATION_HINT_FILE),
-            ROOT_AGENT_COLLABORATION_USAGE_HINT,
+            &collaboration_hint,
         )?;
-        let collaboration_hint = ROOT_AGENT_COLLABORATION_USAGE_HINT.to_string();
         let registration_roles = runtime_registration_roles(
             &runtime_roles,
             &registered_subagent_roles,

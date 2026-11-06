@@ -24,6 +24,7 @@ fn legacy_ledger(root: &Path, version: u32, writable: bool) -> PathBuf {
         "agent-a",
         Some("codey_worker"),
         None,
+        None,
         12,
     )
     .unwrap();
@@ -43,9 +44,49 @@ fn write_tool(name: &str) -> ChildToolContext<'_> {
         agent_id: "agent-b",
         agent_type: None,
         transcript_path: None,
+        turn_id: Some("child-turn-b"),
+        native_read_only: false,
         tool_name: name,
         tool_input: None,
     }
+}
+
+fn explorer_legacy_ledger(root: &Path, version: u32, writable: bool) -> PathBuf {
+    let spawn = json!({
+        "task_name": "task_explorer",
+        "agent_type": "codey_explorer",
+        "message": "Read the repository"
+    });
+    assert_eq!(
+        pre_spawn(root, "runtime", "session", Some(&spawn), 0, 10).unwrap(),
+        None
+    );
+    post_spawn(
+        root,
+        "runtime",
+        "session",
+        Some(&spawn),
+        Some(&json!({"agent_id": "agent-explorer"})),
+        11,
+    )
+    .unwrap();
+    let path = root.join(hash_component("session")).join(LEDGER_FILE);
+    let mut ledger: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    ledger["schema_version"] = json!(version);
+    ledger["reservations"]["task_explorer"]["write_capable"] = json!(writable);
+    if writable {
+        ledger["reservations"]["task_explorer"]["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("workspace.write"));
+    } else {
+        ledger["reservations"]["task_explorer"]["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|capability| capability != "workspace.write");
+    }
+    fs::write(&path, serde_json::to_vec(&ledger).unwrap()).unwrap();
+    path
 }
 
 #[test]
@@ -138,6 +179,8 @@ fn migration_never_expands_legacy_permissions() {
             agent_id: "agent-a",
             agent_type: Some("codey_worker"),
             transcript_path: None,
+            turn_id: Some("child-turn-a"),
+            native_read_only: false,
             tool_name: "apply_patch",
             tool_input: None,
         },
@@ -145,6 +188,75 @@ fn migration_never_expands_legacy_permissions() {
     )
     .unwrap();
     assert!(denied.is_some());
+}
+
+#[test]
+fn legacy_explorer_workspace_write_cannot_authorize_root_parallel_writes() {
+    for version in [14, 15, 16, 17, 18] {
+        let temp = tempdir().unwrap();
+        let path = explorer_legacy_ledger(temp.path(), version, true);
+        assert_eq!(
+            active_reservation_count(temp.path(), "runtime", "session", 20).unwrap(),
+            Some(1),
+            "v{version}"
+        );
+        let ledger: SessionLedger = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(!reservation_declares_write(
+            &ledger.reservations["task_explorer"]
+        ));
+        assert!(
+            !active_attempts_are_read_only(
+                temp.path(),
+                "runtime",
+                "session",
+                &BTreeSet::from([hash_component("agent-explorer")]),
+                21,
+            )
+            .unwrap(),
+            "v{version}"
+        );
+        let read = ChildToolContext {
+            agent_id: "agent-explorer",
+            agent_type: Some("codey_explorer"),
+            transcript_path: None,
+            turn_id: Some("legacy-turn"),
+            native_read_only: false,
+            tool_name: "grep",
+            tool_input: None,
+        };
+        assert_eq!(
+            authorize_child_tool_with_context(temp.path(), "runtime", "session", read, 22,)
+                .unwrap(),
+            None
+        );
+    }
+
+    for version in [14, 15, 16, 17, 18] {
+        let temp = tempdir().unwrap();
+        let path = explorer_legacy_ledger(temp.path(), version, false);
+        assert_eq!(
+            active_reservation_count(temp.path(), "runtime", "session", 20).unwrap(),
+            Some(1),
+            "v{version}"
+        );
+        let ledger: SessionLedger = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(
+            !active_attempts_are_read_only(
+                temp.path(),
+                "runtime",
+                "session",
+                &BTreeSet::from([hash_component("agent-explorer")]),
+                21,
+            )
+            .unwrap(),
+            "v{version}"
+        );
+        assert!(
+            ledger.reservations["task_explorer"]
+                .native_read_only_turn_hash
+                .is_none()
+        );
+    }
 }
 
 #[test]

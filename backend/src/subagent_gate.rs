@@ -14,6 +14,7 @@ use crate::subagent::{
     api::TraceContext,
     telemetry::{ExecutionStatus, SubagentTraceEvent, TraceEventKind, TraceRecorder},
 };
+use crate::subagent_orchestrator::StatusResponseSource;
 
 mod runtime_policy;
 mod state;
@@ -36,6 +37,7 @@ pub(crate) const RUNTIME_ID_ENV: &str = "CODEY_SUBAGENT_GATE_RUNTIME_ID";
 pub(crate) const HOOK_TIMEOUT_SECONDS: u64 = 5;
 pub(crate) const SESSION_END_HOOK_TIMEOUT_SECONDS: u64 = 3;
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
+const FOLLOWUP_STATUS_NEEDS_SNAPSHOT: &str = "Codey 轮次门禁：续派后的完成通知缺少轮次标识，可能来自上一轮，不能据此结算当前轮。请调用一次 agents.list_agents 获取当前状态快照；此前已收到的匿名通知不得作为本轮验收结果。";
 const MAX_SESSION_ID_BYTES: usize = 256;
 const MAX_RENDERED_TOOL_RESULT_CHARS: usize = 8 * 1024;
 pub(crate) const STATE_DIRECTORY: &str = "codey-subagent-gate-v3";
@@ -114,12 +116,25 @@ struct RuntimeSubagentAttestation {
     role: String,
     model: String,
     reasoning_effort: String,
+    #[serde(default)]
+    native_sandbox: Option<NativeSandboxPermission>,
+    #[serde(default)]
+    native_sandbox_turn_hash: Option<String>,
+    #[serde(default)]
+    turn_hash: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeSandboxPermission {
+    ReadOnly,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedRuntimeSubagentSelection {
     model: String,
     reasoning_effort: String,
+    native_sandbox: Option<NativeSandboxPermission>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,6 +335,7 @@ fn handle_hook_for_runtime_at(
                     agent_id,
                     nonempty(input.agent_type.as_deref()),
                     nonempty(input.transcript_path.as_deref()),
+                    nonempty(input.turn_id.as_deref()),
                     now_ms,
                 )?;
                 if should_track {
@@ -345,19 +361,29 @@ fn handle_hook_for_runtime_at(
         }
         "SubagentStop" => {
             if let Some(agent_id) = nonempty(input.agent_id.as_deref()) {
-                crate::subagent_orchestrator::subagent_stopped_with_context(
+                let should_remove = crate::subagent_orchestrator::subagent_stopped_with_context(
                     state_root,
                     runtime_id,
                     &input.session_id,
                     agent_id,
                     nonempty(input.agent_type.as_deref()),
                     nonempty(input.agent_transcript_path.as_deref()),
+                    nonempty(input.turn_id.as_deref()),
                     now_ms,
                 )?;
-                remove_active_marker(state_root, runtime_id, &input.session_id, agent_id)?;
-                clear_child_tool_in_flight(state_root, runtime_id, &input.session_id, agent_id)?;
-                if active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)? == 0 {
-                    remove_session_state(state_root, runtime_id, &input.session_id)?;
+                if should_remove {
+                    remove_active_marker(state_root, runtime_id, &input.session_id, agent_id)?;
+                    clear_child_tool_in_flight(
+                        state_root,
+                        runtime_id,
+                        &input.session_id,
+                        agent_id,
+                    )?;
+                    if active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?
+                        == 0
+                    {
+                        remove_session_state(state_root, runtime_id, &input.session_id)?;
+                    }
                 }
             } else {
                 let settlement = crate::subagent_orchestrator::settle_unique_anonymous_stop(
@@ -623,9 +649,26 @@ fn runtime_subagent_attestation_denial(
     };
     let role =
         nonempty(input.agent_type.as_deref()).unwrap_or(crate::config::SUBAGENT_ROLE_DEFAULT);
+    if role == crate::config::SUBAGENT_ROLE_EXPLORER
+        && input
+            .tool_name
+            .as_deref()
+            .is_some_and(crate::subagent::rules::explorer_has_unbounded_side_effects)
+    {
+        return Ok(Some(
+            "CODEY_SUBAGENT_EXPLORER_WRAPPER_DENIED: Explorer 不得调用可绕过原生沙箱的通用执行包装或可操作界面工具。只读文件、搜索、图片和网络检索工具仍可用；请由主代理执行该操作。"
+                .to_string(),
+        ));
+    }
     let session_dir = session_state_dir(state_root, &input.session_id);
     let attestation_path = runtime_subagent_attestation_path(&session_dir, runtime_id, agent_id);
-    if cached_runtime_subagent_attestation_matches(&attestation_path, runtime_id, agent_id, role)? {
+    if cached_runtime_subagent_attestation_matches(
+        &attestation_path,
+        runtime_id,
+        agent_id,
+        role,
+        nonempty(input.turn_id.as_deref()),
+    )? {
         // A child that was already attested may finish while a later role-policy
         // update is pending. The new policy applies only to newly spawned work.
         return Ok(None);
@@ -690,6 +733,12 @@ fn runtime_subagent_attestation_denial(
         role: role.to_string(),
         model: observed.model,
         reasoning_effort: observed.reasoning_effort,
+        native_sandbox: observed.native_sandbox,
+        native_sandbox_turn_hash: observed
+            .native_sandbox
+            .and(input.turn_id.as_deref())
+            .map(hash_component),
+        turn_hash: input.turn_id.as_deref().map(hash_component),
     };
     let bytes = serde_json::to_vec(&attestation).context("序列化子代理运行配置证明失败")?;
     crate::fs_util::atomic_write_private_with_parent(&attestation_path, &bytes)
@@ -697,13 +746,23 @@ fn runtime_subagent_attestation_denial(
     Ok(None)
 }
 
-fn cached_runtime_subagent_attestation_matches(
-    path: &Path,
+fn child_native_read_only_attested(
+    state_root: &Path,
     runtime_id: &str,
+    input: &HookInput,
     agent_id: &str,
-    role: &str,
 ) -> Result<bool> {
-    let Some(bytes) = read_optional_runtime_policy_file(path)? else {
+    let role =
+        nonempty(input.agent_type.as_deref()).unwrap_or(crate::config::SUBAGENT_ROLE_DEFAULT);
+    if role != crate::config::SUBAGENT_ROLE_EXPLORER {
+        return Ok(false);
+    }
+    let attestation_path = runtime_subagent_attestation_path(
+        &session_state_dir(state_root, &input.session_id),
+        runtime_id,
+        agent_id,
+    );
+    let Some(bytes) = read_optional_runtime_policy_file(&attestation_path)? else {
         return Ok(false);
     };
     let Ok(attestation) = serde_json::from_slice::<RuntimeSubagentAttestation>(&bytes) else {
@@ -713,8 +772,41 @@ fn cached_runtime_subagent_attestation_matches(
         attestation.schema_version == RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION
             && attestation.runtime_id_hash == hash_component(runtime_id)
             && attestation.agent_id_hash == hash_component(agent_id)
-            && attestation.role == role,
+            && attestation.role == role
+            && attestation.native_sandbox == Some(NativeSandboxPermission::ReadOnly)
+            && input.turn_id.as_deref().map(hash_component) == attestation.native_sandbox_turn_hash,
     )
+}
+
+fn cached_runtime_subagent_attestation_matches(
+    path: &Path,
+    runtime_id: &str,
+    agent_id: &str,
+    role: &str,
+    turn_id: Option<&str>,
+) -> Result<bool> {
+    let Some(bytes) = read_optional_runtime_policy_file(path)? else {
+        return Ok(false);
+    };
+    let Ok(attestation) = serde_json::from_slice::<RuntimeSubagentAttestation>(&bytes) else {
+        return Ok(false);
+    };
+    let identity_matches = attestation.schema_version
+        == RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION
+        && attestation.runtime_id_hash == hash_component(runtime_id)
+        && attestation.agent_id_hash == hash_component(agent_id)
+        && attestation.role == role;
+    if !identity_matches || role != crate::config::SUBAGENT_ROLE_EXPLORER {
+        // Worker and Reviewer attestations published before turn hashes existed
+        // remain valid for their running process. Only Explorer command safety
+        // depends on the current turn's native sandbox proof.
+        return Ok(identity_matches);
+    }
+    let same_turn = match turn_id {
+        Some(turn_id) => attestation.turn_hash.as_deref() == Some(hash_component(turn_id).as_str()),
+        None => false,
+    };
+    Ok(same_turn)
 }
 
 fn runtime_subagent_attestation_path(
@@ -791,7 +883,7 @@ fn observed_runtime_subagent_selection(
         &[]
     };
 
-    let mut observed = None;
+    let mut observed: Option<ObservedRuntimeSubagentSelection> = None;
     for line in records.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -825,12 +917,30 @@ fn observed_runtime_subagent_selection(
         ) else {
             continue;
         };
-        observed = Some(ObservedRuntimeSubagentSelection {
+        let candidate = ObservedRuntimeSubagentSelection {
             model,
             reasoning_effort: reasoning_effort.to_ascii_lowercase(),
-        });
+            native_sandbox: turn_id.and_then(|_| observed_native_sandbox(payload)),
+        };
+        if observed
+            .as_ref()
+            .is_some_and(|current| current != &candidate)
+        {
+            return Ok(None);
+        }
+        observed = Some(candidate);
     }
     Ok(observed)
+}
+
+fn observed_native_sandbox(payload: &Map<String, Value>) -> Option<NativeSandboxPermission> {
+    let policy_type = payload
+        .get("sandbox_policy")
+        .and_then(Value::as_object)
+        .and_then(|policy| policy.get("type"))
+        .and_then(Value::as_str)?;
+    (policy_type.trim().eq_ignore_ascii_case("read-only"))
+        .then_some(NativeSandboxPermission::ReadOnly)
 }
 
 fn json_nonempty_string(payload: &Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -966,6 +1076,10 @@ fn pre_tool_use_output(
                     agent_id,
                     agent_type: nonempty(input.agent_type.as_deref()),
                     transcript_path: nonempty(input.transcript_path.as_deref()),
+                    turn_id: nonempty(input.turn_id.as_deref()),
+                    native_read_only: child_native_read_only_attested(
+                        state_root, runtime_id, input, agent_id,
+                    )?,
                     tool_name,
                     tool_input: input.tool_input.as_ref(),
                 },
@@ -1065,7 +1179,8 @@ fn pre_tool_use_output(
             runtime_id,
             &input.session_id,
             input.tool_input.as_ref(),
-            crate::subagent_orchestrator::RootHookContext::new(workspace_root, active, now_ms),
+            crate::subagent_orchestrator::RootHookContext::new(workspace_root, active, now_ms)
+                .with_turn_id(nonempty(input.turn_id.as_deref())),
         )? {
             return Ok(pre_tool_reason_denial(&reason));
         }
@@ -1231,6 +1346,8 @@ fn post_tool_use_output(
             runtime_id,
             &input.session_id,
             input.tool_input.as_ref(),
+            input.tool_response.as_ref(),
+            nonempty(input.turn_id.as_deref()),
             now_ms,
         )?;
         return Ok(json!({}));
@@ -1359,7 +1476,7 @@ fn post_tool_use_output(
             runtime_id,
             &input.session_id,
             status_response,
-            true,
+            StatusResponseSource::Snapshot(true),
             now_ms,
         )?;
         remove_session_state(state_root, runtime_id, &input.session_id)?;
@@ -1367,25 +1484,39 @@ fn post_tool_use_output(
     }
 
     if active == 0 {
-        settle_status_response_and_markers(
+        let needs_snapshot = settle_status_response_and_markers(
             state_root,
             runtime_id,
             &input.session_id,
             status_response,
-            true,
+            if is_wait_agent_tool(tool_name) {
+                StatusResponseSource::Notification
+            } else {
+                StatusResponseSource::Snapshot(true)
+            },
             now_ms,
         )?;
+        if needs_snapshot {
+            return Ok(json!({"decision":"block", "reason":FOLLOWUP_STATUS_NEEDS_SNAPSHOT}));
+        }
         remove_session_state(state_root, runtime_id, &input.session_id)?;
         return Ok(json!({}));
     }
-    settle_status_response_and_markers(
+    let needs_snapshot = settle_status_response_and_markers(
         state_root,
         runtime_id,
         &input.session_id,
         status_response,
-        false,
+        if is_wait_agent_tool(tool_name) {
+            StatusResponseSource::Notification
+        } else {
+            StatusResponseSource::Snapshot(false)
+        },
         now_ms,
     )?;
+    if needs_snapshot {
+        return Ok(json!({"decision":"block", "reason":FOLLOWUP_STATUS_NEEDS_SNAPSHOT}));
+    }
     let remaining = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
     if remaining == 0 {
         remove_session_state(state_root, runtime_id, &input.session_id)?;
@@ -1449,21 +1580,21 @@ fn settle_status_response_and_markers(
     runtime_id: &str,
     session_id: &str,
     tool_response: Option<&Value>,
-    all_terminal: bool,
+    source: StatusResponseSource,
     now_ms: u64,
-) -> Result<()> {
-    let agent_id_hashes = crate::subagent_orchestrator::observe_status_response(
+) -> Result<bool> {
+    let observation = crate::subagent_orchestrator::observe_status_response(
         state_root,
         runtime_id,
         session_id,
         tool_response,
-        all_terminal,
+        source,
         now_ms,
     )?;
-    for agent_id_hash in &agent_id_hashes {
+    for agent_id_hash in &observation.settled_agent_hashes {
         remove_active_marker_by_hash(state_root, runtime_id, session_id, agent_id_hash)?;
     }
-    Ok(())
+    Ok(observation.needs_snapshot)
 }
 
 fn stop_output(

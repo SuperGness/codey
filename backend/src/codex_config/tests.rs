@@ -2,6 +2,7 @@ use super::*;
 use crate::codex_config_guidance::{
     CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, SUBAGENT_GUIDANCE_VERSIONS,
     codey_fastctx_guidance_for_namespace, remove_codey_fastctx_guidance,
+    root_agent_collaboration_usage_hint,
 };
 const LEGACY_GLOBAL_PROVIDER_ID: &str = "codey_global";
 
@@ -1221,23 +1222,24 @@ fn stale_role_template_source_is_repaired_instead_of_failing_the_reconcile() {
 #[test]
 fn isolated_prompt_sources_migrate_historical_defaults_and_preserve_user_guidance() {
     let temp = tempfile::tempdir().unwrap();
-    let mut sources = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
+    let collaboration_source = root_agent_collaboration_usage_hint();
     for (name, current, versions) in [
         (
             "fastctx.md",
-            CODEY_FASTCTX_GUIDANCE,
+            CODEY_FASTCTX_GUIDANCE.to_string(),
             CODEY_FASTCTX_GUIDANCE_VERSIONS,
         ),
         (
             "collaboration.md",
-            ROOT_AGENT_COLLABORATION_USAGE_HINT,
+            collaboration_source,
             ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
         ),
     ] {
         let path = temp.path().join(name);
-        rebuild_constraint_file(&path, current).unwrap();
+        rebuild_constraint_file(&path, &current).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), current);
-        sources.push(current.to_string());
+        sources.push(current.clone());
         assert!(!versions.is_empty());
     }
     let mut document = parse_document(
@@ -1277,7 +1279,10 @@ enabled = true
         .unwrap();
     assert_eq!(
         collaboration,
-        format!("User collaboration policy.\n\n{ROOT_AGENT_COLLABORATION_USAGE_HINT}")
+        format!(
+            "User collaboration policy.\n\n{}",
+            root_agent_collaboration_usage_hint()
+        )
     );
     for stale in [
         "CODEY_DELEGATION_V2",
@@ -1292,7 +1297,7 @@ enabled = true
 }
 
 #[test]
-fn runtime_analysis_agents_share_tools_and_keep_task_boundaries() {
+fn runtime_agents_keep_role_sandboxes_and_task_boundaries() {
     let temp = tempfile::tempdir().unwrap();
     let constraints_dir = temp.path().join("codex-constraints");
     let roles = crate::config::default_subagent_roles();
@@ -1312,7 +1317,7 @@ fn runtime_analysis_agents_share_tools_and_keep_task_boundaries() {
         .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_EXPLORER)
         .unwrap();
     let explorer = String::from_utf8(explorer.contents.clone()).unwrap();
-    assert!(explorer.contains("sandbox_mode = \"workspace-write\""));
+    assert!(explorer.contains("sandbox_mode = \"read-only\""));
     assert!(explorer.contains("你是检索子代理，只读"));
 
     let worker = plans
@@ -1383,7 +1388,12 @@ fn runtime_agent_sources_are_rebuilt_from_the_current_definitions() {
             .find(|plan| plan.registration.role == role)
             .unwrap();
         let rendered = parse_document(std::str::from_utf8(&plan.contents).unwrap()).unwrap();
-        assert_eq!(rendered["sandbox_mode"].as_str(), Some("workspace-write"));
+        let expected_sandbox = if role == crate::config::SUBAGENT_ROLE_EXPLORER {
+            "read-only"
+        } else {
+            "workspace-write"
+        };
+        assert_eq!(rendered["sandbox_mode"].as_str(), Some(expected_sandbox));
         assert_eq!(
             rendered["description"].as_str(),
             parse_document(current).unwrap()["description"].as_str(),
@@ -3116,7 +3126,7 @@ command = "echo preserve-user-hook"
     );
     let root_usage_hint = multi_agent["root_agent_usage_hint_text"].as_str().unwrap();
     assert!(root_usage_hint.contains("Preserve my root usage hint."));
-    assert!(root_usage_hint.contains(ROOT_AGENT_COLLABORATION_USAGE_HINT));
+    assert!(root_usage_hint.contains(&root_agent_collaboration_usage_hint()));
     assert_eq!(
         multi_agent["multi_agent_mode_hint_text"].as_str(),
         Some(ROOT_AGENT_MULTI_AGENT_MODE_HINT)
@@ -3953,7 +3963,7 @@ wire_api = "responses"
     .unwrap();
     fs::write(
         seeded_constraints_dir.join(CODEY_COLLABORATION_HINT_FILE),
-        ROOT_AGENT_COLLABORATION_USAGE_HINT,
+        root_agent_collaboration_usage_hint(),
     )
     .unwrap();
     let applied = apply_isolated_test_runtime_config(
@@ -4182,7 +4192,7 @@ wire_api = "responses"
     );
     assert_eq!(
         fs::read_to_string(constraints_dir.join(CODEY_COLLABORATION_HINT_FILE)).unwrap(),
-        ROOT_AGENT_COLLABORATION_USAGE_HINT
+        root_agent_collaboration_usage_hint()
     );
     assert!(constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE).exists());
     assert!(
@@ -4268,7 +4278,7 @@ wire_api = "responses"
     );
     assert_eq!(
         fs::read_to_string(constraints_dir.join(CODEY_COLLABORATION_HINT_FILE)).unwrap(),
-        ROOT_AGENT_COLLABORATION_USAGE_HINT
+        root_agent_collaboration_usage_hint()
     );
     let developer_override = reapplied
         .runtime_config_overrides
@@ -4293,7 +4303,7 @@ wire_api = "responses"
         .unwrap();
     assert_eq!(
         collaboration_override["features"]["multi_agent_v2"]["root_agent_usage_hint_text"].as_str(),
-        Some(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+        Some(root_agent_collaboration_usage_hint().as_str())
     );
     let runtime_agent =
         fs::read_to_string(constraints_dir.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE)).unwrap();

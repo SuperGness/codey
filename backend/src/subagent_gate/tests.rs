@@ -67,6 +67,38 @@ fn attest_test_child(input: &HookInput, state_root: &Path, runtime_id: &str) {
             role: role.to_string(),
             model: expected.model.clone(),
             reasoning_effort: expected.reasoning_effort.clone(),
+            native_sandbox: None,
+            native_sandbox_turn_hash: None,
+            turn_hash: input.turn_id.as_deref().map(hash_component),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn attest_test_explorer_read_only(input: &HookInput, state_root: &Path, runtime_id: &str) {
+    let agent_id = input.agent_id.as_deref().unwrap();
+    let role = crate::config::SUBAGENT_ROLE_EXPLORER;
+    let expected = &crate::config::default_subagent_roles()[role];
+    let turn_id = input.turn_id.as_deref().unwrap();
+    let path = runtime_subagent_attestation_path(
+        &session_state_dir(state_root, &input.session_id),
+        runtime_id,
+        agent_id,
+    );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec(&RuntimeSubagentAttestation {
+            schema_version: RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION,
+            runtime_id_hash: hash_component(runtime_id),
+            agent_id_hash: hash_component(agent_id),
+            role: role.to_string(),
+            model: expected.model.clone(),
+            reasoning_effort: expected.reasoning_effort.clone(),
+            native_sandbox: Some(NativeSandboxPermission::ReadOnly),
+            native_sandbox_turn_hash: Some(hash_component(turn_id)),
+            turn_hash: Some(hash_component(turn_id)),
         })
         .unwrap(),
     )
@@ -124,7 +156,12 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
         if let (Some(model), Some(effort)) = (model, effort) {
             records.push(json!({
                 "type": "turn_context",
-                "payload": {"turn_id": turn_id, "model": model, "effort": effort}
+                "payload": {
+                    "turn_id": turn_id,
+                    "model": model,
+                    "effort": effort,
+                    "sandbox_policy": {"type": "read-only"}
+                }
             }));
         }
         fs::write(
@@ -158,6 +195,12 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
         runtime_subagent_attestation_denial(&good, &state_root, runtime_id).unwrap(),
         None
     );
+
+    let mut next_turn = child_input(good_agent, &good_transcript);
+    next_turn.turn_id = Some("child-turn-2".into());
+    let next_turn_denial =
+        runtime_subagent_attestation_denial(&next_turn, &state_root, runtime_id).unwrap();
+    assert!(next_turn_denial.is_some());
 
     begin_runtime_subagent_policy_update(home, &roles, &hashes).unwrap();
     // Already-attested children may finish their existing turn while new
@@ -298,6 +341,521 @@ fn missing_runtime_policy_denies_new_work_but_allows_child_reporting() {
     assert_eq!(
         handle_hook_for_runtime_at(&child, root, runtime_id, 40).unwrap()["hookSpecificOutput"]["permissionDecision"],
         "deny"
+    );
+}
+
+#[test]
+fn explorer_wrappers_are_denied_even_with_a_cached_attestation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-wrapper";
+    let mut child = input("PreToolUse", "wrapper-session");
+    child.agent_id = Some("agent-wrapper".into());
+    child.agent_type = Some("codey_explorer".into());
+    child.turn_id = Some("child-turn".into());
+    attest_test_child(&child, root, runtime_id);
+    for name in [
+        "functions.exec",
+        "mcp__cua_repl__js",
+        "mcp__cua_repl__js_reset",
+        "mcp__codex_app__open_in_codex",
+        "mcp__codex_app__other_editor",
+    ] {
+        child.tool_name = Some(name.into());
+        let denied = runtime_subagent_attestation_denial(&child, root, runtime_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            denied.contains("CODEY_SUBAGENT_EXPLORER_WRAPPER_DENIED"),
+            "{name}: {denied}"
+        );
+    }
+}
+
+#[test]
+fn worker_usage_is_attributed_per_turn_without_batch_copy_or_business_payload() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-usage";
+    let session_id = "usage-session";
+    write_test_runtime_policy(root);
+
+    for (task, agent, at) in [
+        ("first", "usage-agent-a", 10),
+        ("second", "usage-agent-b", 20),
+    ] {
+        let mut spawn = input("PreToolUse", session_id);
+        spawn.cwd = Some("/repo".to_string());
+        spawn.turn_id = Some("root-turn-shared".to_string());
+        spawn.tool_name = Some("agents.spawn_agent".to_string());
+        spawn.tool_input = Some(json!({
+            "task_name": task,
+            "agent_type": "codey_worker",
+            "message": "Run the bounded task."
+        }));
+        let output = handle_hook_for_runtime_at(&spawn, root, runtime_id, at).unwrap();
+        assert_eq!(output, json!({}), "{task}");
+        spawn.hook_event_name = "PostToolUse".to_string();
+        spawn.tool_response = Some(json!({"agent_id": agent}));
+        let output = handle_hook_for_runtime_at(&spawn, root, runtime_id, at + 1).unwrap();
+        assert_eq!(output, json!({}), "{task}");
+    }
+
+    let mut wait = input("PostToolUse", session_id);
+    wait.tool_name = Some("agents.wait_agent".to_string());
+    wait.tool_response = Some(json!({
+        "usage": {"input_tokens": 999, "output_tokens": 999},
+        "agents": [
+            {
+                "agent_id": "usage-agent-a",
+                "status": "completed",
+                "turn_id": "turn-a",
+                "usage": {"input_tokens": 11, "output_tokens": 3},
+                "output": {
+                    "usage": {"input_tokens": 700, "output_tokens": 700}
+                }
+            },
+            {
+                "agent_id": "usage-agent-b",
+                "status": "completed",
+                "turn_id": "turn-b",
+                "usage": {"input_tokens": 17, "output_tokens": 5}
+            }
+        ]
+    }));
+    handle_hook_for_runtime_at(&wait, root, runtime_id, 30).unwrap();
+
+    let completed_trace_count = hook_trace_events(root)
+        .iter()
+        .filter(|event| event.event == TraceEventKind::Completed)
+        .count();
+    let closed = handle_hook_for_runtime_at(&wait, root, runtime_id, 31).unwrap();
+    assert_eq!(closed, json!({}));
+    let events = hook_trace_events(root)
+        .into_iter()
+        .filter(|event| event.event == TraceEventKind::Completed)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), completed_trace_count, "{events:?}");
+    let usages = events
+        .iter()
+        .map(|event| {
+            (
+                event.task_id_hash.clone(),
+                event.turn_hash.clone(),
+                event.usage.clone().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(usages.iter().any(|(_, turn, usage)| {
+        turn.as_deref() == Some(hash_component("turn-a").as_str())
+            && usage.input_tokens == 11
+            && usage.output_tokens == 3
+    }));
+    assert!(
+        usages.iter().any(|(_, turn, usage)| {
+            turn.as_deref() == Some(hash_component("turn-b").as_str())
+                && usage.input_tokens == 17
+                && usage.output_tokens == 5
+        }),
+        "{usages:?}"
+    );
+    assert!(usages.iter().all(|(_, _, usage)| usage.input_tokens < 100));
+}
+
+#[test]
+fn followup_turns_keep_separate_usage_and_emit_resume_trace() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-usage-followup";
+    let session_id = "usage-followup-session";
+    write_test_runtime_policy(root);
+    let task = "usage_worker";
+    let agent = "usage-followup-agent";
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.cwd = Some("/repo".to_string());
+    spawn.turn_id = Some("root-turn-a".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": task,
+        "agent_type": "codey_worker",
+        "message": "Run the bounded task."
+    }));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+    spawn.hook_event_name = "PostToolUse".to_string();
+    spawn.tool_response = Some(json!({"agent_id": agent}));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 11).unwrap();
+
+    let mut child = input("PreToolUse", session_id);
+    child.agent_id = Some(agent.to_string());
+    child.agent_type = Some("codey_worker".to_string());
+    child.turn_id = Some("child-turn-a".to_string());
+    child.tool_name = Some("exec_command".to_string());
+    child.tool_input = Some(json!({"cmd": "cargo test"}));
+    attest_test_child(&child, root, runtime_id);
+    handle_hook_for_runtime_at(&child, root, runtime_id, 12).unwrap();
+
+    let wait_for_usage = |turn_id: &str, input_tokens: u64, output_tokens: u64, status: &str| {
+        let mut wait = input("PostToolUse", session_id);
+        wait.tool_name = Some("agents.wait_agent".to_string());
+        wait.tool_response = Some(json!({
+            "agents": [{
+                "agent_id": agent,
+                "status": status,
+                "turn_id": turn_id,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens
+                }
+            }]
+        }));
+        wait
+    };
+    let first = wait_for_usage("child-turn-a", 21, 4, "completed");
+    handle_hook_for_runtime_at(&first, root, runtime_id, 20).unwrap();
+    handle_hook_for_runtime_at(&first, root, runtime_id, 21).unwrap();
+    handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 30).unwrap();
+
+    let followup = followup_input(session_id, task, "root-turn-b");
+    handle_hook_for_runtime_at(&followup, root, runtime_id, 40).unwrap();
+    let running = wait_for_usage("child-turn-b", 34, 8, "running");
+    handle_hook_for_runtime_at(&running, root, runtime_id, 41).unwrap();
+    child.turn_id = Some("child-turn-b".to_string());
+    attest_test_child(&child, root, runtime_id);
+    handle_hook_for_runtime_at(&child, root, runtime_id, 42).unwrap();
+    let second = wait_for_usage("child-turn-b", 34, 8, "completed");
+    handle_hook_for_runtime_at(&second, root, runtime_id, 50).unwrap();
+
+    let completed = hook_trace_events(root)
+        .into_iter()
+        .filter(|event| event.event == TraceEventKind::Completed)
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 2, "{completed:?}");
+    for (turn, input_tokens, output_tokens) in [("child-turn-a", 21, 4), ("child-turn-b", 34, 8)] {
+        let expected = hash_component(turn);
+        let event = completed
+            .iter()
+            .find(|event| event.turn_hash.as_deref() == Some(expected.as_str()))
+            .unwrap_or_else(|| panic!("missing usage for {turn}: {completed:?}"));
+        let usage = event
+            .usage
+            .as_ref()
+            .unwrap_or_else(|| panic!("missing usage for {turn}: {event:?}"));
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens),
+            (input_tokens, output_tokens)
+        );
+        assert!(event.root_turn_hash.is_some());
+        assert!(event.attempt_hash.is_some());
+        assert!(event.attributes.contains_key("duration.execution_ms"));
+        assert!(event.attributes.contains_key("duration.queue_ms"));
+    }
+    assert!(
+        hook_trace_events(root)
+            .iter()
+            .any(|event| event.event == TraceEventKind::Resumed)
+    );
+}
+
+#[test]
+fn stale_followup_snapshots_cannot_rebind_or_finish_the_new_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-turn-isolation";
+    let session_id = "turn-isolation-session";
+    write_test_runtime_policy(root);
+    let task = "worker";
+    let agent = "worker-agent";
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.cwd = Some("/repo".to_string());
+    spawn.turn_id = Some("root-turn-a".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": task, "agent_type": "codey_worker",
+        "message": "Run the first turn."
+    }));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+    spawn.hook_event_name = "PostToolUse".to_string();
+    spawn.tool_response = Some(json!({"agent_id": agent}));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 11).unwrap();
+
+    let mut first_wait = input("PostToolUse", session_id);
+    first_wait.tool_name = Some("agents.wait_agent".to_string());
+    first_wait.tool_response = Some(json!({
+        "agents": [{
+            "agent_id": agent, "turn_id": "turn-a", "status": "completed",
+            "usage": {"input_tokens": 21, "output_tokens": 4}
+        }]
+    }));
+    handle_hook_for_runtime_at(&first_wait, root, runtime_id, 20).unwrap();
+    handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 30).unwrap();
+
+    let followup = followup_input(session_id, task, "root-turn-b");
+    assert_eq!(
+        handle_hook_for_runtime_at(&followup, root, runtime_id, 40).unwrap(),
+        json!({})
+    );
+    let mut delivered = followup_input(session_id, task, "root-turn-b");
+    delivered.hook_event_name = "PostToolUse".to_string();
+    delivered.tool_response = Some(json!({}));
+    handle_hook_for_runtime_at(&delivered, root, runtime_id, 41).unwrap();
+
+    for (at, state, input_tokens) in [
+        (42, "running", 11),
+        (43, "completed", 11),
+        (44, "completed", 11),
+    ] {
+        let mut stale = input("PostToolUse", session_id);
+        stale.tool_name = Some("agents.wait_agent".to_string());
+        stale.tool_response = Some(json!({
+            "agents": [{
+                "agent_id": agent, "turn_id": "turn-a", "status": state,
+                "usage": {"input_tokens": input_tokens, "output_tokens": 4}
+            }]
+        }));
+        handle_hook_for_runtime_at(&stale, root, runtime_id, at).unwrap();
+    }
+    let mut stale_stop = input("SubagentStop", session_id);
+    stale_stop.agent_id = Some(agent.to_string());
+    stale_stop.agent_type = Some("codey_worker".to_string());
+    stale_stop.turn_id = Some("turn-a".to_string());
+    handle_hook_for_runtime_at(&stale_stop, root, runtime_id, 45).unwrap();
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        1
+    );
+
+    let mut child = input("PreToolUse", session_id);
+    child.agent_id = Some(agent.to_string());
+    child.agent_type = Some("codey_worker".to_string());
+    child.turn_id = Some("turn-b".to_string());
+    child.tool_name = Some("grep".to_string());
+    attest_test_child(&child, root, runtime_id);
+    assert_eq!(
+        handle_hook_for_runtime_at(&child, root, runtime_id, 50).unwrap(),
+        json!({})
+    );
+    for (at, state) in [(51, "running"), (52, "completed"), (53, "completed")] {
+        let mut stale = input("PostToolUse", session_id);
+        stale.tool_name = Some("agents.wait_agent".to_string());
+        stale.tool_response = Some(json!({
+            "agents": [{
+                "agent_id": agent, "turn_id": "turn-a", "status": state,
+                "usage": {"input_tokens": 11, "output_tokens": 4}
+            }]
+        }));
+        handle_hook_for_runtime_at(&stale, root, runtime_id, at).unwrap();
+    }
+    for (at, input_tokens, state) in [(54, 30, "running"), (55, 34, "completed")] {
+        let mut current = input("PostToolUse", session_id);
+        current.tool_name = Some("agents.wait_agent".to_string());
+        current.tool_response = Some(json!({
+            "agents": [{
+                "agent_id": agent, "turn_id": "turn-b", "status": state,
+                "usage": {"input_tokens": input_tokens, "output_tokens": 8}
+            }]
+        }));
+        handle_hook_for_runtime_at(&current, root, runtime_id, at).unwrap();
+    }
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        0
+    );
+    let completed = hook_trace_events(root)
+        .into_iter()
+        .filter(|event| event.event == TraceEventKind::Completed)
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 2);
+    for (turn_id, input_tokens) in [("turn-a", 21), ("turn-b", 34)] {
+        let event = completed
+            .iter()
+            .find(|event| event.turn_hash.as_deref() == Some(hash_component(turn_id).as_str()))
+            .unwrap();
+        assert_eq!(event.usage.as_ref().unwrap().input_tokens, input_tokens);
+    }
+}
+
+#[test]
+fn queued_final_answer_from_the_old_turn_cannot_finish_followup() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-final-isolation";
+    let session_id = "final-isolation-session";
+    write_test_runtime_policy(root);
+    let task = "worker";
+    let agent = "worker-agent";
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.cwd = Some("/repo".to_string());
+    spawn.turn_id = Some("root-turn-a".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": task, "agent_type": "codey_worker",
+        "message": "Run the first turn."
+    }));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+    spawn.hook_event_name = "PostToolUse".to_string();
+    spawn.tool_response = Some(json!({"agent_id": agent}));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 11).unwrap();
+
+    let mut child = input("PreToolUse", session_id);
+    child.agent_id = Some(agent.to_string());
+    child.agent_type = Some("codey_worker".to_string());
+    child.turn_id = Some("turn-a".to_string());
+    child.tool_name = Some("grep".to_string());
+    attest_test_child(&child, root, runtime_id);
+    handle_hook_for_runtime_at(&child, root, runtime_id, 12).unwrap();
+
+    let completed_a = |at| {
+        let mut wait = input("PostToolUse", session_id);
+        wait.tool_name = Some("agents.wait_agent".to_string());
+        wait.tool_response = Some(json!({
+            "agents": [{
+                "agent_id": agent, "turn_id": "turn-a", "status": "completed",
+                "usage": {"input_tokens": 21, "output_tokens": 4}
+            }]
+        }));
+        handle_hook_for_runtime_at(&wait, root, runtime_id, at).unwrap()
+    };
+    completed_a(20);
+    handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 30).unwrap();
+
+    let followup = followup_input(session_id, task, "root-turn-b");
+    handle_hook_for_runtime_at(&followup, root, runtime_id, 40).unwrap();
+    let mut delivered = followup_input(session_id, task, "root-turn-b");
+    delivered.hook_event_name = "PostToolUse".to_string();
+    delivered.tool_response = Some(json!({}));
+    handle_hook_for_runtime_at(&delivered, root, runtime_id, 41).unwrap();
+
+    let mut stale_final = input("PostToolUse", session_id);
+    stale_final.tool_name = Some("agents.wait_agent".to_string());
+    stale_final.tool_response = Some(json!({
+        "status": "FINAL_ANSWER",
+        "agent_id": agent,
+        "turn_id": "turn-a"
+    }));
+    let blocked = handle_hook_for_runtime_at(&stale_final, root, runtime_id, 42).unwrap();
+    assert_eq!(blocked["decision"].as_str(), Some("block"));
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        1
+    );
+
+    child.turn_id = Some("turn-b".to_string());
+    attest_test_child(&child, root, runtime_id);
+    handle_hook_for_runtime_at(&child, root, runtime_id, 50).unwrap();
+    stale_final.tool_response = Some(json!({
+        "status": "FINAL_ANSWER", "agent_id": agent
+    }));
+    let anonymous = handle_hook_for_runtime_at(&stale_final, root, runtime_id, 50).unwrap();
+    assert_eq!(anonymous["decision"].as_str(), Some("block"));
+    assert!(
+        anonymous["reason"]
+            .as_str()
+            .unwrap()
+            .contains("list_agents")
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        1
+    );
+    let mut completed_b = input("PostToolUse", session_id);
+    completed_b.tool_name = Some("agents.wait_agent".to_string());
+    completed_b.tool_response = Some(json!({
+        "status": "FINAL_ANSWER",
+        "agent_id": agent,
+        "turn_id": "turn-b"
+    }));
+    handle_hook_for_runtime_at(&completed_b, root, runtime_id, 51).unwrap();
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn batch_only_usage_remains_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-batch-usage";
+    let session_id = "batch-usage-session";
+    write_test_runtime_policy(root);
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.cwd = Some("/repo".to_string());
+    spawn.turn_id = Some("root-turn".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": "batch_worker",
+        "agent_type": "codey_worker",
+        "message": "Run the bounded task."
+    }));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+    spawn.hook_event_name = "PostToolUse".to_string();
+    spawn.tool_response = Some(json!({"agent_id": "batch-agent"}));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 11).unwrap();
+
+    let mut wait = input("PostToolUse", session_id);
+    wait.tool_name = Some("agents.wait_agent".to_string());
+    wait.tool_response = Some(json!({
+        "usage": {"input_tokens": 50, "output_tokens": 20},
+        "agents": [{"agent_id": "batch-agent", "status": "completed"}]
+    }));
+    handle_hook_for_runtime_at(&wait, root, runtime_id, 20).unwrap();
+    let completed = hook_trace_events(root)
+        .into_iter()
+        .find(|event| event.event == TraceEventKind::Completed)
+        .unwrap();
+    assert_eq!(completed.usage, None);
+    assert_eq!(completed.turn_hash, None);
+}
+
+#[test]
+fn child_usage_requires_turn_and_ignores_business_text_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let runtime_id = "runtime-business-usage";
+    let session_id = "business-usage-session";
+    write_test_runtime_policy(root);
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.cwd = Some("/repo".to_string());
+    spawn.turn_id = Some("root-turn".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": "business_worker",
+        "agent_type": "codey_worker",
+        "message": "Run the bounded task."
+    }));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+    spawn.hook_event_name = "PostToolUse".to_string();
+    spawn.tool_response = Some(json!({"agent_id": "business-agent"}));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 11).unwrap();
+
+    let mut wait = input("PostToolUse", session_id);
+    wait.tool_name = Some("agents.wait_agent".to_string());
+    wait.tool_response = Some(json!({
+        "agents": [{
+            "agent_id": "business-agent",
+            "status": "completed",
+            "turn_id": "business-turn",
+            "output": {
+                "text": "usage: input_tokens=700 output_tokens=700",
+                "usage": {"input_tokens": 700, "output_tokens": 700}
+            }
+        }]
+    }));
+    handle_hook_for_runtime_at(&wait, root, runtime_id, 20).unwrap();
+
+    let completed = hook_trace_events(root)
+        .into_iter()
+        .find(|event| event.event == TraceEventKind::Completed)
+        .unwrap();
+    assert_eq!(completed.usage, None);
+    assert_eq!(
+        completed.turn_hash.as_deref(),
+        Some(hash_component("business-turn").as_str())
     );
 }
 
@@ -555,8 +1113,27 @@ fn spawn_task_receipt_binds_child_while_codex_controls_read_paths() {
     first_read.transcript_path = Some(transcript.to_string_lossy().into_owned());
     first_read.cwd = Some(workspace);
     first_read.tool_name = Some("mcp__codey_fastctx__glob".to_string());
+    first_read.turn_id = Some("child-turn-a".to_string());
     first_read.tool_input = Some(json!({ "path": "scope", "pattern": ["**/*.rs"] }));
-    attest_test_child(&first_read, &state_root, &current_runtime_id());
+    let mut read_transcript = fs::read_to_string(&transcript).unwrap();
+    read_transcript.push_str(&format!(
+        "{}\n",
+        serde_json::to_string(&json!({
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "child-turn-a",
+                "model": crate::config::default_subagent_roles()
+                    [crate::config::SUBAGENT_ROLE_EXPLORER]
+                    .model,
+                "effort": crate::config::default_subagent_roles()
+                    [crate::config::SUBAGENT_ROLE_EXPLORER]
+                    .reasoning_effort,
+                "sandbox_policy": {"type": "read-only"}
+            }
+        }))
+        .unwrap()
+    ));
+    fs::write(&transcript, read_transcript).unwrap();
     assert_eq!(handle_hook(&first_read, &state_root).unwrap(), json!({}));
 
     let mut sibling_read = first_read;
@@ -611,7 +1188,7 @@ fn transcript_identity_correlation_rejects_a_wrong_parent_session() {
     std::fs::write(
         &transcript,
         format!(
-            "{}\n",
+            "{}\n{}\n",
             serde_json::to_string(&json!({
                 "type": "session_meta",
                 "payload": {
@@ -619,6 +1196,20 @@ fn transcript_identity_correlation_rejects_a_wrong_parent_session() {
                     "parent_thread_id": "different-parent-session",
                     "agent_path": "/root/spoof_reader",
                     "agent_role": "codey_explorer"
+                }
+            }))
+            .unwrap(),
+            serde_json::to_string(&json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "child-turn-a",
+                    "model": crate::config::default_subagent_roles()
+                        [crate::config::SUBAGENT_ROLE_EXPLORER]
+                        .model,
+                    "effort": crate::config::default_subagent_roles()
+                        [crate::config::SUBAGENT_ROLE_EXPLORER]
+                        .reasoning_effort,
+                    "sandbox_policy": {"type": "read-only"}
                 }
             }))
             .unwrap()
@@ -632,7 +1223,7 @@ fn transcript_identity_correlation_rejects_a_wrong_parent_session() {
     first_read.transcript_path = Some(transcript.to_string_lossy().into_owned());
     first_read.tool_name = Some("mcp__codey_fastctx__glob".to_string());
     first_read.tool_input = Some(json!({ "path": workspace, "pattern": ["**/*.rs"] }));
-    attest_test_child(&first_read, &state_root, &current_runtime_id());
+    first_read.turn_id = Some("child-turn-a".to_string());
     let denied = handle_hook(&first_read, &state_root).unwrap();
     assert_eq!(
         denied["hookSpecificOutput"]["permissionDecision"].as_str(),
@@ -2542,17 +3133,22 @@ fn root_keeps_writing_while_only_explorers_run() {
     };
 
     spawn_agent("scan_api", "codey_explorer", "agent-scan", base + 10);
-    for tool_name in [
-        "functions.apply_patch",
-        "functions.exec",
-        "mcp__unknown__query",
-    ] {
-        assert_eq!(
-            root_decision(root_turn, tool_name, base + 20),
-            None,
-            "{tool_name}"
-        );
-    }
+    let unproven_root_write = root_decision(root_turn, "functions.apply_patch", base + 20);
+    assert_eq!(unproven_root_write.as_deref(), Some("deny"));
+    let mut child_proof = input("PreToolUse", session_id);
+    child_proof.agent_id = Some("agent-scan".into());
+    child_proof.agent_type = Some("codey_explorer".into());
+    child_proof.turn_id = Some("child-turn-a".into());
+    child_proof.tool_name = Some("mcp__codey_fastctx__inspect_local_file".into());
+    attest_test_explorer_read_only(&child_proof, root, runtime_id);
+    assert_eq!(
+        handle_hook_for_runtime_at(&child_proof, root, runtime_id, base + 14).unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        root_decision(root_turn, "functions.apply_patch", base + 15),
+        None
+    );
     assert_eq!(
         root_decision("different-turn", "functions.apply_patch", base + 21).as_deref(),
         Some("deny")
@@ -2567,14 +3163,9 @@ fn root_keeps_writing_while_only_explorers_run() {
     wait.turn_id = Some(root_turn.to_string());
     wait.tool_name = Some("agents.wait_agent".to_string());
     wait.tool_response = Some(json!({ "timedOut": true, "message": "still running" }));
-    let reason = handle_hook_for_runtime_at(&wait, root, runtime_id, base + 23).unwrap()["reason"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(
-        reason.contains("主代理可以继续独立的写入和命令"),
-        "{reason}"
-    );
+    let proven_wait = handle_hook_for_runtime_at(&wait, root, runtime_id, base + 23).unwrap();
+    let reason = proven_wait["reason"].as_str().unwrap();
+    assert!(reason.contains("主代理可以继续独立的写入和命令"));
     assert!(
         reason.contains("直接再次调用 agents.wait_agent"),
         "{reason}"
@@ -4278,7 +4869,12 @@ fn complete_by_wait(root: &Path, runtime_id: &str, session_id: &str, task: &str,
         "timedout": false,
         "agents": [{ "agent_id": format!("/root/{task}"), "status": "completed" }]
     }));
-    handle_hook_for_runtime_at(&wait, root, runtime_id, at).unwrap();
+    let result = handle_hook_for_runtime_at(&wait, root, runtime_id, at).unwrap();
+    if result["reason"].as_str() == Some(FOLLOWUP_STATUS_NEEDS_SNAPSHOT) {
+        // 模拟主代理按门禁提示查询当前状态，匿名队列消息本身不再作为续派终态。
+        wait.tool_name = Some("agents.list_agents".to_string());
+        handle_hook_for_runtime_at(&wait, root, runtime_id, at + 1).unwrap();
+    }
 }
 
 fn followup_input(session_id: &str, task: &str, turn: &str) -> HookInput {

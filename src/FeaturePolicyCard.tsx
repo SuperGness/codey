@@ -71,7 +71,7 @@ const SUBAGENT_TASK_TYPES = [
     name: "复核",
     kind: "analysis",
     icon: IconPhotoSearch,
-    description: "独立核验已完成的改动，包括差异、针对性测试和界面渲染效果。",
+    description: "独立核验已完成的改动，包括差异、针对性测试和界面渲染效果；可按任务运行构建、测试和渲染检查。",
   },
   {
     id: "codey_worker",
@@ -322,7 +322,7 @@ export function SubagentPolicyCardComponent({
                     </div>
                   </div>
                   <span className="subagent-group-desc">
-                    负责检索与独立复核，可按任务授权调用工具
+                    检索角色只读，复核角色可按任务运行测试、构建和渲染检查
                   </span>
                 </div>
                 <div className="subagent-table-head" aria-hidden="true">
@@ -372,7 +372,7 @@ export function SubagentPolicyCardComponent({
                 <div className="subagent-callout-text">
                   {subagentModelOptions.length === 0
                     ? "请先在模型管理中为任一可用线路启用模型。"
-                    : "各角色工具权限一致，按任务分工选择模型。角色启停、模型和思考深度保存后对下次派生生效，正在运行的子代理沿用原配置；实际操作受父任务权限约束。"}
+                    : "检索角色使用只读沙箱，开发与复核角色可写入工作区；复核仅在任务允许时运行构建、测试或渲染检查。角色启停、模型和思考深度保存后对下次派生生效，正在运行的子代理沿用原配置；实际操作仍受 Codex 原生权限约束。"}
                 </div>
               </div>
             </>
