@@ -10,8 +10,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result, bail, ensure};
+use memchr::memmem::Finder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -142,10 +142,15 @@ impl AssetSource {
     }
 
     fn scan(&self, anchors: &[String]) -> Result<AssetScan> {
-        let matcher = AhoCorasick::new(anchors).context("补丁前置字面量无法构建匹配器")?;
+        // 字面量数量有限，复用子串查找器可减少大脚本上逐字节多模式匹配的成本。
+        let finders = anchors
+            .iter()
+            .map(|anchor| Finder::new(anchor.as_bytes()))
+            .collect::<Vec<_>>();
+        let matches = |bytes: &[u8]| finders.iter().any(|finder| finder.find(bytes).is_some());
         match self {
-            Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, &matcher),
-            Self::Directory { app } => scan_directory(&app.join("webview/assets"), &matcher),
+            Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, &matches),
+            Self::Directory { app } => scan_directory(&app.join("webview/assets"), &matches),
         }
     }
 }
@@ -163,7 +168,11 @@ fn numeric_chunk_paths<'a>(
     }
 }
 
-fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
+fn scan_asar(
+    archive: &Path,
+    unpacked: &Path,
+    matches: &impl Fn(&[u8]) -> bool,
+) -> Result<AssetScan> {
     let mut file = File::open(archive)
         .with_context(|| format!("无法打开 Codex 归档：{}", archive.display()))?;
     let archive_len = file.metadata().context("无法读取 Codex 归档大小")?.len();
@@ -238,7 +247,7 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
             file.read_exact(&mut buffer)
                 .with_context(|| format!("无法读取 ASAR 条目：{relative}"))?;
         }
-        if matcher.is_match(&buffer) {
+        if matches(&buffer) {
             candidates.push(relative.clone());
         }
     }
@@ -249,7 +258,7 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
     })
 }
 
-fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
+fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<AssetScan> {
     let list = |dir: &Path| -> Result<Vec<(String, bool)>> {
         let mut names = Vec::new();
         let entries = match std::fs::read_dir(dir) {
@@ -288,7 +297,7 @@ fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
         ensure!(size <= MAX_SCANNED_ASSET_BYTES, "资源文件过大：{relative}");
         let bytes = std::fs::read(&path)
             .with_context(|| format!("无法读取资源文件：{}", path.display()))?;
-        if matcher.is_match(&bytes) {
+        if matches(&bytes) {
             candidates.push(relative.clone());
         }
     }
@@ -302,6 +311,7 @@ fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aho_corasick::AhoCorasick;
 
     fn anchors() -> Vec<String> {
         vec![
@@ -432,6 +442,36 @@ mod tests {
     }
 
     #[test]
+    fn scan_handles_large_entries_and_backward_archive_offsets() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("Codex.app/Contents/Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let mut large = vec![b'x'; 65_530];
+        large.extend_from_slice(b"sendMessageFromView");
+        write_asar(
+            &resources.join("app.asar"),
+            &[
+                ("webview/assets/async/1.aaaaaaaaaa.js", &large),
+                ("webview/assets/2.bbbbbbbbbb.js", b"serviceTierAccess:"),
+                ("webview/assets/async/3.cccccccccc.js", b"plain"),
+            ],
+            &[],
+        );
+        let scan = load_or_scan(
+            &temp.path().join("Codex.app"),
+            &temp.path().join("scan.json"),
+            &anchors(),
+        )
+        .unwrap()
+        .scan;
+        assert_eq!(scan.numeric_chunks, 3);
+        assert_eq!(
+            scan.candidates,
+            ["2.bbbbbbbbbb.js", "async/1.aaaaaaaaaa.js"]
+        );
+    }
+
+    #[test]
     fn unpacked_app_directories_are_scanned_and_a_changed_archive_rescans() {
         let temp = tempfile::tempdir().unwrap();
         let assets = temp.path().join("Codex/resources/app/webview/assets");
@@ -468,5 +508,124 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    #[ignore = "opt-in isolated renderer asset scan benchmark"]
+    fn asset_scan_latency() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("Codex.app/Contents/Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let names = (0..10_000)
+            .map(|index| format!("webview/assets/async/{index}.0123456789.js"))
+            .collect::<Vec<_>>();
+        let plain = vec![b'x'; 4096];
+        let matching = b"x.sendMessageFromView(y)";
+        let files = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    name.as_str(),
+                    if index % 100 == 0 {
+                        matching.as_slice()
+                    } else {
+                        plain.as_slice()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        write_asar(&resources.join("app.asar"), &files, &[]);
+        // 真实安装包只读，扫描缓存仍留在临时目录。
+        let installed = std::env::var_os("CODEY_BENCH_APP_DIR");
+        let app = installed
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| temp.path().join("Codex.app"));
+        let anchors = if installed.is_some() {
+            let source = include_str!("renderer_asset_patch.js");
+            let section = source
+                .split("/*codey-renderer-patch-anchors*/")
+                .nth(1)
+                .unwrap()
+                .split("/*end-codey-renderer-patch-anchors*/")
+                .next()
+                .unwrap();
+            serde_json::from_str::<Vec<String>>(section).unwrap()
+        } else {
+            anchors()
+        };
+        let cache = temp.path().join("scan.json");
+        let mut expected = None;
+        for cached in [false, true] {
+            let mut samples = Vec::new();
+            for _ in 0..21 {
+                if !cached && cache.exists() {
+                    std::fs::remove_file(&cache).unwrap();
+                }
+                let started = std::time::Instant::now();
+                let result = load_or_scan(&app, &cache, &anchors).unwrap();
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(result.cached, cached);
+                if installed.is_none() {
+                    assert_eq!(result.scan.numeric_chunks, 10_000);
+                    assert_eq!(result.scan.candidates.len(), 100);
+                }
+                if let Some(expected) = &expected {
+                    assert_eq!(&result.scan, expected);
+                } else {
+                    expected = Some(result.scan);
+                }
+            }
+            let first = samples.remove(0);
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "BENCH {}",
+                serde_json::json!({"case":"asset_scan", "cached":cached,
+                "installed":installed.is_some(), "chunks":expected.as_ref().unwrap().numeric_chunks,
+                "candidates":expected.as_ref().unwrap().candidates.len(),
+                "first_sample_ms":first, "p50_ms":samples[9], "p95_ms":samples[18]})
+            );
+        }
+        if installed.is_some() {
+            let source = AssetSource::locate(&app).unwrap();
+            let baseline = AhoCorasick::new(&anchors).unwrap();
+            let finders = anchors
+                .iter()
+                .map(|anchor| Finder::new(anchor.as_bytes()))
+                .collect::<Vec<_>>();
+            let mut timings = [Vec::new(), Vec::new()];
+            for run in 0..10 {
+                for index in if run % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    let started = std::time::Instant::now();
+                    let matches = |bytes: &[u8]| {
+                        if index == 0 {
+                            baseline.is_match(bytes)
+                        } else {
+                            finders.iter().any(|finder| finder.find(bytes).is_some())
+                        }
+                    };
+                    let scan = match &source {
+                        AssetSource::Asar { archive, unpacked } => {
+                            scan_asar(archive, unpacked, &matches)
+                        }
+                        AssetSource::Directory { app } => {
+                            scan_directory(&app.join("webview/assets"), &matches)
+                        }
+                    }
+                    .unwrap();
+                    timings[index].push(started.elapsed().as_secs_f64() * 1000.0);
+                    assert_eq!(Some(&scan), expected.as_ref());
+                }
+            }
+            for (index, name) in ["aho_corasick_baseline", "memmem"].iter().enumerate() {
+                timings[index].sort_by(f64::total_cmp);
+                println!(
+                    "BENCH {}",
+                    serde_json::json!({"case":"asset_matcher", "kind":name,
+                    "p50_ms":timings[index][4], "p95_ms":timings[index][9]})
+                );
+            }
+        }
     }
 }
