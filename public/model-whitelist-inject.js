@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "83";
+  const patchVersion = "84";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -99,6 +99,8 @@
   let originalDispatchEvent = null;
   let patchedDispatchEvent = null;
   let groupedMenuTimer = 0;
+  let interactionDeliveryTimer = 0;
+  let interactionDiscoveryPending = false;
   let pendingFullGroupedMenuScan = false;
   let pendingGroupedMenuRoots = new Set();
   let groupedMenuObserver = null;
@@ -1389,13 +1391,20 @@
           continue;
         }
         restoreSupersededModelMenuItem(item);
-        item.dataset.codeyRouteModel = matched.modelName;
-        item.dataset.codeyRouteName = matched.presentation.routeName;
-        item.classList?.add?.("codey-model-route-item");
-        item.setAttribute?.(
-          "aria-label",
-          `${matched.presentation.routeName || matched.presentation.routeLabel} / ${matched.presentation.modelName}`,
-        );
+        if (item.dataset.codeyRouteModel !== matched.modelName) {
+          item.dataset.codeyRouteModel = matched.modelName;
+        }
+        if (item.dataset.codeyRouteName !== matched.presentation.routeName) {
+          item.dataset.codeyRouteName = matched.presentation.routeName;
+        }
+        if (!item.classList?.contains?.("codey-model-route-item")) {
+          item.classList?.add?.("codey-model-route-item");
+        }
+        const ariaLabel =
+          `${matched.presentation.routeName || matched.presentation.routeLabel} / ${matched.presentation.modelName}`;
+        if (item.getAttribute?.("aria-label") !== ariaLabel) {
+          item.setAttribute?.("aria-label", ariaLabel);
+        }
         replaceTextOnce(
           item,
           matched.menuLabel,
@@ -1980,6 +1989,9 @@
             value,
             maxKnownModelQueryClients,
           );
+          // The recognized client is the discovery result. Walking its cache
+          // exposes unrelated provider state and scales with every model entry.
+          return;
         }
       } catch {
         // Ignore proxy-backed values that reject capability probes.
@@ -2027,7 +2039,11 @@
     return { queryClients: [...queryClients], reactContainers: 0 };
   };
 
-  const scanReactObjectGraphWhenDue = (forceScan = false, discover = false) => {
+  const scanReactObjectGraphWhenDue = (forceScan = false, discover = false, knownClientsOnly = false) => {
+    // 普通点击只修复已识别的 QueryClient 缓存，不触发周期性全页扫描。
+    if (knownClientsOnly) {
+      return { queryClients: [...knownModelQueryClients], reactContainers: 0 };
+    }
     const now = Date.now();
     // Mounted roots are enough to find clients after a recent successful
     // discovery. A full document walk is reserved for the periodic fallback
@@ -2063,9 +2079,10 @@
     forceScan = false,
     discover = false,
     invalidate = false,
+    knownClientsOnly = false,
   } = {}) => {
     const revision = catalogRevision;
-    const scan = scanReactObjectGraphWhenDue(forceScan, discover);
+    const scan = scanReactObjectGraphWhenDue(forceScan, discover, knownClientsOnly);
     let queryEntries = 0;
     let pendingQueryEntries = 0;
     let changedEntries = 0;
@@ -2161,6 +2178,7 @@
   const deliverModelCatalog = async ({
     discoverQueryClients = false,
     invalidate = true,
+    knownClientsOnly = false,
   } = {}) => {
     if (!catalog.loaded || disposed) return false;
     const revision = catalogRevision;
@@ -2169,6 +2187,7 @@
       forceScan: invalidate,
       discover: discoverQueryClients,
       invalidate,
+      knownClientsOnly,
     });
     if (!currentDelivery(revision)) return false;
     const shouldNotify = (
@@ -3432,6 +3451,28 @@
   // and focusin is far more often than that safety net needs.
   let lastInteractionApply = 0;
   const interactionApplyIntervalMs = 2_000;
+  // A short trailing window coalesces the pointer, focus and click sequence
+  // without holding up the native input handlers or keyboard route selection.
+  const interactionDeliveryDelayMs = 40;
+  const scheduleInteractionModelDelivery = (discover) => {
+    interactionDiscoveryPending ||= discover;
+    if (interactionDeliveryTimer) return;
+    interactionDeliveryTimer = window.setTimeout(() => {
+      interactionDeliveryTimer = 0;
+      const discoverQueryClients = interactionDiscoveryPending;
+      interactionDiscoveryPending = false;
+      if (disposed) return;
+      // 普通点击仍修复已知缓存和按钮标签（原生重新拉取列表后会覆盖补丁），
+      // 只有模型菜单交互才查找新挂载的 QueryClient。
+      void deliverModelCatalog({
+        discoverQueryClients,
+        invalidate: false,
+        knownClientsOnly: !discoverQueryClients,
+      }).catch((error) => {
+        console.warn("[Codey] interaction model delivery failed", error);
+      });
+    }, interactionDeliveryDelayMs);
+  };
   const handleInteraction = (event) => {
     const pickerInteraction = Boolean(
       event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
@@ -3450,14 +3491,10 @@
     const now = Date.now();
     if (!pickerInteraction && now - lastInteractionApply < interactionApplyIntervalMs) return;
     lastInteractionApply = now;
-    // A new or reopened task can mount a fresh QueryClient while the previous
-    // client remains callable. Probe the current React roots on picker
-    // interaction so the visible cache is repaired immediately without the
-    // expensive full-document discovery pass.
-    void deliverModelCatalog({
-      discoverQueryClients: true,
-      invalidate: false,
-    });
+    // Reopened tasks can replace a still-callable QueryClient. Discover current
+    // roots only for model picker interaction; ordinary clicks stay on the
+    // wrapped config fast path and never search for a new client.
+    scheduleInteractionModelDelivery(pickerInteraction);
   };
   const handleFocus = () => {
     void loadModelCatalog();
@@ -4114,6 +4151,9 @@
       refreshTimer = 0;
       window.clearTimeout(groupedMenuTimer);
       groupedMenuTimer = 0;
+      window.clearTimeout(interactionDeliveryTimer);
+      interactionDeliveryTimer = 0;
+      interactionDiscoveryPending = false;
       pendingFullGroupedMenuScan = false;
       pendingGroupedMenuRoots.clear();
       window.clearTimeout(providerMismatchNoticeTimer);

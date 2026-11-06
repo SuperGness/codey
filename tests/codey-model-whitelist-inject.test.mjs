@@ -708,6 +708,14 @@ async function loadPatch(
       callback();
       await new Promise(setImmediate);
     },
+    async runPendingTimers() {
+      for (const [id, callback] of [...timers]) {
+        if (!timers.delete(id)) continue;
+        timerDelays.delete(id);
+        callback();
+        await new Promise(setImmediate);
+      }
+    },
     async runTimers(delay) {
       for (let round = 0; round < 16; round += 1) {
         const next = [...timers].find(([id]) => timerDelays.get(id) === delay);
@@ -1150,7 +1158,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "83");
+  assert.equal(patch.version, "84");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -3685,6 +3693,77 @@ test("model picker headings use name fallbacks and update when a short name chan
   runtime.patch.dispose();
 });
 
+test("【自动化测试】模型菜单只写入变化属性并在原生重绘后恢复", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const item = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  item.textContent = "relay/gpt-5.6-sol";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.6-sol"],
+    default_model: "relay/gpt-5.6-sol",
+    model_metadata: [{
+      model: "relay/gpt-5.6-sol",
+      display_name: "[中转] gpt-5.6-sol",
+      route_name: "中转线路",
+      provider_id: "relay",
+      source_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()], { documentBody: body });
+  runtime.patch.enhanceModelMenus();
+
+  let ariaWrites = 0;
+  let routeModelWrites = 0;
+  let routeNameWrites = 0;
+  const setAttribute = item.setAttribute.bind(item);
+  item.setAttribute = (name, value) => {
+    if (name === "aria-label") ariaWrites += 1;
+    return setAttribute(name, value);
+  };
+  let routeModel = item.dataset.codeyRouteModel;
+  let routeName = item.dataset.codeyRouteName;
+  Object.defineProperty(item.dataset, "codeyRouteModel", {
+    configurable: true,
+    enumerable: true,
+    get: () => routeModel,
+    set: (value) => {
+      routeModelWrites += 1;
+      routeModel = value;
+    },
+  });
+  Object.defineProperty(item.dataset, "codeyRouteName", {
+    configurable: true,
+    enumerable: true,
+    get: () => routeName,
+    set: (value) => {
+      routeNameWrites += 1;
+      routeName = value;
+    },
+  });
+
+  for (let index = 0; index < 20; index += 1) {
+    runtime.patch.enhanceModelMenus();
+  }
+  assert.deepEqual(
+    { ariaWrites, routeModelWrites, routeNameWrites },
+    { ariaWrites: 0, routeModelWrites: 0, routeNameWrites: 0 },
+  );
+
+  item.removeAttribute("aria-label");
+  routeModel = undefined;
+  routeName = undefined;
+  item.textContent = "relay/gpt-5.6-sol";
+  runtime.patch.enhanceModelMenus();
+  assert.equal(item.getAttribute("aria-label"), "中转线路 / gpt-5.6-sol");
+  assert.equal(item.dataset.codeyRouteModel, "relay/gpt-5.6-sol");
+  assert.equal(item.dataset.codeyRouteName, "中转线路");
+  runtime.patch.dispose();
+});
+
 test("historical route aliases keep the route short name after that model leaves the catalog", async () => {
   const provider = "codey-official-account-d3265a21-a59f-40c8-a05a-5b4e03231c22";
   const encodedProvider = "my%20route";
@@ -4522,8 +4601,7 @@ test("a recent successful discovery reuses mounted roots before the next full sc
     memoizedProps: { queryClient: replacementQueryClient },
   };
   runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
-  await Promise.resolve();
-  await Promise.resolve();
+  await runtime.runTimer(40);
 
   assert.equal(runtime.wildcardScanCount(), 1, "the mounted-root pass must avoid the full document scan");
   assert.deepEqual(replacementQueryClient.models(), catalog.models);
@@ -4593,6 +4671,105 @@ test("query client discovery reaches deep provider stacks", async () => {
   runtime.patch.dispose();
 });
 
+test("【自动化测试】识别 QueryClient 后停止遍历内部缓存", async () => {
+  const queryClient = activeModelQueryClient(["stale"]);
+  let cacheVisits = 0;
+  queryClient.cache = new Proxy({}, {
+    ownKeys() {
+      cacheVisits += 1;
+      return [];
+    },
+  });
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["current"],
+    default_model: "current",
+  }, [statsigClient()], { queryClient });
+
+  assert.deepEqual(queryClient.models(), ["current"]);
+  assert.equal(cacheVisits, 0);
+  runtime.patch.dispose();
+});
+
+test("【自动化测试】模型指针和键盘事件合并成一次延迟扫描", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const firstClient = activeModelQueryClient(["old"]);
+  const nextClient = activeModelQueryClient(["old"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["current"],
+    default_model: "current",
+  }, [statsigClient()], { documentBody: body, queryClient: firstClient });
+  let graphVisits = 0;
+  body.__reactFiber$codeyTest = new Proxy({
+    memoizedProps: { queryClient: nextClient },
+  }, {
+    ownKeys(target) {
+      graphVisits += 1;
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  for (const [type, key] of [
+    ["pointerdown", undefined],
+    ["focusin", undefined],
+    ["click", undefined],
+    ["keydown", "Enter"],
+  ]) {
+    runtime.dispatchDocumentEvent(type, { target: modelButton, key });
+    assert.equal(graphVisits, 0, `${type} 不得同步遍历 React 对象图`);
+  }
+  await runtime.runTimer(40);
+  assert.equal(graphVisits, 1);
+  assert.deepEqual(nextClient.models(), ["current"]);
+  assert.equal(runtime.wildcardScanCount(), 1);
+  runtime.patch.dispose();
+});
+
+test("【自动化测试】普通点击不发现新 QueryClient，但修复已知缓存，待处理扫描可被取消", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const sendButton = body.appendChild(new FakeElementCore("button"));
+  const firstClient = activeModelQueryClient(["old"]);
+  const replacementClient = activeModelQueryClient(["old"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["current"],
+    default_model: "current",
+  }, [statsigClient()], { documentBody: body, queryClient: firstClient });
+  assert.deepEqual(firstClient.models(), ["current"]);
+  // 原生重新拉取模型列表会覆盖补丁后的缓存。
+  const [[nativeQueryKey]] = firstClient.getQueriesData({ queryKey: ["models"] });
+  firstClient.setQueryData(nativeQueryKey, { data: [modelDescriptor("old", true)], nextCursor: null });
+  let graphVisits = 0;
+  body.__reactFiber$codeyTest = new Proxy({
+    memoizedProps: { queryClient: replacementClient },
+  }, {
+    ownKeys(target) {
+      graphVisits += 1;
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  for (const type of ["pointerdown", "focusin", "click"]) {
+    runtime.dispatchDocumentEvent(type, { target: sendButton });
+  }
+  await runtime.runTimer(40);
+  assert.equal(graphVisits, 0);
+  assert.deepEqual(firstClient.models(), ["current"]);
+  assert.deepEqual(replacementClient.models(), ["old"]);
+
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  runtime.patch.dispose();
+  await runtime.runTimers(40);
+  assert.equal(graphVisits, 0);
+});
+
 test("reopening the model picker discovers each replacement QueryClient", async () => {
   const routeModel = "tokenrouter/z-ai/glm-5.3-free";
   const body = new FakeElementCore("body");
@@ -4614,16 +4791,14 @@ test("reopening the model picker discovers each replacement QueryClient", async 
   };
 
   runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
-  await Promise.resolve();
-  await Promise.resolve();
+  await runtime.runTimer(40);
 
   assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
   body.__reactFiber$codeyTest = {
     memoizedProps: { queryClient: secondReplacementQueryClient },
   };
   runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
-  await Promise.resolve();
-  await Promise.resolve();
+  await runtime.runTimer(40);
 
   assert.deepEqual(secondReplacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
   assert.equal(
@@ -4658,12 +4833,10 @@ test("native selection ignores non-picker interactions before discovering QueryC
     memoizedProps: { queryClient: replacementQueryClient },
   };
   runtime.dispatchDocumentEvent("pointerdown", { target: sendButton });
-  await Promise.resolve();
   assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol"]);
 
   runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
-  await Promise.resolve();
-  await Promise.resolve();
+  await runtime.runTimer(40);
   assert.deepEqual(replacementQueryClient.models(), models);
   runtime.patch.dispose();
 });
