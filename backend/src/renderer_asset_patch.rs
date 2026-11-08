@@ -1893,7 +1893,7 @@ mod tests {
     fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
         let anchors = renderer_patch_anchors(RENDERER_ASSET_PATCH_SCRIPT).unwrap();
         for required in [
-            "codexComposerAdapter.CodexComposerAdapter.interruptThreadError",
+            "resolvedHostId:",
             "AppServerRequestClient is missing a message dispatcher",
             "serviceTierAccess:",
             ".startTurn(",

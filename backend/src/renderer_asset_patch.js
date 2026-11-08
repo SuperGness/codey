@@ -374,7 +374,7 @@
     "isNewThreadDraft:",
     "isManuallyChanged:!1,modelSettings:null,serviceTier:null",
     "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
-    "codexComposerAdapter.CodexComposerAdapter.interruptThreadError",
+    "resolvedHostId:",
     "sendMessageFromView",
     "AppServerRequestClient is missing a message dispatcher",
     "codex-avatar",
@@ -432,7 +432,11 @@
         "app server manager registry",
       );
     }
-    if (source.includes("codexComposerAdapter.CodexComposerAdapter.interruptThreadError")
+    if ((source.includes("codexComposerAdapter.CodexComposerAdapter.interruptThreadError")
+      || source.includes("CodexComposerAdapter"))
+      && source.includes("let{agentMode:")
+      && source.includes("resolvedHostId:")
+      && source.includes("submitDisabled:")
       && !source.includes("/*codey-local-quota-gate*/")) {
       // 只改变 Codex 本机发送按钮的额度条件。保留共享额度状态、官方警告
       // 和其他禁用条件；每次渲染读取当前模型，避免模型切换后复用旧判断。

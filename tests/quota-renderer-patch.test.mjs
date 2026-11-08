@@ -159,6 +159,29 @@ test("Codex 26.1029 numeric composer chunk preserves quota and hard blocks", () 
   assert.deepEqual(h.failures, []);
 });
 
+test("Codex 26.1103 split composer adapter and interrupt helper chunks patch without false failures", () => {
+  const splitComposerChunk = numericChunkFixture.replace(
+    "// codexComposerAdapter.CodexComposerAdapter.interruptThreadError",
+    "const exports={CodexComposerAdapter:()=>render};",
+  );
+  const splitInterruptHelperChunk = `function interruptThread(n){
+try{return n()}catch(e){return{id:"codexComposerAdapter.CodexComposerAdapter.interruptThreadError",error:e}}
+}`;
+  const h = harness({ allowsLocalSend: ({ hostId, model }) => hostId === "local" && model === "third-party" });
+  const composerUrl = "app://-/assets/async/634303.fe5bdc3dcb.js";
+  const helperUrl = "app://-/assets/async/182735.bb2cb0d2af.js";
+  const patchedComposer = h.patch(splitComposerChunk, composerUrl);
+  assert.equal(patchedComposer.split(marker).length - 1, 1);
+  assert.equal(patchedComposer.split("/*codey-local-hard-block-gate*/").length - 1, 1);
+  assert.equal(h.patch(splitInterruptHelperChunk, helperUrl), splitInterruptHelperChunk);
+  vm.runInContext(patchedComposer, h.context);
+  assert.equal(h.context.render("third-party", "local", true, false), false);
+  assert.equal(h.context.render("third-party", "local", false, false, true), false);
+  assert.equal(h.context.render("gpt-official", "local", true, false), true);
+  assert.equal(h.context.render("gpt-official", "local", false, false, true), true);
+  assert.deepEqual(h.failures, []);
+});
+
 test("numeric composer matching follows renamed bindings and verifies the host", () => {
   const renamed = numericChunkFixture
     .replace(/\bom\b/g, "workMode")
