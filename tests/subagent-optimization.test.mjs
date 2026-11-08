@@ -28,12 +28,11 @@ test("subagent settings expose the three supported role controls", async () => {
   assert.match(featurePolicySource, /config\.subagentRoles\[task\.id\]/);
   assert.match(featurePolicySource, /checked=\{selection\.enabled\}/);
   assert.match(featurePolicySource, /onCheckedChange=\{\(enabled\) => updateRole\(\{ enabled \}\)\}/);
-  assert.match(featurePolicySource, /检索角色使用只读沙箱/);
-  assert.match(featurePolicySource, /检索角色只读/);
-  assert.match(featurePolicySource, /复核角色可按任务运行测试、构建和渲染检查/);
-  assert.match(featurePolicySource, /复核仅在任务允许时运行构建、测试或渲染检查/);
+  assert.match(featurePolicySource, /检索与复核通过提示词引导只读排查和独立核验，不强制限制工具权限/);
+  assert.match(featurePolicySource, /各角色工具权限一致/);
+  assert.match(featurePolicySource, /仅由提示词引导，不强制约束/);
   assert.match(featurePolicySource, /实际操作仍受 Codex 原生权限约束/);
-  assert.doesNotMatch(featurePolicySource, /各角色工具权限一致/);
+  assert.doesNotMatch(featurePolicySource, /只读沙箱/);
   assert.match(featurePolicySource, /roleDisabled/);
   assert.match(featurePolicySource, /kind: "analysis"/);
   assert.match(featurePolicySource, /kind: "implementation"/);

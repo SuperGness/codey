@@ -1317,7 +1317,7 @@ fn runtime_agents_keep_role_sandboxes_and_task_boundaries() {
         .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_EXPLORER)
         .unwrap();
     let explorer = String::from_utf8(explorer.contents.clone()).unwrap();
-    assert!(explorer.contains("sandbox_mode = \"read-only\""));
+    assert!(explorer.contains("sandbox_mode = \"workspace-write\""));
     assert!(explorer.contains("你是检索子代理，只读"));
 
     let worker = plans
@@ -1388,11 +1388,7 @@ fn runtime_agent_sources_are_rebuilt_from_the_current_definitions() {
             .find(|plan| plan.registration.role == role)
             .unwrap();
         let rendered = parse_document(std::str::from_utf8(&plan.contents).unwrap()).unwrap();
-        let expected_sandbox = if role == crate::config::SUBAGENT_ROLE_EXPLORER {
-            "read-only"
-        } else {
-            "workspace-write"
-        };
+        let expected_sandbox = "workspace-write";
         assert_eq!(rendered["sandbox_mode"].as_str(), Some(expected_sandbox));
         assert_eq!(
             rendered["description"].as_str(),

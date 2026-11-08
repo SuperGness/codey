@@ -37,47 +37,11 @@ fn tool(root: &Path, session: &str, task: &str, name: &str) -> Result<Option<Str
             agent_type: None,
             transcript_path: None,
             turn_id: Some("turn-a"),
-            native_read_only: false,
             tool_name: name,
             tool_input: None,
         },
         20,
     )
-}
-
-fn tool_with_native_read_only(
-    root: &Path,
-    session: &str,
-    task: &str,
-    name: &str,
-    turn_id: &str,
-    native_read_only: bool,
-) -> Result<Option<String>> {
-    authorize_child_tool_with_context(
-        root,
-        "runtime",
-        session,
-        ChildToolContext {
-            agent_id: task,
-            agent_type: None,
-            transcript_path: None,
-            turn_id: Some(turn_id),
-            native_read_only,
-            tool_name: name,
-            tool_input: None,
-        },
-        20,
-    )
-}
-
-fn set_explorer_native_read_only(root: &Path, session: &str, task: &str, turn_id: &str) {
-    let store = LedgerStore::open(root, session).unwrap();
-    let mut ledger = store.load("runtime", session, 20).unwrap().unwrap();
-    let reservation = ledger.reservations.get_mut(task).unwrap();
-    let turn_hash = hash_component(turn_id);
-    reservation.current_turn_id_hash = Some(turn_hash.clone());
-    reservation.native_read_only_turn_hash = Some(turn_hash);
-    store.save(&mut ledger, 20).unwrap();
 }
 
 fn active_marker_hashes(task: &str) -> BTreeSet<String> {
@@ -273,10 +237,7 @@ fn scoped_pure_text_stop_settles_followup_before_or_after_ack() {
         let root = temp.path();
         let session = "fast-followup";
         spawn(root, session, "worker", "codey_worker", "/repo");
-        assert_eq!(
-            tool_with_native_read_only(root, session, "worker", "grep", "turn-a", false).unwrap(),
-            None
-        );
+        assert_eq!(tool(root, session, "worker", "grep").unwrap(), None);
         observe_status_response(
             root,
             "runtime",
@@ -550,7 +511,6 @@ fn followup_ignores_late_usage_from_the_previous_turn() {
                 agent_type: Some("codey_worker"),
                 transcript_path: None,
                 turn_id: Some("turn-b"),
-                native_read_only: false,
                 tool_name: "grep",
                 tool_input: None,
             },
@@ -803,7 +763,6 @@ fn followup_rejects_prior_terminal_until_the_new_turn_is_established() {
                 agent_type: Some("codey_worker"),
                 transcript_path: None,
                 turn_id: Some("turn-b"),
-                native_read_only: false,
                 tool_name: "grep",
                 tool_input: None,
             },
@@ -1209,7 +1168,6 @@ fn child_tool_calls_do_not_repeat_resume_events_or_reset_start_time() {
                 agent_type: Some("codey_worker"),
                 transcript_path: None,
                 turn_id: Some(turn_id),
-                native_read_only: false,
                 tool_name: "grep",
                 tool_input: None,
             },
@@ -1344,6 +1302,9 @@ fn review_and_writer_run_concurrently_in_the_same_workspace() {
         "functions.exec",
         "functions.exec_command",
         "functions.write_stdin",
+        "apply_patch",
+        "mcp__unknown__read",
+        "mcp__cua_repl__js",
         "grep",
     ] {
         assert_eq!(
@@ -1352,29 +1313,10 @@ fn review_and_writer_run_concurrently_in_the_same_workspace() {
             "{name}"
         );
     }
-    assert!(
-        tool(temp.path(), "review-session", "review", "apply_patch")
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        tool(temp.path(), "review-session", "review", "mcp__cua_repl__js").unwrap(),
-        None
-    );
-    assert_eq!(
-        tool(
-            temp.path(),
-            "review-session",
-            "review",
-            "mcp__unknown__read"
-        )
-        .unwrap(),
-        None
-    );
 }
 
 #[test]
-fn explorer_commands_require_current_native_read_only_and_wrappers_stay_denied() {
+fn explorer_and_reviewer_share_full_tool_capabilities_when_bound() {
     let temp = tempdir().unwrap();
     spawn(
         temp.path(),
@@ -1383,40 +1325,15 @@ fn explorer_commands_require_current_native_read_only_and_wrappers_stay_denied()
         "codey_explorer",
         "/repo",
     );
-    let denied = tool_with_native_read_only(
-        temp.path(),
-        "explorer-session",
-        "explorer",
-        "exec_command",
-        "child-turn-a",
-        false,
-    )
-    .unwrap()
-    .unwrap();
-    assert!(denied.contains("原生 rollout 证明只读权限"));
-
     for name in [
+        "exec_command",
         "functions.exec",
+        "apply_patch",
+        "mcp__codey_fastctx__replace",
         "mcp__cua_repl__js",
         "mcp__cua_repl__js_reset",
         "mcp__codex_app__open_in_codex",
         "mcp__unknown__query",
-    ] {
-        assert!(
-            tool_with_native_read_only(
-                temp.path(),
-                "explorer-session",
-                "explorer",
-                name,
-                "child-turn-a",
-                true,
-            )
-            .unwrap()
-            .is_some(),
-            "{name}"
-        );
-    }
-    for name in [
         "inspect_local_file",
         "grep",
         "glob",
@@ -1424,67 +1341,13 @@ fn explorer_commands_require_current_native_read_only_and_wrappers_stay_denied()
         "web.run",
     ] {
         assert_eq!(
-            tool_with_native_read_only(
-                temp.path(),
-                "explorer-session",
-                "explorer",
-                name,
-                "child-turn-a",
-                true,
-            )
-            .unwrap(),
+            tool(temp.path(), "explorer-session", "explorer", name).unwrap(),
             None,
             "{name}"
         );
     }
-    assert_eq!(
-        tool_with_native_read_only(
-            temp.path(),
-            "explorer-session",
-            "explorer",
-            "exec_command",
-            "child-turn-a",
-            true,
-        )
-        .unwrap(),
-        None
-    );
-    assert!(
-        tool_with_native_read_only(
-            temp.path(),
-            "explorer-session",
-            "explorer",
-            "exec_command",
-            "child-turn-b",
-            false,
-        )
-        .unwrap()
-        .is_some()
-    );
-}
 
-#[test]
-fn root_write_requires_every_explorer_to_prove_the_current_read_only_turn() {
-    let temp = tempdir().unwrap();
-    spawn(
-        temp.path(),
-        "explorer-session",
-        "explorer_a",
-        "codey_explorer",
-        "/repo",
-    );
-    let markers = active_marker_hashes("explorer_a");
-    assert!(
-        !active_attempts_are_read_only(temp.path(), "runtime", "explorer-session", &markers, 20,)
-            .unwrap()
-    );
-
-    set_explorer_native_read_only(
-        temp.path(),
-        "explorer-session",
-        "explorer_a",
-        "child-turn-a",
-    );
+    let markers = active_marker_hashes("explorer");
     assert!(
         active_attempts_are_read_only(temp.path(), "runtime", "explorer-session", &markers, 21,)
             .unwrap()
@@ -1500,24 +1363,6 @@ fn root_write_requires_every_explorer_to_prove_the_current_read_only_turn() {
         .unwrap()
     );
 
-    tool_with_native_read_only(
-        temp.path(),
-        "explorer-session",
-        "explorer_a",
-        "exec_command",
-        "child-turn-b",
-        false,
-    )
-    .unwrap();
-    assert!(
-        !active_attempts_are_read_only(temp.path(), "runtime", "explorer-session", &markers, 23,)
-            .unwrap()
-    );
-}
-
-#[test]
-fn reviewer_can_run_commands_but_cannot_edit_source() {
-    let temp = tempdir().unwrap();
     spawn(
         temp.path(),
         "review-session",
@@ -1525,106 +1370,18 @@ fn reviewer_can_run_commands_but_cannot_edit_source() {
         "codey_reviewer",
         "/repo",
     );
-    for name in ["exec_command", "functions.exec_command"] {
+    for name in [
+        "exec_command",
+        "functions.exec_command",
+        "apply_patch",
+        "mcp__codey_fastctx__replace",
+    ] {
         assert_eq!(
             tool(temp.path(), "review-session", "review", name).unwrap(),
             None,
             "{name}"
         );
     }
-    for name in ["apply_patch", "mcp__codey_fastctx__replace"] {
-        assert!(
-            tool(temp.path(), "review-session", "review", name)
-                .unwrap()
-                .is_some_and(|reason| reason.contains("Reviewer 不得直接修改源码")),
-            "{name}"
-        );
-    }
-}
-
-#[test]
-fn interrupted_explorer_and_followup_require_a_new_native_proof() {
-    let temp = tempdir().unwrap();
-    spawn(
-        temp.path(),
-        "explorer-session",
-        "explorer",
-        "codey_explorer",
-        "/repo",
-    );
-    set_explorer_native_read_only(temp.path(), "explorer-session", "explorer", "child-turn-a");
-    pre_interrupt_agent(
-        temp.path(),
-        "runtime",
-        "explorer-session",
-        Some(&json!({"target":"explorer"})),
-        21,
-    )
-    .unwrap();
-    assert!(
-        tool_with_native_read_only(
-            temp.path(),
-            "explorer-session",
-            "explorer",
-            "exec_command",
-            "child-turn-a",
-            true,
-        )
-        .unwrap()
-        .is_some()
-    );
-
-    let temp = tempdir().unwrap();
-    spawn(
-        temp.path(),
-        "followup-session",
-        "explorer",
-        "codey_explorer",
-        "/repo",
-    );
-    set_explorer_native_read_only(temp.path(), "followup-session", "explorer", "child-turn-a");
-    let wait = json!({
-        "agents": [{
-            "agent_id": "explorer",
-            "status": "completed",
-            "turn_id": "child-turn-a",
-            "usage": {"input_tokens": 2, "output_tokens": 1}
-        }]
-    });
-    observe_status_response(
-        temp.path(),
-        "runtime",
-        "followup-session",
-        Some(&wait),
-        StatusResponseSource::Snapshot(true),
-        22,
-    )
-    .unwrap();
-    assert_eq!(
-        pre_followup_task(
-            temp.path(),
-            "runtime",
-            "followup-session",
-            Some(&json!({"target":"explorer","message":"continue"})),
-            0,
-            23,
-            |_| Ok(None),
-        )
-        .unwrap(),
-        FollowupAdmission::ResumeRequested
-    );
-    assert!(
-        tool_with_native_read_only(
-            temp.path(),
-            "followup-session",
-            "explorer",
-            "exec_command",
-            "child-turn-b",
-            false,
-        )
-        .unwrap()
-        .is_some()
-    );
 }
 
 #[test]
@@ -1643,10 +1400,9 @@ fn same_session_review_and_writer_obey_concurrency() {
         tool(temp.path(), "session", "writer", "apply_patch").unwrap(),
         None
     );
-    assert!(
-        tool(temp.path(), "session", "review", "apply_patch")
-            .unwrap()
-            .is_some_and(|reason| reason.contains("不具备写入权限"))
+    assert_eq!(
+        tool(temp.path(), "session", "review", "apply_patch").unwrap(),
+        None
     );
 }
 

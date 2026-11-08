@@ -116,25 +116,12 @@ struct RuntimeSubagentAttestation {
     role: String,
     model: String,
     reasoning_effort: String,
-    #[serde(default)]
-    native_sandbox: Option<NativeSandboxPermission>,
-    #[serde(default)]
-    native_sandbox_turn_hash: Option<String>,
-    #[serde(default)]
-    turn_hash: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum NativeSandboxPermission {
-    ReadOnly,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedRuntimeSubagentSelection {
     model: String,
     reasoning_effort: String,
-    native_sandbox: Option<NativeSandboxPermission>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -653,26 +640,9 @@ fn runtime_subagent_attestation_denial(
     };
     let role =
         nonempty(input.agent_type.as_deref()).unwrap_or(crate::config::SUBAGENT_ROLE_DEFAULT);
-    if role == crate::config::SUBAGENT_ROLE_EXPLORER
-        && input
-            .tool_name
-            .as_deref()
-            .is_some_and(crate::subagent::rules::explorer_has_unbounded_side_effects)
-    {
-        return Ok(Some(
-            "CODEY_SUBAGENT_EXPLORER_WRAPPER_DENIED: Explorer 不得调用可绕过原生沙箱的通用执行包装或可操作界面工具。只读文件、搜索、图片和网络检索工具仍可用；请由主代理执行该操作。"
-                .to_string(),
-        ));
-    }
     let session_dir = session_state_dir(state_root, &input.session_id);
     let attestation_path = runtime_subagent_attestation_path(&session_dir, runtime_id, agent_id);
-    if cached_runtime_subagent_attestation_matches(
-        &attestation_path,
-        runtime_id,
-        agent_id,
-        role,
-        nonempty(input.turn_id.as_deref()),
-    )? {
+    if cached_runtime_subagent_attestation_matches(&attestation_path, runtime_id, agent_id, role)? {
         // A child that was already attested may finish while a later role-policy
         // update is pending. The new policy applies only to newly spawned work.
         return Ok(None);
@@ -737,12 +707,6 @@ fn runtime_subagent_attestation_denial(
         role: role.to_string(),
         model: observed.model,
         reasoning_effort: observed.reasoning_effort,
-        native_sandbox: observed.native_sandbox,
-        native_sandbox_turn_hash: observed
-            .native_sandbox
-            .and(input.turn_id.as_deref())
-            .map(hash_component),
-        turn_hash: input.turn_id.as_deref().map(hash_component),
     };
     let bytes = serde_json::to_vec(&attestation).context("序列化子代理运行配置证明失败")?;
     crate::fs_util::atomic_write_private_with_parent(&attestation_path, &bytes)
@@ -750,23 +714,13 @@ fn runtime_subagent_attestation_denial(
     Ok(None)
 }
 
-fn child_native_read_only_attested(
-    state_root: &Path,
+fn cached_runtime_subagent_attestation_matches(
+    path: &Path,
     runtime_id: &str,
-    input: &HookInput,
     agent_id: &str,
+    role: &str,
 ) -> Result<bool> {
-    let role =
-        nonempty(input.agent_type.as_deref()).unwrap_or(crate::config::SUBAGENT_ROLE_DEFAULT);
-    if role != crate::config::SUBAGENT_ROLE_EXPLORER {
-        return Ok(false);
-    }
-    let attestation_path = runtime_subagent_attestation_path(
-        &session_state_dir(state_root, &input.session_id),
-        runtime_id,
-        agent_id,
-    );
-    let Some(bytes) = read_optional_runtime_policy_file(&attestation_path)? else {
+    let Some(bytes) = read_optional_runtime_policy_file(path)? else {
         return Ok(false);
     };
     let Ok(attestation) = serde_json::from_slice::<RuntimeSubagentAttestation>(&bytes) else {
@@ -776,41 +730,8 @@ fn child_native_read_only_attested(
         attestation.schema_version == RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION
             && attestation.runtime_id_hash == hash_component(runtime_id)
             && attestation.agent_id_hash == hash_component(agent_id)
-            && attestation.role == role
-            && attestation.native_sandbox == Some(NativeSandboxPermission::ReadOnly)
-            && input.turn_id.as_deref().map(hash_component) == attestation.native_sandbox_turn_hash,
+            && attestation.role == role,
     )
-}
-
-fn cached_runtime_subagent_attestation_matches(
-    path: &Path,
-    runtime_id: &str,
-    agent_id: &str,
-    role: &str,
-    turn_id: Option<&str>,
-) -> Result<bool> {
-    let Some(bytes) = read_optional_runtime_policy_file(path)? else {
-        return Ok(false);
-    };
-    let Ok(attestation) = serde_json::from_slice::<RuntimeSubagentAttestation>(&bytes) else {
-        return Ok(false);
-    };
-    let identity_matches = attestation.schema_version
-        == RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION
-        && attestation.runtime_id_hash == hash_component(runtime_id)
-        && attestation.agent_id_hash == hash_component(agent_id)
-        && attestation.role == role;
-    if !identity_matches || role != crate::config::SUBAGENT_ROLE_EXPLORER {
-        // Worker and Reviewer attestations published before turn hashes existed
-        // remain valid for their running process. Only Explorer command safety
-        // depends on the current turn's native sandbox proof.
-        return Ok(identity_matches);
-    }
-    let same_turn = match turn_id {
-        Some(turn_id) => attestation.turn_hash.as_deref() == Some(hash_component(turn_id).as_str()),
-        None => false,
-    };
-    Ok(same_turn)
 }
 
 fn runtime_subagent_attestation_path(
@@ -924,7 +845,6 @@ fn observed_runtime_subagent_selection(
         let candidate = ObservedRuntimeSubagentSelection {
             model,
             reasoning_effort: reasoning_effort.to_ascii_lowercase(),
-            native_sandbox: turn_id.and_then(|_| observed_native_sandbox(payload)),
         };
         if observed
             .as_ref()
@@ -935,16 +855,6 @@ fn observed_runtime_subagent_selection(
         observed = Some(candidate);
     }
     Ok(observed)
-}
-
-fn observed_native_sandbox(payload: &Map<String, Value>) -> Option<NativeSandboxPermission> {
-    let policy_type = payload
-        .get("sandbox_policy")
-        .and_then(Value::as_object)
-        .and_then(|policy| policy.get("type"))
-        .and_then(Value::as_str)?;
-    (policy_type.trim().eq_ignore_ascii_case("read-only"))
-        .then_some(NativeSandboxPermission::ReadOnly)
 }
 
 fn json_nonempty_string(payload: &Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -1081,9 +991,6 @@ fn pre_tool_use_output(
                     agent_type: nonempty(input.agent_type.as_deref()),
                     transcript_path: nonempty(input.transcript_path.as_deref()),
                     turn_id: nonempty(input.turn_id.as_deref()),
-                    native_read_only: child_native_read_only_attested(
-                        state_root, runtime_id, input, agent_id,
-                    )?,
                     tool_name,
                     tool_input: input.tool_input.as_ref(),
                 },

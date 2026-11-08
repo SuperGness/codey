@@ -67,38 +67,6 @@ fn attest_test_child(input: &HookInput, state_root: &Path, runtime_id: &str) {
             role: role.to_string(),
             model: expected.model.clone(),
             reasoning_effort: expected.reasoning_effort.clone(),
-            native_sandbox: None,
-            native_sandbox_turn_hash: None,
-            turn_hash: input.turn_id.as_deref().map(hash_component),
-        })
-        .unwrap(),
-    )
-    .unwrap();
-}
-
-fn attest_test_explorer_read_only(input: &HookInput, state_root: &Path, runtime_id: &str) {
-    let agent_id = input.agent_id.as_deref().unwrap();
-    let role = crate::config::SUBAGENT_ROLE_EXPLORER;
-    let expected = &crate::config::default_subagent_roles()[role];
-    let turn_id = input.turn_id.as_deref().unwrap();
-    let path = runtime_subagent_attestation_path(
-        &session_state_dir(state_root, &input.session_id),
-        runtime_id,
-        agent_id,
-    );
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(
-        path,
-        serde_json::to_vec(&RuntimeSubagentAttestation {
-            schema_version: RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION,
-            runtime_id_hash: hash_component(runtime_id),
-            agent_id_hash: hash_component(agent_id),
-            role: role.to_string(),
-            model: expected.model.clone(),
-            reasoning_effort: expected.reasoning_effort.clone(),
-            native_sandbox: Some(NativeSandboxPermission::ReadOnly),
-            native_sandbox_turn_hash: Some(hash_component(turn_id)),
-            turn_hash: Some(hash_component(turn_id)),
         })
         .unwrap(),
     )
@@ -156,12 +124,7 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
         if let (Some(model), Some(effort)) = (model, effort) {
             records.push(json!({
                 "type": "turn_context",
-                "payload": {
-                    "turn_id": turn_id,
-                    "model": model,
-                    "effort": effort,
-                    "sandbox_policy": {"type": "read-only"}
-                }
+                "payload": {"turn_id": turn_id, "model": model, "effort": effort}
             }));
         }
         fs::write(
@@ -195,12 +158,6 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
         runtime_subagent_attestation_denial(&good, &state_root, runtime_id).unwrap(),
         None
     );
-
-    let mut next_turn = child_input(good_agent, &good_transcript);
-    next_turn.turn_id = Some("child-turn-2".into());
-    let next_turn_denial =
-        runtime_subagent_attestation_denial(&next_turn, &state_root, runtime_id).unwrap();
-    assert!(next_turn_denial.is_some());
 
     begin_runtime_subagent_policy_update(home, &roles, &hashes).unwrap();
     // Already-attested children may finish their existing turn while new
@@ -342,34 +299,6 @@ fn missing_runtime_policy_denies_new_work_but_allows_child_reporting() {
         handle_hook_for_runtime_at(&child, root, runtime_id, 40).unwrap()["hookSpecificOutput"]["permissionDecision"],
         "deny"
     );
-}
-
-#[test]
-fn explorer_wrappers_are_denied_even_with_a_cached_attestation() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let runtime_id = "runtime-wrapper";
-    let mut child = input("PreToolUse", "wrapper-session");
-    child.agent_id = Some("agent-wrapper".into());
-    child.agent_type = Some("codey_explorer".into());
-    child.turn_id = Some("child-turn".into());
-    attest_test_child(&child, root, runtime_id);
-    for name in [
-        "functions.exec",
-        "mcp__cua_repl__js",
-        "mcp__cua_repl__js_reset",
-        "mcp__codex_app__open_in_codex",
-        "mcp__codex_app__other_editor",
-    ] {
-        child.tool_name = Some(name.into());
-        let denied = runtime_subagent_attestation_denial(&child, root, runtime_id)
-            .unwrap()
-            .unwrap();
-        assert!(
-            denied.contains("CODEY_SUBAGENT_EXPLORER_WRAPPER_DENIED"),
-            "{name}: {denied}"
-        );
-    }
 }
 
 #[test]
@@ -3133,22 +3062,17 @@ fn root_keeps_writing_while_only_explorers_run() {
     };
 
     spawn_agent("scan_api", "codey_explorer", "agent-scan", base + 10);
-    let unproven_root_write = root_decision(root_turn, "functions.apply_patch", base + 20);
-    assert_eq!(unproven_root_write.as_deref(), Some("deny"));
-    let mut child_proof = input("PreToolUse", session_id);
-    child_proof.agent_id = Some("agent-scan".into());
-    child_proof.agent_type = Some("codey_explorer".into());
-    child_proof.turn_id = Some("child-turn-a".into());
-    child_proof.tool_name = Some("mcp__codey_fastctx__inspect_local_file".into());
-    attest_test_explorer_read_only(&child_proof, root, runtime_id);
-    assert_eq!(
-        handle_hook_for_runtime_at(&child_proof, root, runtime_id, base + 14).unwrap(),
-        json!({})
-    );
-    assert_eq!(
-        root_decision(root_turn, "functions.apply_patch", base + 15),
-        None
-    );
+    for tool_name in [
+        "functions.apply_patch",
+        "functions.exec",
+        "mcp__unknown__query",
+    ] {
+        assert_eq!(
+            root_decision(root_turn, tool_name, base + 20),
+            None,
+            "{tool_name}"
+        );
+    }
     assert_eq!(
         root_decision("different-turn", "functions.apply_patch", base + 21).as_deref(),
         Some("deny")
@@ -3163,9 +3087,14 @@ fn root_keeps_writing_while_only_explorers_run() {
     wait.turn_id = Some(root_turn.to_string());
     wait.tool_name = Some("agents.wait_agent".to_string());
     wait.tool_response = Some(json!({ "timedOut": true, "message": "still running" }));
-    let proven_wait = handle_hook_for_runtime_at(&wait, root, runtime_id, base + 23).unwrap();
-    let reason = proven_wait["reason"].as_str().unwrap();
-    assert!(reason.contains("主代理可以继续独立的写入和命令"));
+    let reason = handle_hook_for_runtime_at(&wait, root, runtime_id, base + 23).unwrap()["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        reason.contains("主代理可以继续独立的写入和命令"),
+        "{reason}"
+    );
     assert!(
         reason.contains("直接再次调用 agents.wait_agent"),
         "{reason}"
@@ -3174,12 +3103,12 @@ fn root_keeps_writing_while_only_explorers_run() {
     let mut child_patch = input("PreToolUse", session_id);
     child_patch.agent_id = Some("agent-scan".to_string());
     child_patch.agent_type = Some("codey_explorer".to_string());
+    child_patch.turn_id = Some("child-turn-a".to_string());
     child_patch.tool_name = Some("apply_patch".to_string());
+    attest_test_child(&child_patch, root, runtime_id);
     assert_eq!(
-        handle_hook_for_runtime_at(&child_patch, root, runtime_id, base + 24).unwrap()
-            ["hookSpecificOutput"]["permissionDecision"]
-            .as_str(),
-        Some("deny")
+        handle_hook_for_runtime_at(&child_patch, root, runtime_id, base + 24).unwrap(),
+        json!({})
     );
 
     create_active_marker(root, runtime_id, session_id, "untracked-agent").unwrap();

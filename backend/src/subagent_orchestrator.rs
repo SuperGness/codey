@@ -155,10 +155,6 @@ struct Reservation {
     resume_requested_at_ms: Option<u64>,
     #[serde(default)]
     interrupt_requested: bool,
-    /// Hash of the child turn whose provider rollout proved a read-only
-    /// sandbox. Legacy reservations intentionally remain unproven.
-    #[serde(default)]
-    native_read_only_turn_hash: Option<String>,
     /// Hash of the delegating root turn that admitted this attempt.
     #[serde(default)]
     root_turn_id_hash: Option<String>,
@@ -211,7 +207,6 @@ impl Reservation {
         self.error_message = None;
         self.pending_init_observed_at_ms = None;
         self.resume_requested_at_ms = None;
-        self.native_read_only_turn_hash = None;
         self.token_usage = None;
         self.current_turn_queued_at_ms = Some(now_ms);
         self.current_turn_started_at_ms = None;
@@ -276,7 +271,6 @@ impl Reservation {
                 .or(self.current_turn_queued_at_ms)
                 .or(Some(now_ms));
             self.current_turn_started_at_ms = Some(now_ms);
-            self.native_read_only_turn_hash = None;
             changed = true;
         }
         if unresolved {
@@ -301,7 +295,6 @@ impl Reservation {
         }
         self.current_turn_queued_at_ms = self.current_turn_queued_at_ms.or(Some(now_ms));
         self.current_turn_started_at_ms = Some(now_ms);
-        self.native_read_only_turn_hash = None;
         self.token_usage = None;
         self.updated_at_ms = now_ms;
         true
@@ -844,13 +837,6 @@ fn validate_ledger(ledger: &mut SessionLedger) -> Result<bool> {
                 .capabilities
                 .retain(|capability| capability != "workspace.write");
         }
-        if reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER {
-            let capability_count = reservation.capabilities.len();
-            reservation
-                .capabilities
-                .retain(|capability| capability != "workspace.write");
-            changed |= reservation.capabilities.len() != capability_count;
-        }
         changed |= reservation.legacy_write_capable.take().is_some();
     }
     let before = ledger.issued_task_ids.len();
@@ -1100,7 +1086,6 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
             last_agent_id_hash: None,
             resume_requested_at_ms: None,
             interrupt_requested: false,
-            native_read_only_turn_hash: None,
             root_turn_id_hash: root_turn_id_hash.clone(),
             current_turn_id_hash: None,
             retired_turn_id_hashes: BTreeSet::new(),
@@ -2367,12 +2352,7 @@ pub(crate) fn active_attempts_are_read_only(
             reservation.agent_id_hash.is_some()
                 && reservation.fenced_at_ms.is_none()
                 && reservation.state.is_active()
-        })
-        && active.iter().all(|reservation| {
-            reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER
-                && !reservation_declares_write(reservation)
-                && reservation.current_turn_id_hash.is_some()
-                && reservation.native_read_only_turn_hash == reservation.current_turn_id_hash
+                && reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER
         })
         && marker_hashes
             .iter()
@@ -2723,7 +2703,6 @@ pub(crate) struct ChildToolContext<'a> {
     pub(crate) agent_type: Option<&'a str>,
     pub(crate) transcript_path: Option<&'a str>,
     pub(crate) turn_id: Option<&'a str>,
-    pub(crate) native_read_only: bool,
     pub(crate) tool_name: &'a str,
     pub(crate) tool_input: Option<&'a Value>,
 }
@@ -2751,7 +2730,6 @@ pub(crate) fn authorize_child_tool(
         agent_type,
         transcript_path,
         turn_id,
-        native_read_only,
         tool_name,
         tool_input,
     } = context;
@@ -2877,16 +2855,9 @@ pub(crate) fn authorize_child_tool(
                 {
                     reservation.retired_turn_id_hashes.insert(previous);
                 }
-                reservation.native_read_only_turn_hash = None;
                 reservation.token_usage = reservation.usage_by_turn.get(&turn_hash).cloned();
                 reservation.current_turn_queued_at_ms.get_or_insert(now_ms);
                 reservation.current_turn_started_at_ms.get_or_insert(now_ms);
-                changed = true;
-            }
-            if native_read_only
-                && reservation.native_read_only_turn_hash.as_deref() != Some(turn_hash.as_str())
-            {
-                reservation.native_read_only_turn_hash = Some(turn_hash);
                 changed = true;
             }
             if changed {
@@ -2926,22 +2897,13 @@ pub(crate) fn authorize_child_tool(
         TraceRecorder::new(state_root).record_best_effort(&event);
     }
     let role = bound_reservation.map(|reservation| reservation.role.as_str());
-    let explorer_wrapper_denial = bound_reservation
-        .filter(|reservation| reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER)
-        .filter(|_| rules::explorer_has_unbounded_side_effects(tool_name))
-        .map(|reservation| {
-            format!(
-                "CODEY_SUBAGENT_EXPLORER_WRAPPER_DENIED: Explorer attempt `{}` 不得调用通用执行包装或可操作界面工具 `{tool_name}`；该工具可能绕过原生只读沙箱。只读文件、搜索、图片和网络检索工具仍可用。",
-                reservation.attempt_id
-            )
-        });
     let decision = loaded_rules.rules.evaluate(&RuleContext {
         actor: RuleActor::Child,
         role,
         tool_name,
         tool_class,
     });
-    let capability_denial = explorer_wrapper_denial.or_else(|| match tool_class {
+    let capability_denial = match tool_class {
         ToolClass::Read => match bound_reservation {
             None => Some(format!(
                 "{UNBOUND_ATTEMPT_ERROR_CODE}: Codey 资源门禁：当前 child 无法通过派生回执或生命周期 transcript 与有效活动 attempt 安全关联，禁止执行读取工具。请停止本次调用并把错误码返回主代理；不要猜测 task 归属绕过身份绑定。"
@@ -2994,15 +2956,6 @@ pub(crate) fn authorize_child_tool(
                 "Codey 能力门禁：attempt `{}` 未声明 command.execute capability，禁止工具 `{tool_name}`。读取被拒绝时不得用 Bash 回退；应由根代理修正契约或直接接管。",
                 reservation.attempt_id
             )),
-            Some(reservation)
-                if reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER
-                    && !reservation_turn_is_native_read_only(reservation, turn_id) =>
-            {
-                Some(format!(
-                    "Codey 沙箱门禁：explorer attempt `{}` 当前 turn 尚未从原生 rollout 证明只读权限，禁止执行通用命令 `{tool_name}`。只读文件、搜索、图片和网络检索工具仍可用；请回报主代理，由主代理执行命令或重新派发到明确只读的原生环境。",
-                    reservation.attempt_id
-                ))
-            }
             Some(_) => None,
         },
         ToolClass::Network => match bound_reservation {
@@ -3023,7 +2976,7 @@ pub(crate) fn authorize_child_tool(
             )),
             Some(_) => None,
         },
-        ToolClass::Write => match bound_reservation {
+        ToolClass::Write | ToolClass::Unknown => match bound_reservation {
             None => Some(format!(
                 "{UNBOUND_ATTEMPT_ERROR_CODE}: Codey 能力/资源门禁：当前 child 未绑定有效 attempt，禁止执行写入工具。不要重试写入或等待门禁自行恢复；请立即把该错误码返回主代理，由主代理使用全新的 task_name 重新派生或直接接管。"
             )),
@@ -3036,32 +2989,14 @@ pub(crate) fn authorize_child_tool(
                 ))
             }
             Some(reservation)
-                if !reservation_declares_write(reservation) =>
+                if tool_class == ToolClass::Write && !reservation_declares_write(reservation) =>
             {
                 Some(format!(
                 "Codey 能力门禁：attempt `{}` 当前不具备写入权限，工具 `{tool_name}` 未执行。请停止在本子代理内重试写入，把修改建议和证据返回主代理，由主代理完成写入。",
                 reservation.attempt_id
                 ))
             }
-            Some(reservation) if reservation.role == crate::config::SUBAGENT_ROLE_REVIEWER => {
-                Some(
-                    "Codey 复核门禁：Reviewer 不得直接修改源码。可继续运行测试、构建和生成测试产物；如需代码修改，请把补丁建议返回主代理或由 Worker 实施。"
-                        .to_string(),
-                )
-            }
             Some(_) => None,
-        },
-        ToolClass::Unknown if bound_reservation.is_some_and(|reservation| {
-            reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER
-        }) => Some(format!(
-            "Codey 工具门禁：未归类工具 `{tool_name}` 可能产生副作用，无法证明只读；本调用未执行。请改用已登记的只读工具，或把请求返回主代理处理。"
-        )),
-        ToolClass::Unknown => match bound_reservation {
-            Some(reservation)
-                if reservation.state.is_active() && reservation.fenced_at_ms.is_none() => None,
-            _ => Some(format!(
-                "{UNBOUND_ATTEMPT_ERROR_CODE}: 当前 child 未绑定有效活动 attempt，禁止执行工具 `{tool_name}`。"
-            )),
         },
         ToolClass::Collaboration if !safe_child_reporting_tool(tool_name, tool_input) => {
             Some(
@@ -3070,7 +3005,7 @@ pub(crate) fn authorize_child_tool(
             )
         }
         _ => None,
-    });
+    };
     let trace = bound_reservation
         .map(reservation_trace)
         .unwrap_or_else(|| TraceContext::new(None));
@@ -3237,12 +3172,6 @@ fn reservation_declares_write(reservation: &Reservation) -> bool {
         .any(|capability| capability == "workspace.write")
 }
 
-fn reservation_turn_is_native_read_only(reservation: &Reservation, turn_id: Option<&str>) -> bool {
-    turn_id.map(hash_component).is_some_and(|turn_hash| {
-        reservation.native_read_only_turn_hash.as_deref() == Some(&turn_hash)
-    })
-}
-
 fn associate_trace_event(event: &mut SubagentTraceEvent, reservation: &Reservation) {
     event.attempt_hash = Some(hash_component(&reservation.attempt_id));
     event.root_turn_hash = reservation.root_turn_id_hash.clone();
@@ -3355,24 +3284,23 @@ mod tests {
     }
 
     #[test]
-    fn native_capsule_withholds_file_writes_only_from_the_explorer() {
+    fn native_capsule_assigns_the_same_capabilities_to_every_role() {
         let temp = tempdir().unwrap();
         let rules = rules::load(temp.path()).rules;
         for role in crate::config::SUBAGENT_ROLE_IDS {
             let task =
                 prepare_task_capsule(Some(&spawn_input("task", role)), Some("/repo"), &rules)
                     .unwrap();
-            let expected: &[&str] = if role == crate::config::SUBAGENT_ROLE_EXPLORER {
-                &["command.execute", "files.read", "visual.inspect"]
-            } else {
-                &[
+            assert_eq!(
+                task.capabilities,
+                [
                     "command.execute",
                     "files.read",
                     "workspace.write",
                     "visual.inspect",
-                ]
-            };
-            assert_eq!(task.capabilities, expected, "{role}");
+                ],
+                "{role}"
+            );
         }
     }
 
@@ -3405,7 +3333,6 @@ mod tests {
                         agent_type: Some("codey_reviewer"),
                         transcript_path: None,
                         turn_id: Some("visual-turn"),
-                        native_read_only: false,
                         tool_name,
                         tool_input: None,
                     },
@@ -3427,44 +3354,25 @@ mod tests {
             0,
             30,
         );
-        assert!(
-            authorize_child_tool_with_context(
-                root,
-                "runtime-a",
-                "scan-session",
-                ChildToolContext {
-                    agent_id: "scan-agent",
-                    agent_type: Some("codey_explorer"),
-                    transcript_path: None,
-                    turn_id: Some("scan-turn"),
-                    native_read_only: false,
-                    tool_name: "apply_patch",
-                    tool_input: None,
-                },
-                35,
-            )
-            .unwrap()
-            .is_some_and(|reason| reason.contains("不具备写入权限"))
-        );
-        for tool_name in ["mcp__cua_repl__js", "exec_command", "mcp__custom__tool"] {
+        for tool_name in [
+            "mcp__cua_repl__js",
+            "apply_patch",
+            "exec_command",
+            "mcp__custom__tool",
+        ] {
             let context = || ChildToolContext {
                 agent_id: "scan-agent",
                 agent_type: Some("codey_explorer"),
                 transcript_path: None,
                 turn_id: Some("scan-turn"),
-                native_read_only: false,
                 tool_name,
                 tool_input: None,
             };
-            let denial =
+            assert_eq!(
                 authorize_child_tool_with_context(root, "runtime-a", "scan-session", context(), 40)
-                    .unwrap()
-                    .unwrap();
-            assert!(
-                denial.contains("WRAPPER_DENIED")
-                    || denial.contains("沙箱门禁")
-                    || denial.contains("未归类工具"),
-                "{tool_name}: {denial}"
+                    .unwrap(),
+                None,
+                "{tool_name}"
             );
         }
         subagent_stopped(root, "runtime-a", "scan-session", "scan-agent", 41).unwrap();
@@ -3483,7 +3391,6 @@ mod tests {
                     agent_type: Some("codey_explorer"),
                     transcript_path: None,
                     turn_id: Some("scan-turn"),
-                    native_read_only: false,
                     tool_name,
                     tool_input: None,
                 },
@@ -3492,9 +3399,7 @@ mod tests {
             .unwrap()
             .unwrap();
             assert!(
-                denial.contains(UNBOUND_ATTEMPT_ERROR_CODE)
-                    || denial.contains("WRAPPER_DENIED")
-                    || denial.contains("未归类工具"),
+                denial.contains(UNBOUND_ATTEMPT_ERROR_CODE),
                 "{tool_name}: {denial}"
             );
         }

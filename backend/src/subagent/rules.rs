@@ -187,14 +187,9 @@ impl RuleSet {
                 tool_name: "unknown_tool",
                 tool_class: ToolClass::Unknown,
             });
-            let expected = if role == crate::config::SUBAGENT_ROLE_EXPLORER {
-                RuleEffect::Deny
-            } else {
-                RuleEffect::Allow
-            };
             anyhow::ensure!(
-                unknown.effect == expected,
-                "子代理规则不能改变角色 {role} 的未归类工具边界"
+                unknown.effect == RuleEffect::Allow,
+                "子代理规则必须允许已绑定角色 {role} 的未归类扩展工具"
             );
             let visual = self.evaluate(&RuleContext {
                 actor: RuleActor::Child,
@@ -528,20 +523,6 @@ pub(crate) fn classify_tool(tool_name: &str) -> ToolClass {
     }
 }
 
-/// Some execution and UI wrappers can perform side effects outside the native
-/// filesystem sandbox. An Explorer cannot use them merely because its command
-/// rollout is read-only.
-pub(crate) fn explorer_has_unbounded_side_effects(tool_name: &str) -> bool {
-    let raw = tool_name.trim().to_ascii_lowercase();
-    let normalized = normalize_tool_name(tool_name);
-    matches!(
-        normalized.as_str(),
-        "exec" | "cua_repl_js" | "cua_repl_js_reset" | "open_in_codex" | "write_stdin"
-    ) || raw == "functions.exec"
-        || raw.starts_with("mcp__cua_repl__")
-        || raw.starts_with("mcp__codex_app__")
-}
-
 const COLLABORATION_TOOLS: &[&str] = &[
     "agent",
     "spawn_agent",
@@ -641,8 +622,8 @@ mod tests {
             tool_name: "mcp__mystery__mutate",
             tool_class: ToolClass::Unknown,
         });
-        assert_eq!(decision.effect, RuleEffect::Deny);
-        assert_eq!(decision.rule_id, "deny-unknown-tool-class");
+        assert_eq!(decision.effect, RuleEffect::Allow);
+        assert_eq!(decision.rule_id, "allow-role-capabilities");
 
         for role in crate::config::SUBAGENT_ROLE_IDS {
             let decision = rules.evaluate(&RuleContext {
@@ -690,7 +671,6 @@ mod tests {
             } else {
                 ToolClass::Visual
             };
-            assert!(explorer_has_unbounded_side_effects(name), "{name}");
             assert_eq!(
                 rules
                     .evaluate(&RuleContext {
@@ -811,19 +791,19 @@ mod tests {
                         tool_class: classify_tool(tool),
                     })
                     .effect,
-                RuleEffect::Deny,
+                RuleEffect::Allow,
                 "{tool}"
             );
             assert_eq!(
                 embedded()
                     .evaluate(&RuleContext {
                         actor: RuleActor::Child,
-                        role: Some("codey_worker"),
+                        role: None,
                         tool_name: tool,
                         tool_class: classify_tool(tool),
                     })
                     .effect,
-                RuleEffect::Allow,
+                RuleEffect::Deny,
                 "{tool}"
             );
         }
@@ -884,7 +864,7 @@ mod tests {
 
     #[test]
     fn live_rules_cannot_weaken_the_embedded_security_baseline() {
-        let mutations: [fn(&mut RuleSet); 4] = [
+        let mutations: [fn(&mut RuleSet); 3] = [
             |rules: &mut RuleSet| rules.fallback = RuleEffect::Allow,
             |rules: &mut RuleSet| {
                 rules.roles.get_mut("codey_explorer").unwrap().access = "read_only".into();
@@ -899,18 +879,6 @@ mod tests {
                     tools: vec!["spawn_agent".into()],
                     tool_classes: vec![ToolClass::Spawn],
                     explanation: "test-only permissive mutation".into(),
-                });
-            },
-            |rules: &mut RuleSet| {
-                rules.rules.push(RuleDefinition {
-                    id: "allow-unknown-regression".into(),
-                    priority: 10_000,
-                    effect: RuleEffect::Allow,
-                    actors: vec![RuleActor::Child],
-                    roles: vec!["codey_explorer".into()],
-                    tools: Vec::new(),
-                    tool_classes: vec![ToolClass::Unknown],
-                    explanation: "test-only unknown tool mutation".into(),
                 });
             },
         ];
