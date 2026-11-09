@@ -322,7 +322,7 @@ fn handle_hook_for_runtime_at(
                     crate::subagent_orchestrator::SubagentLifecycleContext {
                         agent_id,
                         agent_type: nonempty(input.agent_type.as_deref()),
-                        transcript_path: nonempty(input.transcript_path.as_deref()),
+                        transcript_path: child_transcript_path(input, agent_id),
                         turn_id: nonempty(input.turn_id.as_deref()),
                     },
                     now_ms,
@@ -357,7 +357,7 @@ fn handle_hook_for_runtime_at(
                     crate::subagent_orchestrator::SubagentLifecycleContext {
                         agent_id,
                         agent_type: nonempty(input.agent_type.as_deref()),
-                        transcript_path: nonempty(input.agent_transcript_path.as_deref()),
+                        transcript_path: child_transcript_path(input, agent_id),
                         turn_id: nonempty(input.turn_id.as_deref()),
                     },
                     now_ms,
@@ -684,8 +684,9 @@ fn runtime_subagent_attestation_denial(
     let expected_effort = expected.reasoning_effort.trim().to_ascii_lowercase();
     let observed = observed_runtime_subagent_selection(
         state_root,
+        &input.session_id,
         agent_id,
-        nonempty(input.transcript_path.as_deref()),
+        child_transcript_path(input, agent_id),
         nonempty(input.turn_id.as_deref()),
     )?;
     let Some(observed) = observed else {
@@ -748,45 +749,21 @@ fn runtime_subagent_attestation_path(
 
 fn observed_runtime_subagent_selection(
     state_root: &Path,
+    session_id: &str,
     agent_id: &str,
     transcript_path: Option<&str>,
     turn_id: Option<&str>,
 ) -> Result<Option<ObservedRuntimeSubagentSelection>> {
-    let Some(transcript_path) = transcript_path.map(Path::new) else {
+    let Some(canonical_transcript) =
+        crate::subagent_orchestrator::resolve_verified_subagent_transcript(
+            state_root,
+            session_id,
+            agent_id,
+            transcript_path,
+        )
+    else {
         return Ok(None);
     };
-    if !transcript_path.is_absolute()
-        || transcript_path.extension().and_then(|value| value.to_str()) != Some("jsonl")
-    {
-        return Ok(None);
-    }
-    let metadata = match fs::symlink_metadata(transcript_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Ok(None);
-    }
-    let Some(codex_home) = state_root.parent() else {
-        return Ok(None);
-    };
-    let sessions_root = match fs::canonicalize(codex_home.join("sessions")) {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-    let canonical_transcript = match fs::canonicalize(transcript_path) {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-    if !canonical_transcript.starts_with(&sessions_root)
-        || !canonical_transcript
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(&format!("-{agent_id}.jsonl")))
-    {
-        return Ok(None);
-    }
 
     let mut file = fs::File::open(&canonical_transcript).with_context(|| {
         format!(
@@ -989,7 +966,7 @@ fn pre_tool_use_output(
                 crate::subagent_orchestrator::ChildToolContext {
                     agent_id,
                     agent_type: nonempty(input.agent_type.as_deref()),
-                    transcript_path: nonempty(input.transcript_path.as_deref()),
+                    transcript_path: child_transcript_path(input, agent_id),
                     turn_id: nonempty(input.turn_id.as_deref()),
                     tool_name,
                     tool_input: input.tool_input.as_ref(),
@@ -2053,6 +2030,7 @@ fn wait_response_is_bare_timeout(tool_response: Option<&Value>) -> bool {
                     match normalized_ascii_identifier(key).as_str() {
                         "timedout" => true,
                         "message" => value.is_string(),
+                        "status" => value.as_object().is_some_and(Map::is_empty),
                         _ => false,
                     }
                 })
@@ -2215,7 +2193,8 @@ fn summarize_agents(agents: &[Value]) -> AgentListSnapshotState {
             continue;
         };
         let agent_name =
-            object_value_any(agent, &["agentname", "taskname", "name"]).and_then(Value::as_str);
+            object_value_any(agent, &["agentname", "taskname", "agentpath", "name"])
+                .and_then(Value::as_str);
         if agent_name.is_some_and(is_root_agent_name) {
             continue;
         }
@@ -2351,6 +2330,19 @@ fn normalized_collaboration_tool(tool_name: &str) -> String {
 fn input_has_subagent_context(input: &HookInput) -> bool {
     nonempty(input.agent_id.as_deref()).is_some() || nonempty(input.agent_type.as_deref()).is_some()
 }
+fn child_transcript_path<'a>(input: &'a HookInput, agent_id: &str) -> Option<&'a str> {
+    let suffix = format!("-{agent_id}.jsonl");
+    let agent_transcript = nonempty(input.agent_transcript_path.as_deref());
+    let transcript = nonempty(input.transcript_path.as_deref());
+    if agent_transcript.is_some_and(|path| path.ends_with(&suffix)) {
+        return agent_transcript;
+    }
+    if transcript.is_some_and(|path| path.ends_with(&suffix)) {
+        return transcript;
+    }
+    agent_transcript.or(transcript)
+}
+
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }

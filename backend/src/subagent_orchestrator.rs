@@ -26,6 +26,7 @@ mod scheduling_tests;
 
 use contract::*;
 use identity::*;
+pub(crate) use identity::resolve_verified_subagent_transcript;
 
 pub(crate) const POST_TOOL_HOOK_MATCHER: &str = "*";
 
@@ -220,7 +221,9 @@ impl Reservation {
     }
 
     fn followup_turn_is_unresolved(&self) -> bool {
-        self.state.is_active() && self.current_turn_started_at_ms.is_none()
+        self.followup_count > 0
+            && self.state.is_active()
+            && self.current_turn_started_at_ms.is_none()
     }
 
     fn accepts_explicit_turn(&self, turn_hash: &str) -> bool {
@@ -1235,6 +1238,7 @@ pub(crate) fn post_spawn(
         // 子代理是否真正创建。保留 Pending，等待生命周期事件或完整状态快照对账。
         reservation.updated_at_ms = now_ms;
     }
+    let _ = rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
     store.save(&mut ledger, now_ms)?;
     if let Some(event) = trace_event {
         TraceRecorder::new(state_root).record_best_effort(&event);
@@ -1273,6 +1277,9 @@ pub(crate) fn pre_followup_task(
             followup_without_active_attempt_denial(target, "当前会话没有可验证的委派账本"),
         ));
     };
+    if rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms) {
+        store.save(&mut ledger, now_ms)?;
+    }
     let Some(task_id) = unique_task_for_identifier(&ledger, target)? else {
         return Ok(FollowupAdmission::Denied(
             followup_without_active_attempt_denial(
@@ -1377,7 +1384,12 @@ pub(crate) fn post_followup_task(
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(());
     };
+    let rebound =
+        rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
     let Some(task_id) = unique_task_for_identifier(&ledger, target)? else {
+        if rebound {
+            store.save(&mut ledger, now_ms)?;
+        }
         return Ok(());
     };
     let (was_running, reopened) = {
@@ -1392,7 +1404,7 @@ pub(crate) fn post_followup_task(
         }
         (was_running, reopened)
     };
-    if reopened {
+    if reopened || rebound {
         store.save(&mut ledger, now_ms)?;
     }
     let reservation = ledger.reservations.get(&task_id).expect("resolved task");
@@ -1552,7 +1564,13 @@ pub(crate) fn settle_unique_anonymous_stop(
         .reservations
         .get_mut(task_id)
         .expect("anonymous stop candidate must exist");
-    let agent_id_hash = reservation.agent_id_hash.clone();
+    let agent_id_hash = reservation
+        .agent_id_hash
+        .clone()
+        .or_else(|| reservation.last_agent_id_hash.clone());
+    if let Some(hash) = reservation.agent_id_hash.as_ref() {
+        reservation.last_agent_id_hash = Some(hash.clone());
+    }
     reservation.state = ReservationState::Terminal;
     reservation.outcome = ExecutionOutcome::Unknown;
     reservation.pending_init_observed_at_ms = None;
@@ -1695,9 +1713,26 @@ fn update_reservation_lifecycle(
             }
         }
         if reservation.state == state {
-            let should_track = reservation.state.is_active();
+            let should_track = if state == ReservationState::Terminal {
+                !reservation.resume_pending(now_ms)
+            } else {
+                reservation.state.is_active()
+            };
             let mut changed = lifecycle_turn_changed;
-            if reservation.agent_id_hash.as_deref() != Some(agent_hash.as_str()) {
+            if state == ReservationState::Terminal {
+                if reservation
+                    .agent_id_hash
+                    .as_deref()
+                    .is_some_and(|bound| is_provisional_task_binding(bound, &task_id))
+                {
+                    reservation.agent_id_hash = Some(agent_hash.clone());
+                    changed = true;
+                }
+                if reservation.last_agent_id_hash.as_deref() != Some(agent_hash.as_str()) {
+                    reservation.last_agent_id_hash = Some(agent_hash);
+                    changed = true;
+                }
+            } else if reservation.agent_id_hash.as_deref() != Some(agent_hash.as_str()) {
                 reservation.agent_id_hash = Some(agent_hash);
                 if state == ReservationState::Running {
                     reservation.started_at_ms.get_or_insert(now_ms);
@@ -1714,10 +1749,17 @@ fn update_reservation_lifecycle(
             return Ok(should_track);
         }
         if reservation.state.transition_to(state).is_none() {
-            return Ok(false);
+            return Ok(
+                state == ReservationState::Terminal
+                    && !reservation.state.is_active()
+                    && !reservation.resume_pending(now_ms),
+            );
         }
         reservation.state = state;
-        reservation.agent_id_hash = Some(agent_hash);
+        reservation.agent_id_hash = Some(agent_hash.clone());
+        if state == ReservationState::Terminal {
+            reservation.last_agent_id_hash = Some(agent_hash);
+        }
         reservation.pending_init_observed_at_ms = None;
         reservation.updated_at_ms = now_ms;
         let trace_status = match state {
@@ -1822,6 +1864,8 @@ pub(crate) fn observe_status_response(
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(StatusResponseObservation::default());
     };
+    let rebound =
+        rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
     let mut terminal_tasks = BTreeMap::<String, TerminalTaskObservation>::new();
     let mut usage_by_task_turn = BTreeMap::new();
     let mut needs_snapshot = false;
@@ -1966,6 +2010,8 @@ pub(crate) fn observe_status_response(
             if let Some(agent_id_hash) = reservation.agent_id_hash.take() {
                 reservation.last_agent_id_hash = Some(agent_id_hash.clone());
                 agent_id_hashes.push(agent_id_hash);
+            } else if let Some(last_hash) = reservation.last_agent_id_hash.clone() {
+                agent_id_hashes.push(last_hash);
             }
             reservation.state = ReservationState::Terminal;
             reservation.outcome = outcome;
@@ -2022,7 +2068,7 @@ pub(crate) fn observe_status_response(
             changed = true;
         }
     }
-    if changed || usage_only_changed {
+    if changed || usage_only_changed || rebound {
         store.save(&mut ledger, now_ms)?;
     }
     if changed {
@@ -2089,6 +2135,8 @@ fn reconcile_pending_init_observations(
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);
     };
+    let mut changed =
+        rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
 
     let mut task_states = BTreeMap::<String, AgentState>::new();
     let mut conflicting_states = BTreeSet::new();
@@ -2136,7 +2184,6 @@ fn reconcile_pending_init_observations(
         }
     }
 
-    let mut changed = false;
     for (task_id, state) in task_states {
         let Some(reservation) = ledger.reservations.get_mut(&task_id) else {
             continue;
@@ -2173,7 +2220,10 @@ fn reconcile_pending_init_observations(
         let trace = reservation_trace(reservation);
         let role = reservation.role.clone();
         if let Some(agent_id_hash) = reservation.agent_id_hash.take() {
+            reservation.last_agent_id_hash = Some(agent_id_hash.clone());
             agent_id_hashes.push(agent_id_hash);
+        } else if let Some(last_hash) = reservation.last_agent_id_hash.clone() {
+            agent_id_hashes.push(last_hash);
         }
         reservation.state = ReservationState::Recovered;
         reservation.outcome = ExecutionOutcome::Lost;
@@ -2238,7 +2288,7 @@ pub(crate) fn active_reservation_count(
 ) -> Result<Option<usize>> {
     Ok(
         active_reservation_projection(state_root, runtime_id, session_id, now_ms)?
-            .map(|(count, _)| count),
+            .map(|(count, _, _)| count),
     )
 }
 
@@ -2268,11 +2318,14 @@ pub(crate) fn single_agent_status_matches_target(
         return Ok(false);
     }
     let store = LedgerStore::open(state_root, session_id)?;
-    let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
+    let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(identifiers
             .iter()
             .all(|identifier| identifier.as_str() == target));
     };
+    if rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms) {
+        store.save(&mut ledger, now_ms)?;
+    }
     let expected = identity_task_candidates(&ledger, &target);
     Ok(expected.len() == 1
         && identifiers
@@ -2307,21 +2360,37 @@ pub(crate) fn active_reservation_projection(
     runtime_id: &str,
     session_id: &str,
     now_ms: u64,
-) -> Result<Option<(usize, BTreeSet<String>)>> {
+) -> Result<Option<(usize, BTreeSet<String>, BTreeSet<String>)>> {
     let store = LedgerStore::open(state_root, session_id)?;
-    let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
+    let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);
     };
+    if rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms) {
+        store.save(&mut ledger, now_ms)?;
+    }
     let active = ledger
         .reservations
         .values()
         .filter(|reservation| reservation.state.is_active())
         .collect::<Vec<_>>();
-    let identities = active
+    let identities: BTreeSet<String> = active
         .iter()
         .filter_map(|reservation| reservation.agent_id_hash.clone())
         .collect();
-    Ok(Some((active.len(), identities)))
+    let settled_identities = ledger
+        .reservations
+        .values()
+        .filter(|reservation| !reservation.state.is_active())
+        .flat_map(|reservation| {
+            reservation
+                .agent_id_hash
+                .iter()
+                .chain(reservation.last_agent_id_hash.iter())
+                .cloned()
+        })
+        .filter(|hash| !identities.contains(hash))
+        .collect();
+    Ok(Some((active.len(), identities, settled_identities)))
 }
 
 /// Whether the root may keep writing and running commands: every active
@@ -2335,9 +2404,12 @@ pub(crate) fn active_attempts_are_read_only(
     now_ms: u64,
 ) -> Result<bool> {
     let store = LedgerStore::open(state_root, session_id)?;
-    let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
+    let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(false);
     };
+    if rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms) {
+        store.save(&mut ledger, now_ms)?;
+    }
     let active = ledger
         .reservations
         .values()
@@ -2347,6 +2419,23 @@ pub(crate) fn active_attempts_are_read_only(
         .iter()
         .filter_map(|reservation| reservation.agent_id_hash.as_deref())
         .collect::<BTreeSet<_>>();
+    let settled = ledger
+        .reservations
+        .values()
+        .filter(|reservation| !reservation.state.is_active())
+        .flat_map(|reservation| {
+            reservation
+                .agent_id_hash
+                .as_deref()
+                .into_iter()
+                .chain(reservation.last_agent_id_hash.as_deref())
+        })
+        .filter(|hash| !bound.contains(*hash))
+        .collect::<BTreeSet<_>>();
+    let live_marker_hashes = marker_hashes
+        .iter()
+        .filter(|hash| !settled.contains(hash.as_str()))
+        .collect::<Vec<_>>();
     Ok(!active.is_empty()
         && active.iter().all(|reservation| {
             reservation.agent_id_hash.is_some()
@@ -2354,7 +2443,7 @@ pub(crate) fn active_attempts_are_read_only(
                 && reservation.state.is_active()
                 && reservation.role == crate::config::SUBAGENT_ROLE_EXPLORER
         })
-        && marker_hashes
+        && live_marker_hashes
             .iter()
             .all(|hash| bound.contains(hash.as_str()))
         && !bound.is_empty()
@@ -2382,7 +2471,9 @@ pub(crate) fn recover_active_reservations(
         }
         reservation.state = ReservationState::Recovered;
         reservation.outcome = ExecutionOutcome::Lost;
-        reservation.agent_id_hash = None;
+        if let Some(agent_id_hash) = reservation.agent_id_hash.take() {
+            reservation.last_agent_id_hash = Some(agent_id_hash);
+        }
         reservation.pending_init_observed_at_ms = None;
         reservation.updated_at_ms = now_ms;
         reservation.completed_at_ms = Some(now_ms);
@@ -2500,14 +2591,19 @@ pub(crate) fn pre_interrupt_agent(
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(());
     };
+    let mut changed =
+        rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
     let Some(task_id) = unique_task_for_identifier(&ledger, &target)? else {
+        if changed {
+            store.save(&mut ledger, now_ms)?;
+        }
         return Ok(());
     };
     let reservation = ledger
         .reservations
         .get_mut(&task_id)
         .expect("resolved task");
-    let mut changed = !reservation.interrupt_requested;
+    changed |= !reservation.interrupt_requested;
     reservation.interrupt_requested = true;
     reservation.resume_requested_at_ms = None;
     if reservation.state.is_active() && reservation.fenced_at_ms.is_none() {
@@ -2544,7 +2640,12 @@ pub(crate) fn settle_interrupt_acknowledgement(
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);
     };
+    let rebound =
+        rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
     let Some(task_id) = unique_task_for_identifier(&ledger, &target)? else {
+        if rebound {
+            store.save(&mut ledger, now_ms)?;
+        }
         return Ok(None);
     };
 
@@ -2553,9 +2654,15 @@ pub(crate) fn settle_interrupt_acknowledgement(
     // unknown, ambiguous, or mismatched identity must keep the fence intact.
     for identifier in &acknowledgement.identifiers {
         let Ok(Some(identity_task_id)) = unique_task_for_identifier(&ledger, identifier) else {
+            if rebound {
+                store.save(&mut ledger, now_ms)?;
+            }
             return Ok(None);
         };
         if identity_task_id != task_id {
+            if rebound {
+                store.save(&mut ledger, now_ms)?;
+            }
             return Ok(None);
         }
     }
@@ -2564,11 +2671,20 @@ pub(crate) fn settle_interrupt_acknowledgement(
         .reservations
         .get_mut(&task_id)
         .expect("resolved reservation must exist");
-    let agent_id_hash = reservation.agent_id_hash.clone();
+    let agent_id_hash = reservation
+        .agent_id_hash
+        .clone()
+        .or_else(|| reservation.last_agent_id_hash.clone());
+    if let Some(hash) = reservation.agent_id_hash.as_ref() {
+        reservation.last_agent_id_hash = Some(hash.clone());
+    }
     let refines_unknown_terminal = reservation.state == ReservationState::Terminal
         && reservation.outcome == ExecutionOutcome::Unknown
         && acknowledgement.prior_outcome.is_some();
     if !reservation.state.is_active() && !refines_unknown_terminal {
+        if rebound {
+            store.save(&mut ledger, now_ms)?;
+        }
         return Ok(Some(InterruptSettlement { agent_id_hash }));
     }
 

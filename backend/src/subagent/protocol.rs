@@ -104,6 +104,11 @@ pub(crate) fn object_has_terminal_status(values: &Map<String, Value>) -> bool {
     values
         .iter()
         .any(|(key, value)| is_terminal_field(key) && value_reports_terminal(value))
+        || wait_status_map_entries(values).is_some_and(|entries| {
+            entries
+                .values()
+                .any(|status| terminal_outcome_from_value(status).is_some())
+        })
 }
 
 pub(crate) fn object_reports_terminal(values: &Map<String, Value>) -> bool {
@@ -178,7 +183,7 @@ fn collect_native_usage_observations_in_envelope(
                 let identifier = values.iter().find_map(|(key, value)| {
                     matches!(
                         normalize_identifier(key).as_str(),
-                        "taskname" | "agentname" | "agentid" | "subagentid"
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                     )
                     .then(|| value.as_str().map(str::trim))
                     .flatten()
@@ -390,6 +395,20 @@ fn collect_terminal_observations_in_envelope(
             }
         }
         Value::Object(values) => {
+            if entry_allowed && let Some(status_map) = wait_status_map_entries(values) {
+                let Ok(turn_id) = terminal_turn_id(values) else {
+                    return;
+                };
+                for (agent_id, status_value) in status_map {
+                    if let Some(outcome) = terminal_outcome_from_value(status_value) {
+                        target.push(TerminalObservation {
+                            identifier: agent_id.trim().to_owned(),
+                            outcome,
+                            turn_id: turn_id.clone(),
+                        });
+                    }
+                }
+            }
             if entry_allowed && let Some(outcome) = object_terminal_outcome(values) {
                 let Ok(turn_id) = terminal_turn_id(values) else {
                     return;
@@ -397,7 +416,7 @@ fn collect_terminal_observations_in_envelope(
                 let identifiers = values.iter().filter_map(|(key, value)| {
                     matches!(
                         normalize_identifier(key).as_str(),
-                        "taskname" | "agentname" | "agentid" | "subagentid"
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                     )
                     .then(|| value.as_str().map(str::trim))
                     .flatten()
@@ -488,7 +507,7 @@ fn collect_native_status_usage_observations_in_envelope(
                 let identifier = values.iter().find_map(|(key, value)| {
                     matches!(
                         normalize_identifier(key).as_str(),
-                        "taskname" | "agentname" | "agentid" | "subagentid"
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                     )
                     .then(|| value.as_str().map(str::trim))
                     .flatten()
@@ -543,13 +562,24 @@ fn collect_agent_status_observations_in_envelope(
             }
         }
         Value::Object(values) => {
+            if entry_allowed && let Some(status_map) = wait_status_map_entries(values) {
+                for (agent_id, status_value) in status_map {
+                    let state = classify_agent_status(status_value);
+                    if state != AgentState::Unknown {
+                        target.push(AgentStatusObservation {
+                            identifiers: vec![agent_id.trim().to_owned()],
+                            state,
+                        });
+                    }
+                }
+            }
             if entry_allowed && let Some(state) = agent_entry_state(value, values) {
                 let identifiers = values
                     .iter()
                     .filter_map(|(key, value)| {
                         matches!(
                             normalize_identifier(key).as_str(),
-                            "taskname" | "agentname" | "agentid" | "subagentid"
+                            "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                         )
                         .then(|| value.as_str().map(str::trim))
                         .flatten()
@@ -614,6 +644,13 @@ fn collect_terminal_identifiers_with(
             }
         }
         Value::Object(values) => {
+            if entry_allowed && let Some(status_map) = wait_status_map_entries(values) {
+                target.extend(status_map.iter().filter_map(|(agent_id, status_value)| {
+                    terminal_outcome_from_value(status_value)
+                        .map(|_| agent_id.trim().to_owned())
+                        .filter(|id| !id.is_empty())
+                }));
+            }
             if entry_allowed && object_has_terminal_status(values) {
                 target.extend(values.iter().filter_map(|(key, value)| {
                     (is_identifier(key))
@@ -740,7 +777,7 @@ fn collect_interrupt_acknowledgement(
                 for (key, value) in values {
                     let key = normalize_identifier(key);
                     match key.as_str() {
-                        "taskname" | "agentname" | "agentid" | "subagentid" => {
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid" => {
                             let Some(identifier) = value
                                 .as_str()
                                 .map(str::trim)
@@ -871,7 +908,7 @@ fn collect_interrupt_identities(
                 for (key, value) in values {
                     if !matches!(
                         normalize_identifier(key).as_str(),
-                        "taskname" | "agentname" | "agentid" | "subagentid"
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                     ) {
                         continue;
                     }
@@ -978,6 +1015,36 @@ fn response_has_textual_spawn_failure(value: &Value) -> bool {
     }
 }
 
+fn wait_status_map_entries(values: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    let has_timed_out = values
+        .iter()
+        .any(|(key, value)| normalize_identifier(key) == "timedout" && value.is_boolean());
+    if !has_timed_out {
+        return None;
+    }
+    let status_map = values.iter().find_map(|(key, value)| {
+        matches!(
+            normalize_identifier(key).as_str(),
+            "status" | "statuses" | "agentstatus"
+        )
+        .then(|| value.as_object())
+        .flatten()
+    })?;
+    if status_map.is_empty() || object_reports_terminal(status_map) {
+        return None;
+    }
+    status_map
+        .iter()
+        .all(|(agent_id, status)| {
+            let normalized = normalize_identifier(agent_id);
+            !agent_id.trim().is_empty()
+                && !is_terminal_field(agent_id)
+                && !is_terminal_marker_field(&normalized)
+                && classify_agent_status(status) != AgentState::Unknown
+        })
+        .then_some(status_map)
+}
+
 fn object_terminal_outcome(values: &Map<String, Value>) -> Option<TerminalOutcome> {
     values
         .iter()
@@ -985,7 +1052,8 @@ fn object_terminal_outcome(values: &Map<String, Value>) -> Option<TerminalOutcom
             let normalized_key = normalize_identifier(key);
             if is_terminal_marker_field(&normalized_key)
                 && let Some(outcome) = terminal_outcome_from_identifier(&normalized_key)
-                && !matches!(value, Value::Bool(false) | Value::Null)
+                && !matches!(value, Value::Bool(false))
+                && (!value.is_null() || values.len() == 1)
             {
                 return Some(outcome);
             }
@@ -1535,5 +1603,85 @@ mod tests {
                 .as_object()
                 .unwrap()
         ));
+    }
+
+    #[test]
+    fn codex_null_completed_variant_and_wait_status_maps_are_recognized_as_terminal() {
+        assert_eq!(
+            classify_agent_status(&json!({"completed": null})),
+            AgentState::Terminal
+        );
+        let list_response = json!({
+            "agents": [
+                {
+                    "agent_name": "/root/explorer_a",
+                    "agent_status": {"completed": null}
+                },
+                {
+                    "agent_path": "/root/worker_b",
+                    "agent_status": {"completed": "done"}
+                }
+            ]
+        });
+        let mut list_terminal = Vec::new();
+        collect_terminal_observations(&list_response, &mut list_terminal);
+        assert_eq!(
+            list_terminal,
+            [
+                TerminalObservation {
+                    identifier: "/root/explorer_a".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+                TerminalObservation {
+                    identifier: "/root/worker_b".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+            ]
+        );
+
+        let wait_map_response = json!({
+            "status": {
+                "agent-uuid-a": {"completed": null},
+                "agent-uuid-b": {"errored": "boom"},
+                "agent-uuid-live": "running"
+            },
+            "timed_out": false
+        });
+        assert!(object_has_terminal_status(
+            wait_map_response.as_object().unwrap()
+        ));
+        let mut wait_terminal = Vec::new();
+        collect_terminal_observations(&wait_map_response, &mut wait_terminal);
+        assert_eq!(
+            wait_terminal,
+            [
+                TerminalObservation {
+                    identifier: "agent-uuid-a".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+                TerminalObservation {
+                    identifier: "agent-uuid-b".into(),
+                    outcome: TerminalOutcome::Failed,
+                    turn_id: None,
+                },
+            ]
+        );
+        let mut wait_ids = Vec::new();
+        collect_terminal_agent_ids(&wait_map_response, &mut wait_ids);
+        assert_eq!(wait_ids, ["agent-uuid-a", "agent-uuid-b"]);
+
+        assert_eq!(
+            interrupt_acknowledgement(&json!({
+                "agent_path": "/root/explorer_a",
+                "previous_status": {"completed": null}
+            })),
+            Some(InterruptAcknowledgement {
+                prior_outcome: Some(TerminalOutcome::Succeeded),
+                identifiers: vec!["/root/explorer_a".into()],
+            })
+        );
     }
 }

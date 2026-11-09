@@ -530,8 +530,8 @@ pub(super) fn active_agent_count_for_runtime(
     runtime_id: &str,
     session_id: &str,
 ) -> Result<usize> {
-    let marker_hashes = active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?;
-    if let Some((active, bound_agent_hashes)) =
+    let mut marker_hashes = active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?;
+    if let Some((active, bound_agent_hashes, settled_agent_hashes)) =
         crate::subagent_orchestrator::active_reservation_projection(
             state_root,
             runtime_id,
@@ -539,6 +539,12 @@ pub(super) fn active_agent_count_for_runtime(
             current_timestamp_millis(),
         )?
     {
+        for settled_hash in settled_agent_hashes {
+            if marker_hashes.remove(&settled_hash) {
+                let _ =
+                    remove_active_marker_by_hash(state_root, runtime_id, session_id, &settled_hash);
+            }
+        }
         return Ok(active + marker_hashes.difference(&bound_agent_hashes).count());
     }
     Ok(marker_hashes.len())

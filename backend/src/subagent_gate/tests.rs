@@ -5078,3 +5078,146 @@ fn resumed_child_rebinds_its_opaque_thread_id_without_a_transcript() {
         1
     );
 }
+
+#[test]
+fn nested_thread_spawn_rollout_and_null_completed_status_settle_provisional_child_and_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codey-subagent-gate-v3");
+    write_test_runtime_policy(&root);
+    let (runtime_id, session_id) = ("runtime-v2-nested", "session-v2-nested");
+    let task_path = "/root/scan_auth";
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.cwd = Some("/repo".to_string());
+    spawn.turn_id = Some("root-turn-1".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": "scan_auth",
+        "agent_type": "codey_explorer",
+        "message": "Inspect auth module"
+    }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&spawn, &root, runtime_id, 10).unwrap(),
+        json!({})
+    );
+    spawn.hook_event_name = "PostToolUse".to_string();
+    spawn.tool_response = Some(json!({
+        "task_name": task_path,
+        "nickname": "Locke"
+    }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&spawn, &root, runtime_id, 11).unwrap(),
+        json!({})
+    );
+
+    let agent_id = "019cd846-3f1c-7aa0-9b18-6ef9c8e12a34";
+    let parent_transcript = temp
+        .path()
+        .join("sessions/2026/11/08")
+        .join(format!("rollout-parent-{session_id}.jsonl"));
+    fs::create_dir_all(parent_transcript.parent().unwrap()).unwrap();
+    fs::write(
+        &parent_transcript,
+        format!(
+            "{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": { "id": session_id, "source": "cli" }
+            })
+        ),
+    )
+    .unwrap();
+
+    // SubagentStart arrives before the child rollout file is flushed and carries
+    // the parent rollout path in transcript_path.
+    let mut started = input("SubagentStart", session_id);
+    started.agent_id = Some(agent_id.to_string());
+    started.agent_type = Some("codey_explorer".to_string());
+    started.transcript_path = Some(parent_transcript.to_string_lossy().into_owned());
+    assert_eq!(
+        handle_hook_for_runtime_at(&started, &root, runtime_id, 12).unwrap(),
+        json!({})
+    );
+
+    // Child rollout is then written with parent_thread_id only inside
+    // payload.source.subagent.thread_spawn (the real Codex SessionSource layout).
+    let child_transcript = temp
+        .path()
+        .join("sessions/2026/11/08")
+        .join(format!("rollout-child-{agent_id}.jsonl"));
+    fs::write(
+        &child_transcript,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": agent_id,
+                    "agent_path": task_path,
+                    "agent_role": "codey_explorer",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": session_id,
+                                "depth": 1,
+                                "agent_path": task_path,
+                                "agent_role": "codey_explorer",
+                                "agent_nickname": "Locke"
+                            }
+                        }
+                    }
+                }
+            }),
+            json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "child-turn-1",
+                    "model": "gpt-5.6-terra",
+                    "effort": "medium"
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    // Child PreToolUse with parent transcript_path resolves the child's own rollout
+    // from sessions/ for both runtime model attestation and reservation binding.
+    let mut child_tool = input("PreToolUse", session_id);
+    child_tool.agent_id = Some(agent_id.to_string());
+    child_tool.agent_type = Some("codey_explorer".to_string());
+    child_tool.turn_id = Some("child-turn-1".to_string());
+    child_tool.transcript_path = Some(parent_transcript.to_string_lossy().into_owned());
+    child_tool.tool_name = Some("exec_command".to_string());
+    child_tool.tool_input = Some(json!({ "cmd": "ls" }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&child_tool, &root, runtime_id, 13).unwrap(),
+        json!({})
+    );
+
+    // list_agents with AgentStatus::Completed(None) ({"completed": null}) settles
+    // the reservation AND cleans up the opaque child UUID .active marker.
+    let mut list = input("PostToolUse", session_id);
+    list.tool_name = Some("agents.list_agents".to_string());
+    list.tool_input = Some(json!({}));
+    list.tool_response = Some(json!({
+        "agents": [
+            {
+                "agent_name": task_path,
+                "agent_status": { "completed": null }
+            }
+        ]
+    }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&list, &root, runtime_id, 14).unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(&root, runtime_id, session_id).unwrap(),
+        0
+    );
+    assert_eq!(
+        handle_hook_for_runtime_at(&input("Stop", session_id), &root, runtime_id, 15).unwrap(),
+        json!({})
+    );
+}
+
