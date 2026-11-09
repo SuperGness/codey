@@ -133,6 +133,8 @@ const createEnvironment = (options = {}) => {
     return { status: "ok" };
   };
 
+  const animationFrames = new Map();
+  let nextAnimationFrame = 1;
   const window = {
     __codexSessionDeleteBridge: options.bridgeReady === false ? undefined : bridge,
     innerHeight: 800,
@@ -141,6 +143,13 @@ const createEnvironment = (options = {}) => {
     listeners: new Map(),
     addEventListener: FakeElementCore.prototype.addEventListener,
     removeEventListener: FakeElementCore.prototype.removeEventListener,
+    dispatchEvent: FakeElementCore.prototype.dispatchEvent,
+    requestAnimationFrame: (callback) => {
+      const id = nextAnimationFrame++;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame: (id) => animationFrames.delete(id),
   };
 
   const testSetTimeout = (callback, delay, ...args) => {
@@ -189,6 +198,12 @@ const createEnvironment = (options = {}) => {
     rerun: () => vm.runInContext(source, context),
     dispose: () => context.window.__codeyConversationStats.dispose(),
     markPreviousVersion: () => { context.window.__codeyConversationStats.version = 3; },
+    animationFrames,
+    runAnimationFrames: () => {
+      const callbacks = [...animationFrames.values()];
+      animationFrames.clear();
+      callbacks.forEach((callback) => callback(0));
+    },
     window,
   };
 };
@@ -855,6 +870,66 @@ test("centers the details immediately above the trigger and clamps the viewport"
   assert.equal(panel(env).style.left, "12px");
 });
 
+test("coalesces scroll and resize repositioning into one measurement per frame", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    let entry = { left: 200, top: 700, width: 400, height: 28 };
+    let measurements = 0;
+    summary(env).getBoundingClientRect = () => { measurements += 1; return entry; };
+    panel(env).getBoundingClientRect = () => ({ width: 420, height: 300 });
+    click(summary(env));
+    assert.equal(panel(env).style.left, "190px");
+
+    measurements = 0;
+    entry = { ...entry, left: 300 };
+    for (let index = 0; index < 5; index += 1) {
+      env.document.dispatchEvent({ type: "scroll", target: env.document });
+      env.window.dispatchEvent({ type: "resize" });
+    }
+    assert.equal(measurements, 0, "滚动和缩放事件里不得同步测量布局");
+    assert.equal(env.animationFrames.size, 1);
+    env.runAnimationFrames();
+    assert.equal(measurements, 1);
+    assert.equal(panel(env).style.left, "290px");
+
+    env.document.dispatchEvent({ type: "scroll", target: panel(env) });
+    assert.equal(env.animationFrames.size, 0, "浮层内部滚动不移动入口");
+
+    env.document.dispatchEvent({ type: "scroll", target: env.document });
+    click(summary(env));
+    assertExpanded(env, false);
+    assert.equal(env.animationFrames.size, 0, "收起时取消排队的定位");
+    env.document.dispatchEvent({ type: "scroll", target: env.document });
+    assert.equal(env.animationFrames.size, 0, "收起后滚动不再排队");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("measures the panel after lifting a stale height limit", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    summary(env).getBoundingClientRect = () => ({ left: 200, top: 300, width: 400, height: 28 });
+    // 浮层实际高度受 max-height 限制：内容 500px，上限多少就渲染多高。
+    panel(env).getBoundingClientRect = () => {
+      const limit = Number.parseFloat(panel(env).style.maxHeight);
+      return { width: 420, height: Number.isFinite(limit) ? Math.min(500, limit) : 500 };
+    };
+    click(summary(env));
+    assert.equal(panel(env).style.top, "12px");
+
+    summary(env).getBoundingClientRect = () => ({ left: 200, top: 700, width: 400, height: 28 });
+    env.window.dispatchEvent({ type: "resize" });
+    env.runAnimationFrames();
+    assert.equal(panel(env).style.maxHeight, "680px");
+    assert.equal(panel(env).style.top, "192px", "应按新上限下的高度贴近入口");
+  } finally {
+    env.dispose();
+  }
+});
+
 test("Escape restores focus only when focus was inside the stats bar", async () => {
   const env = createEnvironment();
   await flushTimers(30);
@@ -1079,7 +1154,7 @@ test("uses only the reported session turn count and preserves zero independently
     await flushTimers(30);
     assert.equal(metric(env.bar(), "activity"), "本轮 — 步");
     assert.equal(metric(env.bar(), "speed"), "—");
-    assert.notEqual(env.bar().dataset.state, "empty");
+    assert.notEqual(env.bar().dataset.codeyState, "empty");
   } finally {
     env.dispose();
   }

@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 14;
+  const VERSION = 15;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -49,6 +49,7 @@
   let stats = null;
   let pollTimer = 0;
   let rescanTimer = 0;
+  let positionFrame = 0;
   let fetchInFlight = false;
   let lastFetchOk = false;
   let lastResult = null;
@@ -168,7 +169,7 @@
       ${styleScope} .codey-cs-live { position: relative; display: none; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--cs-live); }
       ${styleScope} .codey-cs-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; animation: codey-cs-pulse 1.8s cubic-bezier(.22, 1, .36, 1) infinite; }
       #${barId}[data-running="true"] .codey-cs-live { display: inline-block; }
-      #${barId}[data-state="stale"] .codey-cs-summary { opacity: .55; }
+      #${barId}[data-codey-state="stale"] .codey-cs-summary { opacity: .55; }
       @keyframes codey-cs-pulse { from { transform: scale(1); opacity: .6; } to { transform: scale(2.8); opacity: 0; } }
       @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-live::after { animation: none; } ${styleScope} .codey-cs-summary, ${styleScope} .codey-cs-icon { transition: none; } }
       ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(384px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 13px; color: var(--cs-text); background: var(--cs-surface); backdrop-filter: saturate(190%) blur(32px); -webkit-backdrop-filter: saturate(190%) blur(32px); border: .5px solid var(--cs-line-strong); border-radius: 20px; box-shadow: 0 18px 44px -12px #0000004d, 0 3px 10px #00000014, inset 0 .5px 0 var(--cs-shine); user-select: text; }
@@ -402,15 +403,29 @@
     const placement = [refs.active, rect.left, rect.top, rect.width, rect.height, width, height].join(":");
     if (onlyIfMoved && refs.placement === placement) return;
     refs.placement = placement;
-    const panelRect = panel.getBoundingClientRect();
     // 气泡贴近入口，鼠标可以直接移入；只覆盖编辑器，不推动页面布局。
     const available = Math.max(80, rect.top - 20);
-    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
+    // 先更新高度上限再测量：窗口变高时沿用旧上限会把浮层推到入口下方。
     panel.style.maxHeight = `${Math.min(height - 24, available)}px`;
+    const panelRect = panel.getBoundingClientRect();
+    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
     panel.style.top = `${Math.max(12, rect.top - Math.min(panelRect.height, available) - 8)}px`;
   };
 
+  // 滚动和缩放事件可能一帧多次，合并到下一帧测量一次。
+  const schedulePanelPosition = (event) => {
+    if (disposed || !statsElement?.__codeyCs?.active || positionFrame) return;
+    // 浮层内部滚动不会移动入口。
+    if (event?.type === "scroll" && containsStats(event.target)) return;
+    positionFrame = window.requestAnimationFrame(() => {
+      positionFrame = 0;
+      if (!disposed) positionPanel();
+    });
+  };
+
   const setExpanded = (expanded, restoreFocus = false, kind = null) => {
+    if (positionFrame) window.cancelAnimationFrame(positionFrame);
+    positionFrame = 0;
     const refs = statsElement?.__codeyCs;
     if (!refs) return;
     const active = kind || refs.active || "activity";
@@ -607,7 +622,7 @@
     setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} 总量 ${data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} Tokens`}，缓存命中 ${rate}，${status}。查看 Token 详情`);
     setValue(refs.panels.activity.dataset, "running", running ? "true" : "false");
     setValue(bar.dataset, "running", running ? "true" : "false");
-    setValue(bar.dataset, "state", state);
+    setValue(bar.dataset, "codeyState", state);
     // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。
     positionPanel(anchor, !panelContentChanged);
   };
@@ -800,8 +815,8 @@
     listen(document, "click", (event) => {
       if (inComposer(event.target) && event.target.closest?.("button")) wake(SUBMIT_POLL_DELAY_MS, true);
     }, true);
-    listen(window, "resize", () => positionPanel());
-    listen(document, "scroll", () => positionPanel(), true);
+    listen(window, "resize", schedulePanelPosition);
+    listen(document, "scroll", schedulePanelPosition, true);
     listen(document, "pointerdown", (event) => {
       if (statsElement && !containsStats(event.target)) setExpanded(false);
     });
