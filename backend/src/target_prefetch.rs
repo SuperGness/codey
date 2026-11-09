@@ -270,15 +270,19 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (response_tx, response_rx) = tokio::sync::watch::channel(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+        );
         let server = tokio::spawn(async move {
-            for response in [
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            ] {
+            loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                let _ = stream.read(&mut request).await.unwrap();
-                stream.write_all(response.as_bytes()).await.unwrap();
+                // 并行探测在另一地址成功后会取消连接，允许这些请求提前断开。
+                if !matches!(stream.read(&mut request).await, Ok(count) if count > 0) {
+                    continue;
+                }
+                let response = *response_rx.borrow();
+                let _ = stream.write_all(response.as_bytes()).await;
             }
         });
         let diagnostics = Diagnostics::default();
@@ -291,8 +295,12 @@ mod tests {
                 Some("noMatchingPage: targetCount=0")
             );
         }
+        response_tx
+            .send("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
         assert!(poll_targets_once(port, &diagnostics).await.is_none());
-        server.await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
         let diagnostics = diagnostics.lock().unwrap();
         assert!(diagnostics.reached_debug_endpoint);
         let error = diagnostics.last_discovery_error.as_deref().unwrap();
