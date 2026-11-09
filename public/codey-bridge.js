@@ -375,13 +375,16 @@
   };
 
   const syncMutationObserver = () => {
-    mutationObserver?.disconnect();
-    mutationObserver = null;
+    const stopObserving = () => {
+      mutationObserver?.disconnect();
+      mutationObserver = null;
+    };
     if (
       !mutationSubscribers.size
       || typeof MutationObserver !== "function"
       || !document.documentElement
     ) {
+      stopObserving();
       return;
     }
 
@@ -401,14 +404,18 @@
         subscriber.attributeFilter.forEach((attribute) => attributeFilter.add(attribute));
       }
     }
-    if (!attributes && !childList) return;
+    if (!attributes && !childList) {
+      stopObserving();
+      return;
+    }
 
     const options = { attributes, childList, subtree: true };
     if (attributes && attributeOldValue) options.attributeOldValue = true;
     if (attributes && !observeAllAttributes && attributeFilter.size) {
       options.attributeFilter = [...attributeFilter];
     }
-    mutationObserver = new MutationObserver(dispatchMutations);
+    // 对同一节点重新 observe 只替换选项；disconnect 会丢掉尚未投递的记录。
+    mutationObserver ||= new MutationObserver(dispatchMutations);
     mutationObserver.observe(document.documentElement, options);
   };
 

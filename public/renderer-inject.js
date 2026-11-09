@@ -78,6 +78,24 @@
   let bootstrapObserver = null;
   let headerMountDirty = true;
   let navigationRailSeen = false;
+  const openWithinAttribute = "data-codey-open-within";
+  const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
+  const openStateCssPatchedDatasetKey = "data-codey-open-state-patched";
+  const openWithinAncestorClasses = [
+    "group",
+    "group/project-source",
+    "has-[[data-state=open]]:opacity-100",
+    "has-[[data-state=open]]:pointer-events-auto",
+    "has-data-[state=open]:opacity-100",
+  ];
+  const openWithinButtonAncestorClass = "has-[button[data-state=open]]:opacity-100";
+  const openWithinDirectCardClass = "card-ineZLT";
+  const openStateCssAriaAndDataStateHasPattern =
+    /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
+  const openStateCssDataStateHasPattern =
+    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+  const openStateElements = new Set();
+  const syncedOpenContainers = new Set();
 
   const queryWithin = (root, selector) => {
     const matches = [];
@@ -135,8 +153,8 @@
       :where(.light, [data-theme="light"]) #${accountUsageId} { color-scheme: light; }
       :where(.dark, [data-theme="dark"]) #${accountUsageId} { color-scheme: dark; }
       #${accountUsageId}:hover { box-shadow: 0 3px 14px -3px light-dark(rgba(0, 0, 0, .12), rgba(0, 0, 0, .5)); }
-      #${accountUsageId}[data-state="stale"] .codey-usage-details-updated::before { content: "上次成功数据 · "; }
-      #${accountUsageId}[data-state="error"] { padding-block: 8px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; }
+      #${accountUsageId}[data-codey-state="stale"] .codey-usage-details-updated::before { content: "上次成功数据 · "; }
+      #${accountUsageId}[data-codey-state="error"] { padding-block: 8px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; }
       #${accountUsageId} .codey-usage-list { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); }
       #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#00a37a, #37d9a1); --codey-usage-accent-bg: light-dark(rgba(0, 163, 122, .14), rgba(55, 217, 161, .22)); min-width: 0; }
       #${accountUsageId} .codey-usage-segment { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 3px; }
@@ -899,11 +917,11 @@
       const usage = accountUsageMount();
       if (!usage) return;
       if (accountUsageLastResult?.status === "ok") {
-        usage.dataset.state = "stale";
+        usage.dataset.codeyState = "stale";
         usage.title = "官方账号额度暂时无法更新，当前显示上次获取结果";
         return;
       }
-      usage.dataset.state = "error";
+      usage.dataset.codeyState = "error";
       delete usage.dataset.creditExpiring;
       usage.setAttribute("aria-label", "官方账号额度暂不可用");
       usage.title = String(result.message || "官方账号额度暂不可用");
@@ -924,7 +942,7 @@
     if (!usage) return;
     const aria = segments.map((segment) => segment.aria).join("；")
       + (creditExpiring ? "；重置次数即将过期" : "");
-    usage.dataset.state = "ready";
+    usage.dataset.codeyState = "ready";
     usage.dataset.windowCount = String(segments.length);
     if (creditExpiring) usage.dataset.creditExpiring = "true";
     else delete usage.dataset.creditExpiring;
@@ -1529,6 +1547,263 @@
       if (elapsed > entry.maxMs) entry.maxMs = elapsed;
     }
   };
+  const elementClassText = (element) => {
+    if (!element) return "";
+    if (typeof element.className === "string" && element.className) {
+      return element.className;
+    }
+    return typeof element.getAttribute === "function"
+      ? String(element.getAttribute("class") || "")
+      : "";
+  };
+  const elementHasClass = (element, token) => {
+    if (!element) return false;
+    if (typeof element.classList?.contains === "function") {
+      return element.classList.contains(token);
+    }
+    const raw = elementClassText(element);
+    if (!raw || !raw.includes(token)) return false;
+    return raw.trim().split(/\s+/).includes(token);
+  };
+  const elementMatchesOpenWithinAncestor = (element, isButton) => {
+    const raw = elementClassText(element);
+    if (!raw) return false;
+    for (const token of openWithinAncestorClasses) {
+      if (raw.includes(token) && elementHasClass(element, token)) return true;
+    }
+    if (
+      isButton
+      && raw.includes(openWithinButtonAncestorClass)
+      && elementHasClass(element, openWithinButtonAncestorClass)
+    ) {
+      return true;
+    }
+    return false;
+  };
+  const isElementConnected = (element) => {
+    if (!element || element.isConnected === false) return false;
+    let cursor = element.parentElement;
+    while (cursor) {
+      if (cursor.isConnected === false) return false;
+      cursor = cursor.parentElement;
+    }
+    return true;
+  };
+  const syncOpenWithinContainers = () => {
+    const nextContainers = new Set();
+    for (const element of [...openStateElements]) {
+      if (
+        !isElementConnected(element)
+        || element.getAttribute?.("data-state") !== "open"
+      ) {
+        openStateElements.delete(element);
+        continue;
+      }
+      const parent = element.parentElement;
+      if (
+        parent
+        && (
+          elementHasClass(parent, openWithinDirectCardClass)
+          || elementHasClass(parent.parentElement, openWithinDirectCardClass)
+        )
+      ) {
+        nextContainers.add(parent);
+      }
+      const isButton = String(element.tagName || "").toUpperCase() === "BUTTON";
+      let cursor = parent;
+      while (cursor) {
+        if (elementMatchesOpenWithinAncestor(cursor, isButton)) {
+          nextContainers.add(cursor);
+        }
+        cursor = cursor.parentElement;
+      }
+    }
+    for (const container of [...syncedOpenContainers]) {
+      if (!nextContainers.has(container)) {
+        container.removeAttribute?.(openWithinAttribute);
+        syncedOpenContainers.delete(container);
+      }
+    }
+    for (const container of nextContainers) {
+      if (!syncedOpenContainers.has(container)) {
+        container.setAttribute?.(openWithinAttribute, "");
+        syncedOpenContainers.add(container);
+      }
+    }
+  };
+  const collectOpenStateElements = (root = document) => {
+    let dirty = false;
+    for (const element of queryWithin(root, '[data-state="open"]')) {
+      if (!openStateElements.has(element)) {
+        openStateElements.add(element);
+        dirty = true;
+      }
+    }
+    for (const element of [...openStateElements]) {
+      if (
+        !isElementConnected(element)
+        || element.getAttribute?.("data-state") !== "open"
+      ) {
+        openStateElements.delete(element);
+        dirty = true;
+      }
+    }
+    if (dirty || syncedOpenContainers.size > 0) {
+      syncOpenWithinContainers();
+    }
+  };
+  const collectAddedOpenStateElements = (nodes) => {
+    let dirty = false;
+    for (const node of nodes || []) {
+      const element = node instanceof HTMLElement ? node : null;
+      if (!element) continue;
+      if (element.tagName === "LINK") {
+        bindStylesheetPatchOnLink(element);
+      }
+      if (
+        element.getAttribute?.("data-state") === "open"
+        && !openStateElements.has(element)
+      ) {
+        openStateElements.add(element);
+        dirty = true;
+      }
+      if (typeof element.querySelectorAll === "function") {
+        for (const descendant of element.querySelectorAll('[data-state="open"]')) {
+          if (!openStateElements.has(descendant)) {
+            openStateElements.add(descendant);
+            dirty = true;
+          }
+        }
+      }
+    }
+    if (dirty) {
+      syncOpenWithinContainers();
+    }
+  };
+  const rewriteOpenStateCssText = (cssText) => {
+    if (typeof cssText !== "string" || !cssText.includes("data-state")) {
+      return cssText;
+    }
+    return cssText
+      .replace(
+        openStateCssAriaAndDataStateHasPattern,
+        `:is(:has([aria-expanded=true]),[${openWithinAttribute}])`,
+      )
+      .replace(openStateCssDataStateHasPattern, `[${openWithinAttribute}]`);
+  };
+  const selectorHasOpenStateHas = (selectorText) =>
+    typeof selectorText === "string"
+    && selectorText.includes(":has(")
+    && selectorText.includes("data-state");
+  const ruleListHasOpenStateHasSelector = (rules) => {
+    if (!rules) return false;
+    for (let index = 0; index < rules.length; index += 1) {
+      const rule = rules[index];
+      if (!rule) continue;
+      if (selectorHasOpenStateHas(rule.selectorText)) return true;
+      if (rule.cssRules && ruleListHasOpenStateHasSelector(rule.cssRules)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const patchLoadedOpenStateStylesheets = () => {
+    const sheets = document.styleSheets;
+    if (!sheets || typeof sheets.length !== "number") return 0;
+    let patchedCount = 0;
+    for (let index = 0; index < sheets.length; index += 1) {
+      const sheet = sheets[index];
+      const ownerNode = sheet?.ownerNode;
+      if (
+        !ownerNode
+        || ownerNode.id === styleId
+        || ownerNode.getAttribute?.(openStateCssPatchedDatasetKey) === "true"
+      ) {
+        continue;
+      }
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        continue;
+      }
+      if (!rules || typeof rules.length !== "number" || rules.length === 0) {
+        continue;
+      }
+      const lastRuleText = String(rules[rules.length - 1]?.cssText || "");
+      if (lastRuleText.includes(openStateCssPatchedMarker)) {
+        ownerNode.setAttribute?.(openStateCssPatchedDatasetKey, "true");
+        continue;
+      }
+      if (!ruleListHasOpenStateHasSelector(rules)) {
+        ownerNode.setAttribute?.(openStateCssPatchedDatasetKey, "true");
+        continue;
+      }
+      const chunks = new Array(rules.length + 1);
+      for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+        chunks[ruleIndex] = rewriteOpenStateCssText(
+          String(rules[ruleIndex]?.cssText || ""),
+        );
+      }
+      chunks[rules.length] = `:root{${openStateCssPatchedMarker}:1}`;
+      const nextCssText = chunks.join("\n");
+      const tagName = String(ownerNode.tagName || "").toUpperCase();
+      if (tagName === "STYLE") {
+        ownerNode.textContent = nextCssText;
+        ownerNode.setAttribute?.(openStateCssPatchedDatasetKey, "true");
+        patchedCount += 1;
+        continue;
+      }
+      if (tagName === "LINK" && ownerNode.parentElement) {
+        const replacement = document.createElement("style");
+        replacement.setAttribute?.(openStateCssPatchedDatasetKey, "true");
+        const href =
+          ownerNode.getAttribute?.("data-href")
+          || ownerNode.getAttribute?.("href");
+        if (href) replacement.setAttribute?.("data-href", href);
+        const media = ownerNode.getAttribute?.("media");
+        if (media) replacement.setAttribute?.("media", media);
+        const nonce = ownerNode.nonce || ownerNode.getAttribute?.("nonce");
+        if (nonce) replacement.setAttribute?.("nonce", nonce);
+        replacement.textContent = nextCssText;
+        if (typeof ownerNode.parentElement.insertBefore === "function") {
+          ownerNode.parentElement.insertBefore(replacement, ownerNode);
+        } else {
+          ownerNode.parentElement.appendChild?.(replacement);
+        }
+        try {
+          sheet.disabled = true;
+        } catch {}
+        ownerNode.remove?.();
+        patchedCount += 1;
+      }
+    }
+    return patchedCount;
+  };
+  const bindStylesheetPatchOnLink = (element) => {
+    if (
+      !element
+      || String(element.tagName || "").toUpperCase() !== "LINK"
+      || element.getAttribute?.(openStateCssPatchedDatasetKey) === "true"
+    ) {
+      return;
+    }
+    const rel = String(element.getAttribute?.("rel") || "").toLowerCase();
+    if (rel && !rel.split(/\s+/).includes("stylesheet")) return;
+    if (element.sheet) {
+      patchLoadedOpenStateStylesheets();
+      return;
+    }
+    element.addEventListener?.(
+      "load",
+      () => {
+        patchLoadedOpenStateStylesheets();
+      },
+      { once: true },
+    );
+  };
+  patchLoadedOpenStateStylesheets();
+  collectOpenStateElements(document);
   const handleBootstrapMutations = (mutations) =>
     codeyTimed("renderer-inject.bootstrapMutations", mutations?.length ?? 0, () => handleBootstrapMutationsImpl(mutations));
   const handleBootstrapMutationsImpl = (mutations) => {
@@ -1536,6 +1811,72 @@
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
         : mutation.target?.parentElement;
+      if (mutation.type === "attributes") {
+        if (
+          mutation.attributeName === "data-state"
+          || (
+            mutation.attributeName == null
+            && target
+            && (openStateElements.has(target) || target.hasAttribute?.("data-state"))
+          )
+        ) {
+          if (target?.getAttribute?.("data-state") === "open") {
+            if (!openStateElements.has(target)) {
+              openStateElements.add(target);
+              syncOpenWithinContainers();
+            }
+          } else if (target && openStateElements.delete(target)) {
+            syncOpenWithinContainers();
+          }
+        }
+        continue;
+      }
+      if (
+        mutation.type === "childList"
+        && openStateElements.size > 0
+        && (mutation.removedNodes?.length ?? 0) > 0
+      ) {
+        syncOpenWithinContainers();
+      }
+      const conversationTurn = target?.closest?.("[data-turn-key]");
+      if (
+        mutation.type === "childList"
+        && conversationTurn
+        && conversationTurn.isConnected !== false
+      ) {
+        continue;
+      }
+      if (
+        target?.id === accountUsageId
+        || target?.closest?.(`#${accountUsageId}`)
+      ) {
+        continue;
+      }
+      if (
+        mutation.type === "childList"
+        && (mutation.addedNodes?.length ?? 0) > 0
+      ) {
+        collectAddedOpenStateElements(mutation.addedNodes);
+      }
+    }
+    for (const mutation of mutations) {
+      const target = mutation.target instanceof HTMLElement
+        ? mutation.target
+        : mutation.target?.parentElement;
+      if (mutation.type === "attributes") {
+        if (
+          mutation.attributeName === "data-state"
+          || (
+            mutation.attributeName == null
+            && target
+            && (openStateElements.has(target) || target.hasAttribute?.("data-state"))
+          )
+          && !target?.matches?.(headerSelector)
+          && !target?.matches?.(sidebarSelector)
+        ) {
+          continue;
+        }
+      }
       const conversationTurn = target?.closest?.("[data-turn-key]");
       if (
         mutation.type === "childList"
@@ -1613,6 +1954,7 @@
       "data-app-action-sidebar-thread-title",
       "data-app-action-sidebar-project-id",
       "data-app-action-sidebar-project-row",
+      "data-state",
       "hidden",
       "aria-hidden",
     ],
@@ -1641,6 +1983,8 @@
   window.__codeyRendererInvalidateHeaderMount = invalidateHeaderMount;
   window.__codeyRefreshAccountUsage = checkAccountUsage;
   window.__codeyRefreshRuntimeHealth = checkRuntimeHealth;
+  window.__codeyPatchOpenStateStylesheets = patchLoadedOpenStateStylesheets;
+  window.__codeySyncOpenWithinContainers = syncOpenWithinContainers;
 
   window.addEventListener?.("focus", () => {
     void loadSessionTools();

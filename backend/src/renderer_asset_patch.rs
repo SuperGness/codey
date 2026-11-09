@@ -46,6 +46,8 @@ const PATCHABLE_ASSET_PREFIXES: [&str; 9] = [
 const PET_ASSET_PREFIXES: [&str; 2] = ["pets-settings", "app-runtime"];
 /// CDP Fetch 的通配符不支持字符类；数字 chunk 先宽匹配，再在请求处理时严格筛选。
 const NUMERIC_ASSET_URL_PATTERN: &str = "app://*/assets/?*.js*";
+/// 带内容哈希的样式表资源；扫描未完成时宽匹配，请求处理时按哈希名严格筛选。
+const CSS_ASSET_URL_PATTERN: &str = "app://*/assets/*.css*";
 /// 宠物精灵图。rspack 构建保留可读文件名，按宠物 id 前缀识别；只在关闭宠物时拦截。
 const PET_SPRITE_URL_PATTERN: &str = "app://*/assets/*-spritesheet-v*.webp*";
 /// 未选择过宠物时 Codex 使用的内置形象。
@@ -371,21 +373,34 @@ fn fetch_patterns(
             })
         })
         .collect();
-    let numeric_patterns = match scan {
-        Some(scan) => scan
-            .candidates
-            .iter()
-            .map(|path| format!("app://*/assets/{path}*"))
-            .collect(),
-        None => vec![NUMERIC_ASSET_URL_PATTERN.to_string()],
-    };
-    patterns.extend(numeric_patterns.into_iter().map(|url_pattern| {
-        json!({
-            "urlPattern": url_pattern,
-            "resourceType": "Script",
-            "requestStage": "Request",
-        })
-    }));
+    match scan {
+        Some(scan) => {
+            patterns.extend(scan.candidates.iter().map(|path| {
+                let resource_type = if path.ends_with(".css") {
+                    "Stylesheet"
+                } else {
+                    "Script"
+                };
+                json!({
+                    "urlPattern": format!("app://*/assets/{path}*"),
+                    "resourceType": resource_type,
+                    "requestStage": "Request",
+                })
+            }));
+        }
+        None => {
+            patterns.push(json!({
+                "urlPattern": NUMERIC_ASSET_URL_PATTERN,
+                "resourceType": "Script",
+                "requestStage": "Request",
+            }));
+            patterns.push(json!({
+                "urlPattern": CSS_ASSET_URL_PATTERN,
+                "resourceType": "Stylesheet",
+                "requestStage": "Request",
+            }));
+        }
+    }
     if disable_pet {
         // Codex 以图片元素解码精灵图。
         patterns.push(json!({
@@ -479,12 +494,13 @@ fn is_patchable_asset_url(url: &str, disable_pet: bool) -> bool {
     }
     let path = url.path();
     if let Some(name) = path.strip_prefix("/assets/async/") {
-        return numeric_asset_name(name);
+        return numeric_asset_name(name) || css_asset_name(name);
     }
     let Some(name) = path.strip_prefix("/assets/") else {
         return false;
     };
     numeric_asset_name(name)
+        || css_asset_name(name)
         || named_asset_name(name, &PATCHABLE_ASSET_PREFIXES)
         || (disable_pet && named_asset_name(name, &PET_ASSET_PREFIXES))
 }
@@ -501,6 +517,21 @@ pub(crate) fn numeric_asset_name(name: &str) -> bool {
         && id.bytes().all(|byte| byte.is_ascii_digit())
         && (8..=32).contains(&hash.len())
         && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn css_asset_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".css") else {
+        return false;
+    };
+    !stem.is_empty()
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'~' | b'.'))
+        && stem.split(['-', '~', '.']).any(|segment| {
+            (8..=32).contains(&segment.len())
+                && segment.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 fn named_asset_name(name: &str, prefixes: &[&str]) -> bool {
@@ -1279,8 +1310,11 @@ impl PatchCache {
     }
 }
 
-/// 形如 `app-initial-90eb42395b7d.js`：文件名里有一段至少 8 位的十六进制哈希。
+/// 形如 `app-initial-90eb42395b7d.js` 或 `e77f816560c6.css`：文件名里有一段至少 8 位的十六进制哈希。
 fn cacheable_asset_name(name: &str) -> bool {
+    if css_asset_name(name) {
+        return true;
+    }
     let Some(stem) = [".js", ".mjs", ".cjs"]
         .iter()
         .find_map(|extension| name.strip_suffix(extension))
@@ -1541,6 +1575,8 @@ mod tests {
         assert!(patterns.iter().all(|pattern| {
             let expected_type = if pattern["urlPattern"] == PET_SPRITE_URL_PATTERN {
                 "Image"
+            } else if pattern["urlPattern"] == CSS_ASSET_URL_PATTERN {
+                "Stylesheet"
             } else {
                 "Script"
             };
@@ -1999,13 +2035,25 @@ mod tests {
             candidates: vec![
                 "348410.ae8bb87271.js".to_string(),
                 "async/24191.589dcc9878.js".to_string(),
+                "async/e77f816560c6.css".to_string(),
             ],
         };
-        let exact = urls(fetch_patterns(false, Some(&scan)));
+        let exact_patterns = fetch_patterns(false, Some(&scan));
+        let exact = urls(exact_patterns.clone());
         assert!(exact.contains(&"app://*/assets/348410.ae8bb87271.js*".to_string()));
         assert!(exact.contains(&"app://*/assets/async/24191.589dcc9878.js*".to_string()));
+        assert!(exact.contains(&"app://*/assets/async/e77f816560c6.css*".to_string()));
         assert!(!exact.contains(&NUMERIC_ASSET_URL_PATTERN.to_string()));
+        assert!(!exact.contains(&CSS_ASSET_URL_PATTERN.to_string()));
         assert!(exact.contains(&"app://*/assets/app-initial*".to_string()));
+        assert!(
+            exact_patterns
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pattern| pattern["urlPattern"] == "app://*/assets/async/e77f816560c6.css*"
+                    && pattern["resourceType"] == "Stylesheet")
+        );
 
         let named = crate::renderer_asset_scan::AssetScan {
             numeric_chunks: 0,
@@ -2148,6 +2196,8 @@ mod tests {
         for url in [
             "app://-/assets/104974.1e9a7f6707.js",
             "app://codex/assets/async/634303.855e57c3e7.js?cache=1#loader",
+            "app://-/assets/async/e77f816560c6.css",
+            "app://-/assets/app-initial-90eb4239.css",
         ] {
             assert!(is_patchable_asset_url(url, false), "{url}");
         }
@@ -2169,6 +2219,8 @@ mod tests {
             "app://-/assets/other/634303.855e57c3e7.js",
             "app://-/assets/634303.855e57c3e7.js/extra",
             "app://-/assets/12345678901.855e57c3e7.js",
+            "app://-/assets/app-initial.css",
+            "app://-/assets/async/not-a-hash.css",
         ] {
             assert!(!is_patchable_asset_url(url, true), "{url}");
         }
@@ -2195,13 +2247,16 @@ mod tests {
             "general-settings-679bf39c78a4.js",
             "104974.1e9a7f6707.js",
             "634303.855e57c3e7.js",
+            "e77f816560c6.css",
+            "app-initial-90eb4239.css",
         ] {
             assert!(cacheable_asset_name(name), "{name}");
         }
         for name in [
             "app-initial.js",
             "app-initial-dev.js",
-            "app-initial-90eb4239.css",
+            "app-initial.css",
+            "app-initial-dev.css",
             "634303.js",
             "634303.not-a-hash.js",
             "634303.855e57c3e7.js.map",

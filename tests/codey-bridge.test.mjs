@@ -285,6 +285,31 @@ test("mutation dispatcher unions subscriptions and tears down only when empty", 
   assert.equal(dispatcher.snapshot().subscriberCount, 0);
 });
 
+test("mutation dispatcher reuses one observer while subscriptions change", () => {
+  const runtime = createRuntime();
+  const dispatcher = runtime.window.__codeyMutationDispatcher;
+  const unsubscribeFirst = dispatcher.subscribe(() => {}, { childList: true });
+  const observer = runtime.observers.at(-1);
+  const unsubscribeSecond = dispatcher.subscribe(() => {}, {
+    attributes: true,
+    attributeFilter: ["title"],
+  });
+  unsubscribeSecond();
+
+  // disconnect() 会丢弃尚未投递给现有订阅者的记录，选项变化只能重新 observe。
+  assert.equal(runtime.observers.at(-1), observer);
+  assert.equal(observer.disconnects, 0);
+  assert.equal(observer.options.attributes, false);
+  assert.equal(observer.options.childList, true);
+
+  unsubscribeFirst();
+  assert.equal(observer.disconnects, 1);
+  assert.equal(dispatcher.snapshot().observerInstalled, false);
+
+  dispatcher.subscribe(() => {}, { childList: true });
+  assert.notEqual(runtime.observers.at(-1), observer, "清空后重新订阅应新建观察器");
+});
+
 test("attribute filters use set membership and preserve record order within a linear dispatch", () => {
   class CountingSet extends Set {
     static checks = 0;

@@ -10,14 +10,16 @@ const bridgeSource = readFileSync(new URL("../public/codey-bridge.js", import.me
 
 class FakeElement extends FakeElementCore {}
 
-const createRuntime = () => {
+const createRuntime = ({ styleSheets = [] } = {}) => {
   const timers = new Map();
   let nextTimer = 0;
   const subscribers = [];
+  const mutationObservers = [];
   const body = new FakeElement("body", { connected: true });
   const documentElement = body.appendChild(new FakeElement("html"));
   const document = {
     body,
+    styleSheets,
     visibilityState: "visible",
     documentElement,
     querySelector() {
@@ -65,8 +67,17 @@ const createRuntime = () => {
     HTMLElement: FakeElement,
     location: { pathname: "/", search: "" },
     MutationObserver: class {
+      constructor(handler) {
+        this.handler = handler;
+        this.options = null;
+        this.target = null;
+        mutationObservers.push(this);
+      }
       disconnect() {}
-      observe() {}
+      observe(target, options) {
+        this.target = target;
+        this.options = options;
+      }
     },
     URLSearchParams,
     window,
@@ -83,10 +94,15 @@ const createRuntime = () => {
   timers.clear();
   const bootstrap = subscribers.find(({ options }) => options.attributes === true);
   assert.ok(bootstrap, "renderer bootstrap should subscribe to shared mutations");
-  return { body, bootstrap, document, documentElement, timers };
+  assert.ok(
+    bootstrap.options.attributeFilter.includes("data-state"),
+    "renderer bootstrap should include data-state in attributeFilter",
+  );
+  return { body, bootstrap, document, documentElement, timers, window };
 };
 
-const attributeMutation = (target) => ({
+const attributeMutation = (target, attributeName) => ({
+  attributeName,
   target,
   type: "attributes",
   addedNodes: [],
@@ -173,4 +189,119 @@ test("turn-external prompt-like wrappers still run the bootstrap probe", () => {
 
   assert.equal(prompt.getAttribute("data-app-action-sidebar-thread-id"), "thread-1");
   assert.equal(runtime.timers.size, 1);
+});
+
+test("hover data-state transitions stay no-ops while open menus sync data-codey-open-within", () => {
+  const runtime = createRuntime();
+  const rowGroup = runtime.documentElement.appendChild(new FakeElement("div", {
+    attributes: { class: "group group/project-source" },
+  }));
+  const buttonContainer = rowGroup.appendChild(new FakeElement("div", {
+    attributes: { class: "has-[button[data-state=open]]:opacity-100" },
+  }));
+  const tooltipTrigger = rowGroup.appendChild(new FakeElement("span", {
+    attributes: { "data-state": "closed" },
+  }));
+  const menuButton = buttonContainer.appendChild(new FakeElement("button", {
+    attributes: { "data-state": "closed" },
+  }));
+
+  tooltipTrigger.setAttribute("data-state", "delayed-open");
+  runtime.bootstrap.handler([attributeMutation(tooltipTrigger, "data-state")]);
+  assert.equal(rowGroup.hasAttribute("data-codey-open-within"), false);
+  assert.equal(buttonContainer.hasAttribute("data-codey-open-within"), false);
+  assert.equal(runtime.timers.size, 0);
+
+  tooltipTrigger.setAttribute("data-state", "closed");
+  runtime.bootstrap.handler([attributeMutation(tooltipTrigger, "data-state")]);
+  assert.equal(rowGroup.hasAttribute("data-codey-open-within"), false);
+  assert.equal(runtime.timers.size, 0);
+
+  menuButton.setAttribute("data-state", "open");
+  runtime.bootstrap.handler([attributeMutation(menuButton, "data-state")]);
+  assert.equal(rowGroup.getAttribute("data-codey-open-within"), "");
+  assert.equal(buttonContainer.getAttribute("data-codey-open-within"), "");
+
+  menuButton.setAttribute("data-state", "closed");
+  runtime.bootstrap.handler([attributeMutation(menuButton, "data-state")]);
+  assert.equal(rowGroup.hasAttribute("data-codey-open-within"), false);
+  assert.equal(buttonContainer.hasAttribute("data-codey-open-within"), false);
+
+  const insertedWrapper = new FakeElement("div");
+  const nestedButtonHost = insertedWrapper.appendChild(new FakeElement("div", {
+    attributes: { class: "has-[button[data-state=open]]:opacity-100" },
+  }));
+  const nestedOpenButton = nestedButtonHost.appendChild(new FakeElement("button", {
+    attributes: { "data-state": "open" },
+  }));
+  rowGroup.appendChild(insertedWrapper);
+  runtime.bootstrap.handler([childListMutation(rowGroup, [insertedWrapper], [])]);
+  assert.equal(rowGroup.getAttribute("data-codey-open-within"), "");
+  assert.equal(nestedButtonHost.getAttribute("data-codey-open-within"), "");
+  assert.equal(nestedOpenButton.getAttribute("data-state"), "open");
+
+  insertedWrapper.remove();
+  runtime.bootstrap.handler([childListMutation(rowGroup, [], [insertedWrapper])]);
+  assert.equal(rowGroup.hasAttribute("data-codey-open-within"), false);
+  assert.equal(nestedButtonHost.hasAttribute("data-codey-open-within"), false);
+});
+
+test("runtime stylesheet fallback rewrites unpatched link stylesheets and skips pre-patched ones", () => {
+  const head = new FakeElement("head", { connected: true });
+  const unpatchedLink = head.appendChild(new FakeElement("link", {
+    attributes: {
+      rel: "stylesheet",
+      href: "app://-/assets/async/e77f816560c6.css",
+    },
+  }));
+  const prePatchedLink = head.appendChild(new FakeElement("link", {
+    attributes: {
+      rel: "stylesheet",
+      href: "app://-/assets/async/166572aa20c2.css",
+    },
+  }));
+  const unpatchedSheet = {
+    ownerNode: unpatchedLink,
+    disabled: false,
+    cssRules: [
+      {
+        selectorText: ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=\"open\"]) *)",
+        cssText: ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=\"open\"]) *) { opacity: 1; }",
+      },
+      {
+        selectorText: ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=\"true\"], [data-state=\"open\"]) *)",
+        cssText: ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=\"true\"], [data-state=\"open\"]) *) { opacity: 1; }",
+      },
+    ],
+  };
+  const prePatchedSheet = {
+    ownerNode: prePatchedLink,
+    disabled: false,
+    cssRules: [
+      {
+        selectorText: ":where(.card-ineZLT)[data-codey-open-within]",
+        cssText: ":where(.card-ineZLT)[data-codey-open-within] { opacity: 1 !important; }",
+      },
+      {
+        selectorText: ":root",
+        cssText: ":root { --codey-css-open-state-has-patched: 1; }",
+      },
+    ],
+  };
+
+  createRuntime({ styleSheets: [unpatchedSheet, prePatchedSheet] });
+
+  assert.equal(unpatchedSheet.disabled, true);
+  assert.equal(unpatchedLink.parentElement, null);
+  assert.equal(prePatchedSheet.disabled, false);
+  assert.equal(prePatchedLink.getAttribute("data-codey-open-state-patched"), "true");
+  const replacementStyle = head.children.find((child) => child.tagName === "STYLE");
+  assert.ok(replacementStyle, "unpatched <link> should be replaced with a <style>");
+  assert.equal(replacementStyle.getAttribute("data-href"), "app://-/assets/async/e77f816560c6.css");
+  assert.doesNotMatch(replacementStyle.textContent, /:has\([^)]*data-state/);
+  assert.match(replacementStyle.textContent, /:where\(\.group\)\[data-codey-open-within\]/);
+  assert.match(
+    replacementStyle.textContent,
+    /:where\(\.group\):is\(:has\(\[aria-expanded=true\]\),\[data-codey-open-within\]\)/,
+  );
 });

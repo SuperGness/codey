@@ -200,3 +200,52 @@ test("unrelated rspack chunks are skipped by the patch anchors", async () => {
   );
   assert.deepEqual(logs, []);
 });
+
+test("rspack stylesheet assets rewrite data-state :has() rules without touching unrelated css", async () => {
+  const { logs, patch } = await installPatch();
+  const mainCss = [
+    ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=open]) *){opacity:1}",
+    ".group-has-\\[\\[data-state\\=open\\]\\]\\/project-source\\:opacity-100:is(:where(.group\\/project-source):has([data-state=open]) *){opacity:1}",
+    ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=true],[data-state=open]) *){opacity:1}",
+    ".has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:has([data-state=open]){opacity:1}",
+    ".has-\\[button\\[data-state\\=open\\]\\]\\:opacity-100:has(:is(button[data-state=open])){opacity:1}",
+  ].join("");
+  const patchedMain = patch(mainCss, "app://-/assets/async/e77f816560c6.css");
+  assert.ok(patchedMain, "hashed async stylesheet should be patched");
+  assert.doesNotMatch(patchedMain, /:has\([^)]*data-state/);
+  assert.match(patchedMain, /:where\(\.group\)\[data-codey-open-within\]/);
+  assert.match(patchedMain, /:where\(\.group\\\/project-source\)\[data-codey-open-within\]/);
+  assert.match(
+    patchedMain,
+    /:where\(\.group\):is\(:has\(\[aria-expanded=true\]\),\[data-codey-open-within\]\)/,
+  );
+  assert.match(patchedMain, /\.has-\\\[\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
+  assert.match(patchedMain, /\.has-\\\[button\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
+  assert.match(patchedMain, /:root\{--codey-css-open-state-has-patched:1\}/);
+  assert.equal(
+    patch(patchedMain, "app://-/assets/async/e77f816560c6.css"),
+    null,
+    "patched stylesheet is idempotent",
+  );
+
+  const cardCss = ":where(.card-ineZLT):has(>[data-state=open]),:where(.card-ineZLT>*):has(>[data-state=open]){opacity:1!important}";
+  const patchedCard = patch(cardCss, "app://-/assets/async/166572aa20c2.css");
+  assert.ok(patchedCard);
+  assert.doesNotMatch(patchedCard, /:has\([^)]*data-state/);
+  assert.match(
+    patchedCard,
+    /:where\(\.card-ineZLT\)\[data-codey-open-within\],:where\(\.card-ineZLT>\*\)\[data-codey-open-within\]/,
+  );
+
+  assert.equal(
+    patch(".plain{color:red}[data-state=open]{opacity:1}", "app://-/assets/async/9012f383f623.css"),
+    null,
+    "stylesheets without :has(...data-state...) pass through unchanged",
+  );
+  assert.equal(
+    patch(mainCss, "app://-/assets/unhashed.css"),
+    null,
+    "unhashed css urls are ignored",
+  );
+  assert.deepEqual(logs, []);
+});

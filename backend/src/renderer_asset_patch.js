@@ -391,7 +391,10 @@
     "supportsIndependentSpeedModes",
     "serviceTierAccess:",
     "electron-app-state-snapshot-request",
-    "activeInteractions=new Map"
+    "activeInteractions=new Map",
+    ":has([data-state=open])",
+    ":has(:is(button[data-state=open]))",
+    ":has([aria-expanded=true],[data-state=open])"
   ]/*end-codey-renderer-patch-anchors*/;
   const petOnlyPatchAnchors = new Set([
     "codex-avatar",
@@ -775,6 +778,53 @@
     }
     return patched;
   };
+  // Codex 样式表中的 :has([data-state=open]) 等规则会让 data-state 进入 Blink
+  // RuleFeatureSet 的 :has() 失效集，悬停侧栏行切换提示气泡 data-state 时触发
+  // 整页样式重算。改写为普通属性选择器 [data-codey-open-within]，由注入脚本仅在
+  // 出现 data-state="open" 时同步到容器。
+  const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
+  const openStateCssAriaAndDataStateHasPattern =
+    /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
+  const openStateCssDataStateHasPattern =
+    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+  const patchCodexRendererCssAsset = (source) => {
+    if (
+      source.includes(openStateCssPatchedMarker) ||
+      (
+        !source.includes(":has([data-state=open])") &&
+        !source.includes(":has(:is(button[data-state=open]))") &&
+        !source.includes(":has([aria-expanded=true],[data-state=open])") &&
+        !source.includes("data-state")
+      )
+    ) {
+      return source;
+    }
+    const patched = source
+      .replace(
+        openStateCssAriaAndDataStateHasPattern,
+        ":is(:has([aria-expanded=true]),[data-codey-open-within])",
+      )
+      .replace(openStateCssDataStateHasPattern, "[data-codey-open-within]");
+    if (patched === source) return source;
+    return `${patched}\n:root{${openStateCssPatchedMarker}:1}\n`;
+  };
+  const isCodexRendererCssAssetUrl = (requestUrl) => {
+    try {
+      const url = new URL(requestUrl);
+      if (url.protocol !== "app:") return false;
+      const match = /^\/assets\/(?:async\/)?([a-z0-9_~.-]+)\.css$/i.exec(
+        url.pathname,
+      );
+      if (!match) return false;
+      const stem = match[1];
+      if (!stem || stem.startsWith(".")) return false;
+      return stem
+        .split(/[-~.]/)
+        .some((segment) => /^[a-f0-9]{8,32}$/i.test(segment));
+    } catch {
+      return false;
+    }
+  };
   const isCodexRendererAssetUrl = (requestUrl) => {
     try {
       const url = new URL(requestUrl);
@@ -788,6 +838,7 @@
           /^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i.test(
             url.pathname,
           ) ||
+          isCodexRendererCssAssetUrl(requestUrl) ||
           (
             disablePet &&
             /\/(?:(?:pets-settings|app-runtime)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
@@ -812,7 +863,9 @@
       const previousRendererPatchFailures = activeRendererPatchFailures;
       activeRendererPatchFailures = rendererPatchFailuresForFingerprint(fingerprint);
       try {
-        patched = patchCodexRendererAsset(source);
+        patched = isCodexRendererCssAssetUrl(requestUrl)
+          ? patchCodexRendererCssAsset(source)
+          : patchCodexRendererAsset(source);
       } catch (error) {
         // Codex renderer bundles are minified implementation details and their
         // shapes change between releases. These UI restorations are optional:

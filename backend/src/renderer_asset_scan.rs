@@ -15,7 +15,7 @@ use memchr::memmem::Finder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::renderer_asset_patch::numeric_asset_name;
+use crate::renderer_asset_patch::{css_asset_name, numeric_asset_name};
 
 /// ASAR 索引上限。Codex 26.1029 的索引约 3 MB，留足余量又不至于读入异常文件。
 const MAX_ASAR_HEADER_BYTES: u64 = 64 << 20;
@@ -155,14 +155,18 @@ impl AssetSource {
     }
 }
 
-/// 资源目录里的数字 chunk：根目录与 `async/` 子目录，规则与拦截时一致。
-fn numeric_chunk_paths<'a>(
+fn scannable_asset_name(name: &str) -> bool {
+    numeric_asset_name(name) || css_asset_name(name)
+}
+
+/// 资源目录里的数字 chunk 与带哈希样式表：根目录与 `async/` 子目录，规则与拦截时一致。
+fn scannable_asset_paths<'a>(
     entries: impl Iterator<Item = (&'a str, bool)>,
     prefix: &str,
     found: &mut Vec<String>,
 ) {
     for (name, is_file) in entries {
-        if is_file && numeric_asset_name(name) {
+        if is_file && scannable_asset_name(name) {
             found.push(format!("{prefix}{name}"));
         }
     }
@@ -205,12 +209,12 @@ fn scan_asar(
         if name == "async" {
             if let Some(children) = node.get("files").and_then(Value::as_object) {
                 for (child, child_node) in children {
-                    if child_node.get("files").is_none() && numeric_asset_name(child) {
+                    if child_node.get("files").is_none() && scannable_asset_name(child) {
                         entries.push((format!("async/{child}"), child_node));
                     }
                 }
             }
-        } else if node.get("files").is_none() && numeric_asset_name(name) {
+        } else if node.get("files").is_none() && scannable_asset_name(name) {
             entries.push((name.clone(), node));
         }
     }
@@ -252,8 +256,12 @@ fn scan_asar(
         }
     }
     candidates.sort();
+    let numeric_chunks = entries
+        .iter()
+        .filter(|(relative, _)| !relative.ends_with(".css"))
+        .count();
     Ok(AssetScan {
-        numeric_chunks: entries.len(),
+        numeric_chunks,
         candidates,
     })
 }
@@ -279,13 +287,13 @@ fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<Ass
     };
     let mut paths = Vec::new();
     let root = list(assets)?;
-    numeric_chunk_paths(
+    scannable_asset_paths(
         root.iter().map(|(name, file)| (name.as_str(), *file)),
         "",
         &mut paths,
     );
     let nested = list(&assets.join("async"))?;
-    numeric_chunk_paths(
+    scannable_asset_paths(
         nested.iter().map(|(name, file)| (name.as_str(), *file)),
         "async/",
         &mut paths,
@@ -302,8 +310,12 @@ fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<Ass
         }
     }
     candidates.sort();
+    let numeric_chunks = paths
+        .iter()
+        .filter(|relative| !relative.ends_with(".css"))
+        .count();
     Ok(AssetScan {
-        numeric_chunks: paths.len(),
+        numeric_chunks,
         candidates,
     })
 }
@@ -317,6 +329,7 @@ mod tests {
         vec![
             "sendMessageFromView".to_string(),
             "serviceTierAccess:".to_string(),
+            ":has([data-state=open])".to_string(),
         ]
     }
 
@@ -389,6 +402,11 @@ mod tests {
                     b"sendMessageFromView",
                 ),
                 (
+                    "webview/assets/async/e77f816560c6.css",
+                    b".group:has([data-state=open]){opacity:1}",
+                ),
+                ("webview/assets/async/9012f383f623.css", b".plain{color:red}"),
+                (
                     "webview/assets/hoots-spritesheet-v8.52075ad356.webp",
                     b"RIFF",
                 ),
@@ -404,7 +422,8 @@ mod tests {
             [
                 "2.bbbbbbbbbb.js",
                 "async/3.cccccccccc.js",
-                "async/5.dddddddddd.js"
+                "async/5.dddddddddd.js",
+                "async/e77f816560c6.css",
             ]
         );
         let second = load_or_scan(&temp.path().join("Codex.app"), &cache, &anchors()).unwrap();

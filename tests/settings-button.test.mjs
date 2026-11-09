@@ -707,7 +707,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(injectedStyle.textContent, /data-tone="critical"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /#codey-account-usage:hover \.codey-usage-details/);
   assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*border: 0;[^}]*background: light-dark\(#ffffff/);
-  assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage\[data-state="stale"\] \{[^}]*opacity:/);
+  assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage\[data-codey-state="stale"\] \{[^}]*opacity:/);
   assert.match(injectedStyle.textContent, /\.codey-usage-plan-tag \{[^}]*border:[^}]*background: color-mix\(in srgb, #0a84ff 13%, transparent\);/);
   assert.equal(usage.parentElement, sidebarFooterHost);
   assert.equal(usage.nextElementSibling, nativeProfileFooter);
