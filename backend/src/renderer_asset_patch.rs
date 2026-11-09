@@ -2051,8 +2051,10 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|pattern| pattern["urlPattern"] == "app://*/assets/async/e77f816560c6.css*"
-                    && pattern["resourceType"] == "Stylesheet")
+                .any(
+                    |pattern| pattern["urlPattern"] == "app://*/assets/async/e77f816560c6.css*"
+                        && pattern["resourceType"] == "Stylesheet"
+                )
         );
 
         let named = crate::renderer_asset_scan::AssetScan {

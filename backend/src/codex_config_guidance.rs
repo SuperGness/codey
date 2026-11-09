@@ -1477,7 +1477,9 @@ mod tests {
         assert!(EXPLORER_AGENT_CONFIG.contains("你是检索子代理，只读"));
         assert!(EXPLORER_AGENT_CONFIG.contains("未写明时按中等"));
         assert!(EXPLORER_AGENT_CONFIG.contains("优先使用读取、搜索和查看现有图片的工具"));
-        assert!(EXPLORER_AGENT_CONFIG.contains("也可执行 `git status/diff/log`、日志查询等只读命令"));
+        assert!(
+            EXPLORER_AGENT_CONFIG.contains("也可执行 `git status/diff/log`、日志查询等只读命令")
+        );
         assert!(!EXPLORER_AGENT_CONFIG.contains("只有当前轮原生只读沙箱已确认时"));
         assert!(!EXPLORER_AGENT_CONFIG.contains("通用执行包装、界面操作和未归类工具不可用"));
         assert!(WORKER_AGENT_CONFIG.contains("前端界面与交互、后端"));
@@ -1510,7 +1512,8 @@ mod tests {
 `inspect_local_file`, `grep`, `glob`, and `view_image`";
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(expected));
         assert!(
-            ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("While only `codey_explorer` children run")
+            ROOT_AGENT_COLLABORATION_USAGE_HINT
+                .contains("While only `codey_explorer` children run")
         );
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("keep working on independent files"));
         assert!(

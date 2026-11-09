@@ -2192,9 +2192,8 @@ fn summarize_agents(agents: &[Value]) -> AgentListSnapshotState {
             unknown += 1;
             continue;
         };
-        let agent_name =
-            object_value_any(agent, &["agentname", "taskname", "agentpath", "name"])
-                .and_then(Value::as_str);
+        let agent_name = object_value_any(agent, &["agentname", "taskname", "agentpath", "name"])
+            .and_then(Value::as_str);
         if agent_name.is_some_and(is_root_agent_name) {
             continue;
         }

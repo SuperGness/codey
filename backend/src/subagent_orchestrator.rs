@@ -25,8 +25,8 @@ mod migration_tests;
 mod scheduling_tests;
 
 use contract::*;
-use identity::*;
 pub(crate) use identity::resolve_verified_subagent_transcript;
+use identity::*;
 
 pub(crate) const POST_TOOL_HOOK_MATCHER: &str = "*";
 
@@ -1238,7 +1238,8 @@ pub(crate) fn post_spawn(
         // 子代理是否真正创建。保留 Pending，等待生命周期事件或完整状态快照对账。
         reservation.updated_at_ms = now_ms;
     }
-    let _ = rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
+    let _ =
+        rebind_provisional_reservations_from_sessions(state_root, session_id, &mut ledger, now_ms);
     store.save(&mut ledger, now_ms)?;
     if let Some(event) = trace_event {
         TraceRecorder::new(state_root).record_best_effort(&event);
@@ -1749,11 +1750,9 @@ fn update_reservation_lifecycle(
             return Ok(should_track);
         }
         if reservation.state.transition_to(state).is_none() {
-            return Ok(
-                state == ReservationState::Terminal
-                    && !reservation.state.is_active()
-                    && !reservation.resume_pending(now_ms),
-            );
+            return Ok(state == ReservationState::Terminal
+                && !reservation.state.is_active()
+                && !reservation.resume_pending(now_ms));
         }
         reservation.state = state;
         reservation.agent_id_hash = Some(agent_hash.clone());
@@ -2355,12 +2354,14 @@ pub(crate) fn active_task_names(
     ))
 }
 
+type ActiveReservationProjection = (usize, BTreeSet<String>, BTreeSet<String>);
+
 pub(crate) fn active_reservation_projection(
     state_root: &Path,
     runtime_id: &str,
     session_id: &str,
     now_ms: u64,
-) -> Result<Option<(usize, BTreeSet<String>, BTreeSet<String>)>> {
+) -> Result<Option<ActiveReservationProjection>> {
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);

@@ -405,7 +405,10 @@ mod tests {
                     "webview/assets/async/e77f816560c6.css",
                     b".group:has([data-state=open]){opacity:1}",
                 ),
-                ("webview/assets/async/9012f383f623.css", b".plain{color:red}"),
+                (
+                    "webview/assets/async/9012f383f623.css",
+                    b".plain{color:red}",
+                ),
                 (
                     "webview/assets/hoots-spritesheet-v8.52075ad356.webp",
                     b"RIFF",

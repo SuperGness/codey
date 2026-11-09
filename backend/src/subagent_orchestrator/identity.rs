@@ -396,7 +396,10 @@ pub(crate) fn resolve_verified_subagent_transcript(
     let codex_home = state_root.parent()?;
     let sessions_root = fs::canonicalize(codex_home.join("sessions")).ok()?;
     let expected_suffix = format!("-{agent_id}.jsonl");
-    if let Some(raw_path) = transcript_path.map(str::trim).filter(|path| !path.is_empty()) {
+    if let Some(raw_path) = transcript_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
         let candidate = Path::new(raw_path);
         if !candidate.is_absolute()
             || candidate.extension().and_then(|value| value.to_str()) != Some("jsonl")
@@ -474,8 +477,13 @@ fn find_unique_agent_rollout_in_tree(
     expected_suffix: &str,
 ) -> Option<PathBuf> {
     let mut matched = None;
-    if find_agent_rollout_in_tree_inner(sessions_root, sessions_root, expected_suffix, 0, &mut matched)
-    {
+    if find_agent_rollout_in_tree_inner(
+        sessions_root,
+        sessions_root,
+        expected_suffix,
+        0,
+        &mut matched,
+    ) {
         matched
     } else {
         None
@@ -542,7 +550,7 @@ fn collect_recent_session_rollout_files(
         return;
     };
     let mut entries = entries.flatten().collect::<Vec<_>>();
-    entries.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
     for entry in entries {
         if target.len() >= max_files {
             break;
