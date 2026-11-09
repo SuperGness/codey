@@ -413,3 +413,40 @@ test("reports a missing official entry instead of deleting on its own", async ()
     false,
   );
 });
+
+test("mounting multiple sidebar thread rows reuses wrapper placement without per-row style recalculations", () => {
+  const runtime = loadInjection({ directArchiveButton: true });
+  let styleReads = 0;
+  runtime.window.getComputedStyle = () => {
+    styleReads += 1;
+    return { display: "flex", position: "static" };
+  };
+
+  const rows = Array.from({ length: 12 }, (_, index) => {
+    const row = new FakeElement("div", {
+      "data-app-action-sidebar-thread-active": index === 0 ? "true" : "false",
+      "data-app-action-sidebar-thread-id": `local:batch-thread-${index}`,
+      "data-app-action-sidebar-thread-title": `会话 ${index}`,
+    });
+    const hoverCard = new FakeElement("div", { class: "contents" });
+    const actionBar = new FakeElement("div", { class: "flex" });
+    const archiveButton = new FakeElement("button", {
+      "aria-label": "归档任务",
+      class: "native-thread-action",
+    });
+    row.appendChild(hoverCard);
+    hoverCard.appendChild(actionBar);
+    actionBar.appendChild(archiveButton);
+    runtime.document.body.appendChild(row);
+    runtime.window.__codeyInstallSessionDeleteButtons(row);
+    return { actionBar, archiveButton, row };
+  });
+
+  assert.equal(styleReads, 0);
+  for (const { actionBar, archiveButton, row } of rows) {
+    const deleteButton = row.querySelector("[data-codey-session-delete]");
+    assert.ok(deleteButton);
+    assert.deepEqual(actionBar.children, [archiveButton, deleteButton]);
+    assert.equal(actionBar.getAttribute("data-codey-session-action-row"), "true");
+  }
+});

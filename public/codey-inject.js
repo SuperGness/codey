@@ -1150,6 +1150,7 @@
   };
 
   const installSessionExportButtons = (root = document) => {
+    const targets = [];
     queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
@@ -1161,7 +1162,13 @@
       if (!sessionId) return;
       const archiveControl = findArchiveControl(thread);
       if (!(archiveControl instanceof HTMLElement)) return;
-      const placementTarget = archivePlacementTarget(thread, archiveControl);
+      targets.push({
+        archiveControl,
+        placementTarget: archivePlacementTarget(thread, archiveControl),
+        thread,
+      });
+    });
+    targets.forEach(({ archiveControl, placementTarget, thread }) => {
       if (placementTarget.parentElement instanceof HTMLElement && placementTarget.parentElement !== thread) {
         placementTarget.parentElement.setAttribute("data-codey-session-action-row", "true");
       }
@@ -3205,25 +3212,30 @@
   };
 
   const installProjectImportButtons = (root = document) => {
+    const targets = [];
     queryWithin(root,
       "[data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]",
     ).forEach((project) => {
       if (!(project instanceof HTMLElement) || project.querySelector(`[${projectImportAttribute}]`)) return;
       const projectPath = projectPathFromRow(project);
       if (!projectPath) return;
+      const { actionControl, right } = measureProjectImportPlacement(project);
+      targets.push({ actionControl, project, projectPath, right });
+    });
+    targets.forEach(({ actionControl, project, projectPath, right }) => {
       project.dataset.codeyProjectPath = projectPath;
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute(projectImportAttribute, "true");
       button.setAttribute("aria-label", "导入会话数据到此项目");
-      inheritNativeButtonClass(button, findProjectActionControl(project));
+      inheritNativeButtonClass(button, actionControl);
       button.innerHTML = projectImportIcon;
-      wrapNativeButtonIcon(button, findProjectActionControl(project));
+      wrapNativeButtonIcon(button, actionControl);
       attachSidebarActionTooltip(button, "导入会话数据到此项目");
       const refreshPosition = () => positionProjectImportButton(project, button);
       project.addEventListener("mouseenter", refreshPosition);
       project.addEventListener("focusin", refreshPosition);
-      refreshPosition();
+      if (right > 0) button.style.right = `${right}px`;
       ["pointerdown", "mousedown", "mouseup", "touchstart"].forEach((eventName) => {
         button.addEventListener(eventName, stopSidebarActionEvent, true);
       });
@@ -3329,32 +3341,84 @@
       return Boolean(className) && !classes.includes("sr-only") && control.getClientRects().length > 0;
     });
 
-  const findProjectActionControl = (project) => projectActionControls(project)[0];
-
-  const positionProjectImportButton = (project, button) => {
+  const measureProjectImportPlacement = (project) => {
+    const controls = projectActionControls(project);
+    const actionControl = controls[0];
     const projectRect = project.getBoundingClientRect();
-    const actionRects = projectActionControls(project)
+    const actionRects = controls
       .map((control) => control.getBoundingClientRect())
       .filter((rect) => rect.width > 0 && rect.height > 0);
-    if (projectRect.width <= 0 || actionRects.length === 0) return;
+    if (projectRect.width <= 0 || actionRects.length === 0) {
+      return { actionControl, right: 0 };
+    }
     const leftmostAction = Math.min(...actionRects.map((rect) => rect.left));
     const right = Math.ceil(projectRect.right - leftmostAction + 4);
-    if (Number.isFinite(right) && right > 0) button.style.right = `${right}px`;
+    return {
+      actionControl,
+      right: Number.isFinite(right) && right > 0 ? right : 0,
+    };
+  };
+
+  const positionProjectImportButton = (project, button) => {
+    const { right } = measureProjectImportPlacement(project);
+    if (right > 0) button.style.right = `${right}px`;
+  };
+
+  const archivePlacementByControl = new WeakMap();
+  const archiveActionRowBySignature = new Map();
+
+  const archiveWrapperSignature = (wrapper) => {
+    const parent = wrapper.parentElement;
+    const wrapperClass = String(wrapper.getAttribute("class") || "").trim();
+    const wrapperStyle = String(wrapper.getAttribute("style") || "").trim();
+    const parentTag = parent instanceof HTMLElement ? parent.tagName : "";
+    const parentClass = parent instanceof HTMLElement
+      ? String(parent.getAttribute("class") || "").trim()
+      : "";
+    if (!wrapperClass && !wrapperStyle && !parentClass && wrapper.tagName === parentTag) {
+      return "";
+    }
+    return `${wrapper.tagName}\0${wrapperClass}\0${wrapperStyle}\0${parentTag}\0${parentClass}`;
   };
 
   const archivePlacementTarget = (thread, archiveControl) => {
     const wrapper = archiveControl.parentElement;
     if (!(wrapper instanceof HTMLElement) || wrapper === thread) return archiveControl;
+    const cachedPlacement = archivePlacementByControl.get(archiveControl);
+    if (cachedPlacement?.wrapper === wrapper && cachedPlacement.target?.isConnected !== false) {
+      return cachedPlacement.target;
+    }
+    if (wrapper.getAttribute("data-codey-session-action-row") === "true") {
+      archivePlacementByControl.set(archiveControl, { target: archiveControl, wrapper });
+      return archiveControl;
+    }
+    if (wrapper.parentElement?.getAttribute?.("data-codey-session-action-row") === "true") {
+      archivePlacementByControl.set(archiveControl, { target: wrapper, wrapper });
+      return wrapper;
+    }
     // 新版按钮直接位于浮动操作栏内；仅跳过旧版的单按钮提示包装层，
     // 避免把整个操作栏当成按钮包装层，将图标插到聊天行下方。
-    const style = window.getComputedStyle?.(wrapper);
-    const isActionRow = /^(?:inline-)?(?:flex|grid)$/.test(style?.display || "")
-      || /^(?:absolute|fixed)$/.test(style?.position || "")
-      || wrapper.querySelectorAll("button, [role=button]").length !== 1;
-    return isActionRow ? archiveControl : wrapper;
+    let isActionRow = wrapper.querySelectorAll("button, [role=button]").length !== 1;
+    if (!isActionRow) {
+      const signature = archiveWrapperSignature(wrapper);
+      if (signature && archiveActionRowBySignature.has(signature)) {
+        isActionRow = archiveActionRowBySignature.get(signature);
+      } else {
+        const style = window.getComputedStyle?.(wrapper);
+        isActionRow = /^(?:inline-)?(?:flex|grid)$/.test(style?.display || "")
+          || /^(?:absolute|fixed)$/.test(style?.position || "");
+        if (signature) {
+          rememberBoundedMapValue(archiveActionRowBySignature, signature, isActionRow);
+        }
+      }
+    }
+    const target = isActionRow ? archiveControl : wrapper;
+    archivePlacementByControl.set(archiveControl, { target, wrapper });
+    return target;
   };
 
   const installSessionDeleteButtons = (root = document) => {
+    const targets = [];
     queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
@@ -3364,7 +3428,13 @@
       ) return;
       const archiveControl = findArchiveControl(thread);
       if (!(archiveControl instanceof HTMLElement)) return;
-      const placementTarget = archivePlacementTarget(thread, archiveControl);
+      targets.push({
+        archiveControl,
+        placementTarget: archivePlacementTarget(thread, archiveControl),
+        thread,
+      });
+    });
+    targets.forEach(({ archiveControl, placementTarget, thread }) => {
       if (placementTarget.parentElement instanceof HTMLElement && placementTarget.parentElement !== thread) {
         placementTarget.parentElement.setAttribute("data-codey-session-action-row", "true");
       }
@@ -3867,6 +3937,7 @@
     let rows = directMessageSelectionRoot(root)
       ? [root]
       : messageSelectionRowsWithin(root);
+    if (!rows.length) return;
     let installed = false;
     const directCanonicalRow = (
       rows.length === 1
@@ -4010,10 +4081,10 @@
         return;
       }
     }
+    installProjectImportButtons(root);
     installSessionExportButtons(root);
     installTasksImportButton(root);
     installSessionDeleteButtons(root);
-    installProjectImportButtons(root);
     installThreadUpdatedTimes(root);
     recoverHiddenRunningThreads(root);
     installMessageSelection(root);
