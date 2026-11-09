@@ -1,4 +1,5 @@
 use anyhow::{Context, bail};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -24,61 +25,93 @@ pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     // Chrome 150+ rejects DevTools HTTP when the Host header is an IP literal
     // and answers the same listener for `localhost`. Older builds and an
     // IPv6-only socket still need the explicit loopback URLs.
-    let urls = [
-        format!("http://localhost:{debug_port}/json"),
-        format!("http://127.0.0.1:{debug_port}/json"),
-        format!("http://[::1]:{debug_port}/json"),
-    ];
-    let mut errors = Vec::new();
-    for url in urls {
-        match query_targets_url(client, &url).await {
-            Ok(targets) => return Ok(targets),
-            Err(error) => errors.push(format!("{url}: {error:#}")),
-        }
-    }
+    let urls = loopback_urls(debug_port, "/json");
+    query_targets_urls(client, &urls).await
+}
 
-    bail!(
-        "failed to query CDP targets on loopback addresses: {}",
-        errors.join("; ")
-    )
+async fn query_targets_urls(
+    client: &reqwest::Client,
+    urls: &[String],
+) -> anyhow::Result<Vec<CdpTarget>> {
+    first_loopback_success(urls, |url| query_targets_url(client, url))
+        .await
+        .map_err(|errors| {
+            anyhow::anyhow!(
+                "failed to query CDP targets on loopback addresses: {}",
+                errors.join("; ")
+            )
+        })
 }
 
 /// 浏览器端点（`/json/version`）的 WebSocket 地址：Target 域的自动挂载
 /// 只能在这条会话上做，page 级会话拿不到 Target 协议。
 pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
     let client = cdp_http_client()?;
-    // 与 list_targets 相同的回环地址顺序：Chrome 150+ 拒绝 IP 字面量 Host。
-    let urls = [
-        format!("http://localhost:{debug_port}/json/version"),
-        format!("http://127.0.0.1:{debug_port}/json/version"),
-        format!("http://[::1]:{debug_port}/json/version"),
-    ];
+    // 与 list_targets 相同的回环地址：Chrome 150+ 拒绝 IP 字面量 Host。
+    let urls = loopback_urls(debug_port, "/json/version");
+    first_loopback_success(&urls, |url| query_browser_websocket_url(client, url))
+        .await
+        .map_err(|errors| {
+            anyhow::anyhow!(
+                "failed to query CDP browser endpoint on loopback addresses: {}",
+                errors.join("; ")
+            )
+        })
+}
+
+fn loopback_urls(debug_port: u16, path: &str) -> [String; 3] {
+    [
+        format!("http://localhost:{debug_port}{path}"),
+        format!("http://127.0.0.1:{debug_port}{path}"),
+        format!("http://[::1]:{debug_port}{path}"),
+    ]
+}
+
+/// 同时探测全部回环地址，取最先成功的结果。Windows 上连接未监听的回环端口
+/// 会重试 SYN、约 2 秒才失败，`localhost` 又优先解析到 DevTools 不监听的
+/// `::1`；逐个尝试会让一个慢失败的地址拖住可用地址。
+async fn first_loopback_success<'a, T, F, Fut>(
+    urls: &'a [String],
+    probe: F,
+) -> Result<T, Vec<String>>
+where
+    F: Fn(&'a str) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut probes: FuturesUnordered<_> = urls
+        .iter()
+        .map(|url| {
+            let probe = probe(url);
+            async move { (url, probe.await) }
+        })
+        .collect();
     let mut errors = Vec::new();
-    for url in urls {
-        match client.get(&url).send().await {
-            Ok(response) => match response.error_for_status() {
-                Ok(response) => match response.json::<serde_json::Value>().await {
-                    Ok(payload) => {
-                        if let Some(ws_url) = payload
-                            .get("webSocketDebuggerUrl")
-                            .and_then(serde_json::Value::as_str)
-                            .filter(|url| !url.is_empty())
-                        {
-                            return Ok(ws_url.to_string());
-                        }
-                        errors.push(format!("{url}: 响应缺少 webSocketDebuggerUrl"));
-                    }
-                    Err(error) => errors.push(format!("{url}: {error:#}")),
-                },
-                Err(error) => errors.push(format!("{url}: {error:#}")),
-            },
+    while let Some((url, result)) = probes.next().await {
+        match result {
+            Ok(value) => return Ok(value),
             Err(error) => errors.push(format!("{url}: {error:#}")),
         }
     }
-    anyhow::bail!(
-        "failed to query CDP browser endpoint on loopback addresses: {}",
-        errors.join("; ")
-    )
+    Err(errors)
+}
+
+async fn query_browser_websocket_url(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<String> {
+    let payload = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    payload
+        .get("webSocketDebuggerUrl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("响应缺少 webSocketDebuggerUrl"))
 }
 
 fn cdp_http_client() -> anyhow::Result<&'static reqwest::Client> {
@@ -267,6 +300,116 @@ fn is_packaged_codex_page(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    const TARGETS_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 31\r\nConnection: close\r\n\r\n[{\"id\":\"page-1\",\"type\":\"page\"}]";
+    const REJECTED_RESPONSE: &str =
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    /// 回环端点：`Some` 读完请求后应答一次；`None` 接受连接后一直不应答。
+    fn loopback_endpoint(response: Option<&'static str>, path: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}{path}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            match response {
+                Some(response) => {
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                None => std::thread::sleep(Duration::from_secs(30)),
+            }
+        });
+        url
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(CDP_HTTP_TIMEOUT)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn target_discovery_does_not_wait_for_a_stalled_loopback_address() {
+        let client = test_client();
+        for stalled_first in [true, false] {
+            let stalled = loopback_endpoint(None, "/json");
+            let ready = loopback_endpoint(Some(TARGETS_RESPONSE), "/json");
+            let urls = if stalled_first {
+                [stalled, ready]
+            } else {
+                [ready, stalled]
+            };
+            let targets =
+                tokio::time::timeout(Duration::from_secs(1), query_targets_urls(&client, &urls))
+                    .await
+                    .expect("可用地址不得等待卡住的地址")
+                    .unwrap();
+            assert_eq!(targets[0].id, "page-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn target_discovery_keeps_success_after_an_address_rejects_the_request() {
+        let client = test_client();
+        let urls = [
+            loopback_endpoint(Some(REJECTED_RESPONSE), "/json"),
+            loopback_endpoint(Some(TARGETS_RESPONSE), "/json"),
+        ];
+        let targets = query_targets_urls(&client, &urls).await.unwrap();
+        assert_eq!(targets[0].id, "page-1");
+    }
+
+    #[tokio::test]
+    async fn target_discovery_reports_all_failed_addresses() {
+        let client = test_client();
+        let invalid = loopback_endpoint(
+            Some("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"),
+            "/json",
+        );
+        let rejected = loopback_endpoint(Some(REJECTED_RESPONSE), "/json");
+        let error = query_targets_urls(&client, &[invalid.clone(), rejected.clone()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&invalid));
+        assert!(error.contains(&rejected));
+        assert!(error.contains("failed to deserialize CDP targets"));
+        assert!(error.contains("CDP target query failed"));
+    }
+
+    #[tokio::test]
+    async fn browser_endpoint_discovery_skips_addresses_without_a_websocket_url() {
+        let client = test_client();
+        let body = r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:9/devtools/browser/x"}"#;
+        let ready: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        );
+        let urls = [
+            loopback_endpoint(None, "/json/version"),
+            loopback_endpoint(
+                Some("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"),
+                "/json/version",
+            ),
+            loopback_endpoint(Some(ready), "/json/version"),
+        ];
+        let url = tokio::time::timeout(
+            Duration::from_secs(1),
+            first_loopback_success(&urls, |url| query_browser_websocket_url(&client, url)),
+        )
+        .await
+        .expect("可用地址不得等待卡住的地址")
+        .unwrap();
+        assert_eq!(url, "ws://127.0.0.1:9/devtools/browser/x");
+    }
 
     #[test]
     fn cdp_http_client_is_reused() {
