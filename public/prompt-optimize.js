@@ -609,6 +609,12 @@
     readComposerText(context.element) === context.text;
 
   const updateButtonState = (element = inputElement) => {
+    // 立即更新已包含排队中的读取，取消它以免重复读 innerText。
+    if (buttonStateTimer && buttonStateElement === element) {
+      clearTimeout(buttonStateTimer);
+      buttonStateTimer = 0;
+      buttonStateElement = null;
+    }
     if (!button) return;
     const empty = !readComposerText(element).trim();
     const disabled = busy || empty;
@@ -639,8 +645,8 @@
     if (buttonStateTimer && buttonStateElement === element) return;
     clearTimeout(buttonStateTimer);
     buttonStateElement = element;
-    // innerText can force layout. Read only the current composer after the
-    // observer callback has returned, so input handlers remain synchronous.
+    // innerText can force layout. Read only the current composer once after
+    // the input event or observer callback has returned.
     buttonStateTimer = setTimeout(() => {
       buttonStateTimer = 0;
       const scheduledElement = buttonStateElement;
@@ -1120,7 +1126,8 @@
   document.addEventListener(
     "input",
     (event) => {
-      if (nodeInsideTrackedInput(event.target)) updateButtonState();
+      // innerText 会强制布局；输入事件与 DOM 变化共用一次延后读取。
+      if (nodeInsideTrackedInput(event.target)) scheduleButtonStateUpdate();
     },
     true,
   );

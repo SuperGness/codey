@@ -662,6 +662,7 @@ test("keeps raw turn changes from scanning while the mounted button has no inser
 
   env.newChatInput.innerText = "连续 turn 后仍需写入";
   env.emitInput(env.newChatInput);
+  await flush();
   assert.equal(button.disabled, false);
 });
 
@@ -873,15 +874,18 @@ test("enables the optimize button only while the composer has content", async ()
 
   env.textarea.value = "   ";
   env.emitInput();
+  await flush();
   assert.equal(button.disabled, true);
 
   env.textarea.value = "需要优化的提示词";
   env.emitInput();
+  await flush();
   assert.equal(button.disabled, false);
   assert.equal(button.getAttribute("aria-disabled"), "false");
 
   env.textarea.value = "";
   env.emitInput();
+  await flush();
   assert.equal(button.disabled, true);
 });
 
@@ -1185,6 +1189,7 @@ test("skips geometry scans for child and character changes inside the tracked in
 
   env.newChatInput.innerText = "即时状态";
   env.emitInput(text);
+  await flush();
   assert.equal(button.disabled, false);
   assert.equal(env.getComposerQueryCount(), before);
 });
@@ -1271,8 +1276,11 @@ test("【自动化测试】合并观察器状态更新并只修复实际变化�
     },
   });
 
-  for (let index = 0; index < 100; index += 1) env.emitMutation([mutation]);
-  assert.equal(reads, 0, "观察器回调不得同步读取 innerText");
+  for (let index = 0; index < 100; index += 1) {
+    env.emitInput(env.newChatInput);
+    env.emitMutation([mutation]);
+  }
+  assert.equal(reads, 0, "输入事件和观察器回调不得同步读取 innerText");
   await flush();
   assert.equal(reads, 1);
   assert.deepEqual(
@@ -1286,11 +1294,13 @@ test("【自动化测试】合并观察器状态更新并只修复实际变化�
   button.setAttribute("aria-busy", "stale");
   writes.attributes = 0;
   env.emitInput(env.newChatInput);
+  await flush();
   assert.equal(button.getAttribute("aria-busy"), "false");
   assert.deepEqual(writes, { attributes: 1, disabled: 0 });
 
   writes.attributes = 0;
   env.emitInput(env.newChatInput);
+  await flush();
   assert.deepEqual(
     writes,
     { attributes: 0, disabled: 0 },
@@ -1308,6 +1318,7 @@ test("【自动化测试】禁用提示词优化时取消排队的状态读取",
       return "draft";
     },
   });
+  env.emitInput(env.newChatInput);
   env.emitMutation([{
     type: "characterData",
     target: env.newChatInput,
@@ -1577,6 +1588,29 @@ test("failed optimization keeps the original text and uses the global toast", as
   assert.equal(toast.dataset.tone, "error");
   assert.equal(toast.getAttribute("role"), "alert");
   assert.equal(toast.textContent, "API Key 无效");
+});
+
+test("清空输入框后在延后的状态更新前点击，仍不发送空的优化请求", async () => {
+  const env = createEnvironment({ enabled: true, apiKeyConfigured: true, initialText: "draft" });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  assert.equal(button.disabled, false);
+  env.textarea.value = "";
+  env.emitInput();
+
+  button.dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await flush();
+
+  assert.equal(
+    env.calls.some((call) => call.path === "/api/optimize_prompt"),
+    false,
+  );
+  assert.equal(button.disabled, true);
+  assert.equal(env.getElementById("codey-runtime-toast"), null);
 });
 
 test("an empty composer keeps the button disabled without showing an error", async () => {
