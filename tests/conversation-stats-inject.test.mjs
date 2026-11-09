@@ -242,9 +242,15 @@ const metric = (bar, name) => name === "status" ? bar.dataset.status : bar.query
 const field = (bar, name) => bar.__codeyCs.fields[name].textContent;
 const summary = (env) => env.bar().querySelector("button.codey-cs-summary");
 const panel = (env) => env.document.getElementById("codey-conversation-stats-activity");
-const click = (element) => element.dispatchEvent({ type: "click" });
+const click = (element) => {
+  const event = { type: "click", defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+  element.dispatchEvent(event);
+  return event;
+};
 const assertExpanded = (env, expanded) => {
-  assert.equal(summary(env).getAttribute("aria-expanded"), String(expanded));
+  assert.equal(summary(env).getAttribute("data-codey-expanded"), String(expanded));
+  // Codex 的 :has([aria-expanded="true"]) 规则会让该属性每次变化都整页重算样式。
+  assert.equal(summary(env).getAttribute("aria-expanded"), null);
   assert.equal(panel(env).hidden, !expanded);
 };
 
@@ -850,9 +856,9 @@ test("pins each independent panel and switches between both groups", async () =>
   const tokens = env.bar().querySelector(".codey-cs-tokens-summary");
   click(tokens);
   assertExpanded(env, false);
-  assert.equal(tokens.getAttribute("aria-expanded"), "true");
+  assert.equal(tokens.getAttribute("data-codey-expanded"), "true");
   click(tokens);
-  assert.equal(tokens.getAttribute("aria-expanded"), "false");
+  assert.equal(tokens.getAttribute("data-codey-expanded"), "false");
 });
 
 test("centers the details immediately above the trigger and clamps the viewport", async () => {
@@ -978,7 +984,9 @@ test("Escape from the independent panel restores its trigger focus", async () =>
 test("native popovers switch and close together with their triggers", async () => {
   const env = createEnvironment({ popover: true });
   await flushTimers(30);
-  click(summary(env));
+  // 关联只供无障碍树推导展开状态；原生点击切换必须被阻止，否则会与 setExpanded 互相抵消。
+  assert.equal(summary(env).popoverTargetElement, panel(env));
+  assert.equal(click(summary(env)).defaultPrevented, true);
   assert.equal(panel(env).popoverOpen, true);
   const tokens = env.bar().__codeyCs.panels.tokens;
   click(env.bar().__codeyCs.buttons.tokens);

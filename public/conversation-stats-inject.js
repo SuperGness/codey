@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 15;
+  const VERSION = 16;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -153,12 +153,12 @@
       ${styleScope} .codey-cs-divider { width: .5px; height: 11px; margin: 0 1px; background: var(--cs-line-strong); }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
       ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 11px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; transition: background-color .18s cubic-bezier(.32, .72, 0, 1), color .18s cubic-bezier(.32, .72, 0, 1), box-shadow .18s cubic-bezier(.32, .72, 0, 1), opacity .2s ease; }
-      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: color-mix(in srgb, var(--bg-primary, Canvas) 88%, var(--cs-text) 6%); color: var(--cs-text); box-shadow: 0 1px 3px #0000001f, inset 0 .5px 0 var(--cs-shine); }
+      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[data-codey-expanded="true"] { background: color-mix(in srgb, var(--bg-primary, Canvas) 88%, var(--cs-text) 6%); color: var(--cs-text); box-shadow: 0 1px 3px #0000001f, inset 0 .5px 0 var(--cs-shine); }
       #${barId}[data-running="true"] .codey-cs-activity-summary { background: color-mix(in srgb, var(--cs-live) 9%, transparent); color: var(--cs-soft); }
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-accent); outline-offset: 2px; }
       ${styleScope} .codey-cs-icon { display: inline-block; width: 13.5px; height: 13.5px; flex: 0 0 13.5px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; transition: color .18s ease; }
-      ${styleScope} .codey-cs-activity-summary:is(:hover, [aria-expanded="true"]) .codey-cs-icon { color: var(--cs-accent); }
-      ${styleScope} .codey-cs-tokens-summary:is(:hover, [aria-expanded="true"]) .codey-cs-icon { color: var(--cs-violet); }
+      ${styleScope} .codey-cs-activity-summary:is(:hover, [data-codey-expanded="true"]) .codey-cs-icon { color: var(--cs-accent); }
+      ${styleScope} .codey-cs-tokens-summary:is(:hover, [data-codey-expanded="true"]) .codey-cs-icon { color: var(--cs-violet); }
       #${barId}[data-running="true"] .codey-cs-activity-summary .codey-cs-icon { color: var(--cs-live); }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
       ${styleScope} .codey-cs-sep { opacity: .38; }
@@ -268,7 +268,9 @@
         if (kind === "tokens") decorative("codey-cs-divider", groups);
         const button = make("button", `codey-cs-summary codey-cs-${kind}-summary`, "", groups);
         button.type = "button";
-        button.setAttribute("aria-expanded", "false");
+        // 展开状态不写 aria-expanded：Codex 的 :has([aria-expanded="true"]) 规则会让
+        // 每次切换触发约 65ms 的整页样式重算。读屏的展开状态改由下方 popovertarget 关联推导。
+        button.setAttribute("data-codey-expanded", "false");
         button.setAttribute("aria-controls", `${barId}-${kind}`);
         if (kind === "activity") {
           decorative("codey-cs-live", button);
@@ -290,7 +292,11 @@
         const panel = make("section", `codey-cs-details codey-cs-${kind}-details`, "", overlay);
         panel.id = `${barId}-${kind}`;
         panel.hidden = true;
-        if (typeof panel.showPopover === "function") panel.setAttribute("popover", "manual");
+        if (typeof panel.showPopover === "function") {
+          panel.setAttribute("popover", "manual");
+          // 只建立关联让无障碍树随浮层开合报告展开状态；点击的默认切换在下方阻止，开合仍由 setExpanded 控制。
+          button.popoverTargetElement = panel;
+        }
         panel.setAttribute("aria-label", title);
         const heading = make("div", "codey-cs-heading", "", panel);
         const titles = make("div", "codey-cs-titles", "", heading);
@@ -346,7 +352,8 @@
         button.addEventListener("blur", (event) => { if (!panel.contains(event.relatedTarget)) leave(); });
         panel.addEventListener("pointerenter", () => clearTimeout(refs.closeTimer));
         panel.addEventListener("pointerleave", leave);
-        button.addEventListener("click", () => {
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
           const close = refs.active === kind && refs.pinned;
           setExpanded(!close, false, kind);
           refs.pinned = !close;
@@ -440,7 +447,7 @@
       if (visible && panel.hasAttribute("popover") && !panel.matches(":popover-open")) {
         try { panel.showPopover(); } catch { panel.removeAttribute("popover"); }
       }
-      setAttribute(refs.buttons[key], "aria-expanded", String(visible));
+      setAttribute(refs.buttons[key], "data-codey-expanded", String(visible));
     }
     if (expanded) positionPanel();
     else if (restoreFocus) {
