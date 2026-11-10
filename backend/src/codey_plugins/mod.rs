@@ -1405,7 +1405,7 @@ fn checked_child_directory(parent: &Path, name: &str, create: bool) -> Result<Pa
     Ok(canonical)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

@@ -154,7 +154,7 @@ impl Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
     #[test]

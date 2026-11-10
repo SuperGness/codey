@@ -1016,7 +1016,7 @@ pub(crate) async fn with_test_plugins<F: std::future::Future>(
     TEST_PLUGINS.scope(Arc::new(entries), future).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
 

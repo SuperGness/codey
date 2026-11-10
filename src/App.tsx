@@ -1650,6 +1650,7 @@ export function App({
                 computerUseNotice={computerUseNotice}
                 configRepairNotice={configRepairNotice}
               />
+              <div className="overview-config">
               <FeaturePolicyCard
                 config={config}
                 fastContextToolsStatus={fastContextToolsStatus}
@@ -1665,6 +1666,7 @@ export function App({
                 onChannelChange={handleNotificationChannelChange}
                 onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
               />
+              </div>
             </>
           ),
           models: (active) => (

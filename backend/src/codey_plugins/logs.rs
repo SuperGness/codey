@@ -91,7 +91,7 @@ pub(super) fn clear(plugin_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
 

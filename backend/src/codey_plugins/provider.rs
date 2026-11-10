@@ -250,7 +250,7 @@ pub(crate) fn parse_route_descriptor(value: Value) -> Result<PluginRouteSpec, St
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
     use serde_json::json;

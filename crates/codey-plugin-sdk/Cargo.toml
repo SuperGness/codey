@@ -8,24 +8,26 @@ license = "AGPL-3.0-only"
 # tests/host.rs 通过 #[path] 引入 backend 的插件宿主，这些依赖用于宿主测试。
 ignored = ["anyhow", "arc-swap", "libloading", "reqwest", "semver", "uuid"]
 
+[features]
+unit-tests = []
+
 [dependencies]
-chrono = "0.4"
-fs2 = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+chrono.workspace = true
+fs2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-anyhow = "1"
-arc-swap = "1"
-libloading = "0.8"
-reqwest = { workspace = true }
-semver = "1"
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
-tempfile = "3"
+anyhow.workspace = true
+arc-swap.workspace = true
+libloading.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-uuid = { version = "1", features = ["v4"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+uuid.workspace = true
+zip.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

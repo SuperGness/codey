@@ -384,7 +384,7 @@ pub fn read(path: &Path) -> Result<Package, String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
     #[test]

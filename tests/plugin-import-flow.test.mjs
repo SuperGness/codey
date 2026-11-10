@@ -7,7 +7,7 @@ import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const pluginHelpers = await loadTypeScriptModule(new URL("../src/codeyPlugins.ts", import.meta.url));
 const importHelpers = await loadTypeScriptModule(new URL("../src/pluginPackageImport.ts", import.meta.url));
-const sources = await Promise.all(["CodeyPluginsSection", "PluginImportDialog"].map(async name => [name, ts.transpileModule(await readFile(new URL(`../src/${name}.tsx`, import.meta.url), "utf8"), {
+const sources = await Promise.all(["CodeyPluginsSection", "PluginImportPanel"].map(async name => [name, ts.transpileModule(await readFile(new URL(`../src/${name}.tsx`, import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText]));
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -147,7 +147,7 @@ test("normal drop inspects first, shows loading, confirms once and refreshes the
   const event = harness.send("drop", [new File(["package bytes"], "demo.codey-plugin")]);
   assert.equal(event.defaultPrevented, true);
   assert.match(harness.text, /正在读取并检查/);
-  assert.equal(harness.find("Dialog").length, 1);
+  assert.equal(harness.find("Dialog").length, 0, "导入在页面内完成，不再弹窗");
   assert.equal(button(harness, "确认导入").props.disabled, true);
   await flush();
   assert.equal(harness.calls.some(call => call.command === "install_codey_plugin"), false);
@@ -161,7 +161,7 @@ test("normal drop inspects first, shows loading, confirms once and refreshes the
   assert.match(harness.text, /正在导入插件/);
   assert.deepEqual(latest(harness, "install_codey_plugin").args, { path: preview().path, sha256: hash });
   latest(harness, "install_codey_plugin").resolve(result([plugin()])); await flush(); harness.render();
-  assert.equal(harness.find("Dialog").length, 0);
+  assert.equal(button(harness, "确认导入"), undefined, "安装后导入面板回到初始状态");
   assert.equal(harness.find("article").length, 1);
   assert.match(harness.text, /安装成功，默认处于停用状态/);
   assert.equal(harness.notices.length, 1);
@@ -223,7 +223,7 @@ test("installation errors refresh state, preserve the preview and offer a workin
   assert.equal(harness.calls.filter(call => call.command === "install_codey_plugin").length, 2);
 });
 
-test("drag cancellation resets page highlighting without opening a dialog", async context => {
+test("drag cancellation resets page highlighting without starting an import", async context => {
   const harness = flowHarness(context); await ready(harness);
   harness.send("dragenter");
   const region = () => harness.find("div").find(node => node.props["aria-label"] === "插件文件拖放区域");
@@ -232,13 +232,12 @@ test("drag cancellation resets page highlighting without opening a dialog", asyn
   assert.doesNotMatch(region().props.className, /ring-2/);
   harness.send("dragenter"); harness.send("dragleave", [], { clientX: 0 });
   assert.doesNotMatch(region().props.className, /ring-2/);
-  assert.equal(harness.find("Dialog").length, 0);
+  assert.equal(button(harness, "确认导入"), undefined);
   assert.equal(harness.calls.length, 1);
 });
 
-test("click import and Linux path inspection still use their original commands", async context => {
+test("Linux path inspection is available inline and uses the original command", async context => {
   const harness = flowHarness(context); await ready(harness, [], "linux");
-  click(harness, "导入插件包"); await new Promise(resolve => setTimeout(resolve, 5)); harness.render();
   const input = harness.find("Input").find(node => node.props["aria-label"] === "插件包路径");
   input.props.onChange({ target: { value: "  demo.codey-plugin  " } }); harness.render();
   click(harness, "检查安装包");
@@ -254,7 +253,7 @@ test("closing a checked import releases staging and busy drops never start anoth
   assert.equal(harness.calls.filter(call => call.args.upload).length, 1);
   latest(harness, "inspect_codey_plugin").resolve(preview()); await flush(); harness.render();
   click(harness, "取消");
-  assert.equal(harness.find("Dialog").length, 0);
+  assert.equal(button(harness, "确认导入"), undefined);
   assert.ok(harness.calls.some(call => call.args.discardUpload === preview().uploadId));
   assert.equal(harness.calls.some(call => call.command === "install_codey_plugin"), false);
 });
@@ -279,13 +278,12 @@ test("retained hidden plugin pages do not intercept file drags on other screens"
   assert.equal(harness.send("dragover").defaultPrevented, true);
 });
 
-test("the import dialog marks a real DOM drop zone and preserves the native picker", async context => {
+test("the inline import panel marks a real DOM drop zone and preserves the native picker", async context => {
   const harness = flowHarness(context); await ready(harness);
-  click(harness, "导入插件包"); await new Promise(resolve => setTimeout(resolve, 5)); harness.render();
   assert.ok(harness.find("div").some(node => Object.hasOwn(node.props, "data-codey-plugin-drop-zone")));
   click(harness, "选择文件");
   latest(harness, "select_codey_plugin_package").resolve(null); await flush(); harness.render();
-  assert.equal(button(harness, "确认导入").props.disabled, true);
+  assert.equal(button(harness, "确认导入"), undefined, "取消选择后不进入确认步骤");
   click(harness, "选择文件");
   latest(harness, "select_codey_plugin_package").resolve({ ...preview(), path: "picked.codey-plugin" }); await flush(); harness.render();
   click(harness, "确认导入");

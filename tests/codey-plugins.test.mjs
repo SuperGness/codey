@@ -49,13 +49,14 @@ test("deep configuration validation avoids recursive traversal", () => {
   assert.equal(pluginConfigBusinessValuesEqual(nested, nested.replace("说明", "新说明")), true);
 });
 
-test("plugin package import uses a preview confirmation dialog", async () => {
+test("plugin package import previews inline before confirmation", async () => {
   const { readFile } = await import("node:fs/promises");
   const [section, dialog] = await Promise.all([
     readFile(new URL("../src/CodeyPluginsSection.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/PluginImportDialog.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/PluginImportPanel.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(section, /PluginImportDialog/);
+  assert.match(section, /PluginImportPanel/);
+  assert.doesNotMatch(dialog, /DialogContent/);
   assert.match(section, /select_codey_plugin_package/);
   assert.match(section, /install_codey_plugin/);
   assert.doesNotMatch(section, /本地路径导入/);

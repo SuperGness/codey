@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlertTriangle,
   IconEraser,
-  IconFilePlus,
   IconFolderOpen,
   IconHelpCircle,
   IconPuzzle,
@@ -29,7 +28,7 @@ import {
   Tooltip,
 } from "./components/ui";
 import { PluginConfigDialog } from "./PluginConfigDialog";
-import { PluginImportDialog } from "./PluginImportDialog";
+import { PluginImportPanel } from "./PluginImportPanel";
 import {
   parseCodeyPluginsResult,
   type CodeyPlugin,
@@ -53,12 +52,12 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
   }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
-  const [importOpen, setImportOpen] = useState(false);
   const [importError, setImportError] = useState("");
   const [preview, setPreview] = useState<CodeyPluginPreview | null>(null);
   const [importStep, setImportStep] = useState<"checking" | "installing" | "">("");
   const [importFileName, setImportFileName] = useState("");
   const [importResult, setImportResult] = useState("");
+  const [importPanelKey, setImportPanelKey] = useState(0);
   const [dragActive, setDragActive] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<{ kind: "enable" | "uninstall"; plugin: CodeyPlugin } | null>(null);
@@ -75,7 +74,6 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
   const pending = useRef(false);
   const epoch = useRef(0);
   const configurationSaved = useRef(false);
-  const importTimer = useRef(0);
   const retrySource = useRef<{ file: File } | { path: string } | null>(null);
   const uploadedPackage = useRef<string | null>(null);
   const uploadAbort = useRef<AbortController | null>(null);
@@ -184,7 +182,6 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
   }, [accept]);
 
   useEffect(() => () => {
-    window.clearTimeout(importTimer.current);
     uploadAbort.current?.abort();
     discardUploadedPackage();
     ++epoch.current;
@@ -196,27 +193,14 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     setNotice(enabled ? `插件「${plugin.name}」已启用` : `插件「${plugin.name}」已停用`);
   }, [mutate]);
 
-  const closeImport = useCallback(() => {
+  const cancelImport = useCallback(() => {
     if (pending.current) return;
-    window.clearTimeout(importTimer.current);
-    discardUploadedPackage();
-    retrySource.current = null;
-    setImportOpen(false);
-    setPreview(null);
-    setImportError("");
-    setImportFileName("");
-  }, [discardUploadedPackage]);
-
-  const openImport = useCallback(() => {
     discardUploadedPackage();
     retrySource.current = null;
     setPreview(null);
     setImportError("");
     setImportFileName("");
-    setImportResult("");
-    setConfirm(null);
-    window.clearTimeout(importTimer.current);
-    importTimer.current = window.setTimeout(() => setImportOpen(true), 0);
+    setImportPanelKey((key) => key + 1);
   }, [discardUploadedPackage]);
 
   const inspectImport = useCallback((source: { file: File } | { path: string }) => {
@@ -249,6 +233,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     void run(async () => {
       setImportStep("checking");
       setImportError("");
+      setImportResult("");
       try {
         const selected = await invoke<CodeyPluginPreview | null>("select_codey_plugin_package");
         if (selected) {
@@ -272,8 +257,6 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
   const handleDroppedFiles = useCallback((files: File[]) => {
     if (pending.current || loading || !known) return;
-    window.clearTimeout(importTimer.current);
-    setImportOpen(true);
     setConfirm(null);
     setImportResult("");
     const invalid = validateDroppedPluginFiles(files);
@@ -307,8 +290,9 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
         await mutate("install_codey_plugin", { path: selected.path, sha256: selected.sha256 });
         discardUploadedPackage();
         retrySource.current = null;
-        setImportOpen(false);
         setPreview(null);
+        setImportFileName("");
+        setImportPanelKey((key) => key + 1);
         setSearchQuery("");
         const message = installed
           ? `插件「${selected.manifest.name}」升级成功。`
@@ -363,41 +347,37 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
               <IconRefresh size={14} className={loading ? "animate-spin" : ""} />
               <span>刷新</span>
             </Button>
-            <Button
-              size="sm"
-              variant="default"
-              disabled={blocked}
-              onPress={openImport}
-            >
-              <IconFilePlus size={14} aria-hidden="true" />
-              <span>导入插件包</span>
-            </Button>
           </div>
         }
       />
 
-      <div
-        role="region"
-        aria-label="插件文件拖放区域"
-        aria-busy={Boolean(importStep)}
-        className={cn(
-          "mb-5 flex items-center gap-3.5 rounded-[14px] border border-dashed px-4 py-3.5 text-xs transition-colors",
-          dragActive
-            ? "border-blue-500 bg-blue-500/10 text-blue-600 ring-2 ring-blue-500/20 dark:text-blue-400"
-            : "border-[var(--codey-border-strong)] text-muted",
-        )}
-      >
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-accent/10 text-accent">
-          {importStep ? <IconRefresh size={18} className="animate-spin" aria-hidden="true" /> : <IconFilePlus size={18} aria-hidden="true" />}
-        </span>
-        <div className="min-w-0" role="status" aria-live="polite">
-          <div className="font-medium text-foreground">
-            {importStep === "installing" ? "正在导入插件…" : importStep === "checking" ? "正在读取并检查插件包…" : dragActive ? "松开文件，检查并导入插件包" : "将插件包拖到此页面，或点击「导入插件包」"}
-          </div>
-          <p className="mb-0 mt-1">仅支持 .codey-plugin · 一次一个文件 · 最大 64 MiB · 检查后确认安装</p>
-        </div>
-      </div>
-      {importResult && <div role="status" className="mb-4 rounded-xl border border-green-500/25 bg-green-500/10 p-3 text-xs text-green-700 dark:text-green-300">{importResult}</div>}
+      <PluginImportPanel
+        key={importPanelKey}
+        platform={result?.platform}
+        busy={busy}
+        disabled={!known || loading}
+        preview={preview}
+        upgrading={upgrading}
+        error={importError}
+        step={importStep}
+        dragActive={dragActive}
+        fileName={importFileName}
+        onRetry={preview ? handleConfirmImport : retrySource.current ? () => {
+          if (retrySource.current) inspectImport(retrySource.current);
+        } : undefined}
+        onCancel={cancelImport}
+        onSelectFile={handleSelectPackage}
+        onInspectPath={handleInspectPath}
+        onClearPreview={() => {
+          discardUploadedPackage();
+          setPreview(null);
+          setImportError("");
+          setImportFileName("");
+          retrySource.current = null;
+        }}
+        onConfirm={handleConfirmImport}
+      />
+      {importResult && <div role="status" className="plugin-import-result">{importResult}</div>}
 
       {/* 顶部筛选与搜索 */}
       <div className="mb-4 flex flex-col-reverse gap-3 sm:flex-row sm:items-center">
@@ -455,14 +435,14 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
       {/* 插件卡片网格 */}
       {filteredPlugins.length === 0 ? (
-        known && !loading && <div className="codey-card flex flex-col items-center justify-center px-6 py-16 text-center">
-          <div className="mb-3.5 flex size-12 items-center justify-center rounded-[14px] bg-accent/10 text-accent">
+        known && !loading && <div className="flex flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-6 py-16 text-center">
+          <div className="mb-3.5 flex size-12 items-center justify-center rounded-full bg-[var(--codey-surface-sunken)] text-foreground">
             <IconPuzzle size={24} stroke={1.5} />
           </div>
           {searchQuery || statusFilter !== "all" ? (
             <>
-              <h4 className="m-0 text-sm font-semibold text-foreground">未找到匹配的插件</h4>
-              <p className="mb-3 mt-1 text-xs text-muted">
+              <h4 className="m-0 text-[17px] font-extrabold text-foreground">未找到匹配的插件</h4>
+              <p className="mb-3 mt-1 text-[13.5px] text-muted">
                 {searchQuery
                   ? `没有符合「${searchQuery}」的插件，请尝试其他关键词。`
                   : `当前没有${statusFilter === "enabled" ? "已启用" : "未启用"}的插件。`}
@@ -480,49 +460,45 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
             </>
           ) : (
             <>
-              <h4 className="m-0 text-sm font-semibold text-foreground">尚未安装任何插件</h4>
-              <p className="mb-4 mt-1 max-w-sm text-xs text-muted leading-relaxed">
-                通过导入 .codey-plugin 插件包，一键扩展环境适配、模型代理拦截与自定增强功能。
+              <h4 className="m-0 text-[17px] font-extrabold text-foreground">尚未安装任何插件</h4>
+              <p className="mb-0 mt-1 max-w-sm text-[13.5px] text-muted leading-relaxed">
+                在上方选择或拖入 .codey-plugin 插件包，扩展环境适配、模型代理拦截与自定增强功能。
               </p>
-              <Button size="sm" variant="default" disabled={blocked} onPress={openImport}>
-                <IconFilePlus size={14} aria-hidden="true" />
-                <span>导入第一个插件包</span>
-              </Button>
             </>
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="extension-feed">
           {filteredPlugins.map((plugin) => {
             const hasDirs = Boolean(plugin.pluginDir || plugin.dataDir || plugin.logDir);
 
             return (
               <article
                 key={plugin.id}
-                className={`codey-card codey-plugin-card flex flex-col justify-between${plugin.enabled ? " is-enabled" : ""}`}
+                className={`extension-feed-item codey-plugin-card flex flex-col${plugin.enabled ? " is-enabled" : ""}`}
               >
-                <div className="p-5">
+                <div className="pb-2">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div
-                        className={`flex size-11 shrink-0 items-center justify-center rounded-[13px] transition-colors ${
+                        className={`flex size-10 shrink-0 items-center justify-center rounded-full transition-colors ${
                           plugin.enabled
-                            ? "bg-accent text-white shadow-[0_4px_12px_-4px_var(--accent)]"
-                            : "bg-default/50 text-muted"
+                            ? "bg-[var(--codey-text)] text-[var(--codey-surface)]"
+                            : "bg-[var(--codey-surface-sunken)] text-muted"
                         }`}
                       >
-                        <IconPuzzle size={20} stroke={1.8} aria-hidden="true" />
+                        <IconPuzzle size={18} stroke={1.85} aria-hidden="true" />
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <h4 className="m-0 truncate text-sm font-semibold text-foreground">
+                          <h4 className="m-0 truncate text-[15px] font-bold text-foreground">
                             {plugin.name}
                           </h4>
-                          <span className="inline-flex items-center rounded-md border border-black/[0.06] bg-black/[0.03] px-1.5 py-0.5 font-mono text-[10.5px] font-medium text-muted dark:border-white/[0.06] dark:bg-white/[0.05]">
+                          <span className="inline-flex items-center rounded-full bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] font-medium text-muted">
                             v{plugin.version}
                           </span>
                         </div>
-                        <div className="mb-0 mt-0.5 flex items-center gap-1.5 font-mono text-xs text-muted/75">
+                        <div className="mb-0 mt-0.5 flex items-center gap-1.5 font-mono text-[12.5px] text-muted">
                           <span className="truncate">{plugin.id}</span>
                           {hasDirs ? (
                             <Tooltip
@@ -591,17 +567,17 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   </div>
 
                   {plugin.description && (
-                    <p className="mb-0 mt-3 line-clamp-2 text-xs text-foreground/80 leading-relaxed">
+                    <p className="mb-0 mt-1.5 line-clamp-2 text-[14px] text-foreground leading-relaxed sm:ml-[52px]">
                       {plugin.description}
                     </p>
                   )}
 
                   {plugin.capabilities && plugin.capabilities.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-1.5">
+                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-[52px]">
                       {plugin.capabilities.map((cap) => (
                         <span
                           key={cap}
-                          className="inline-flex items-center rounded-full border border-default bg-default/20 px-2 py-0.5 font-mono text-[10.5px] text-muted"
+                          className="inline-flex items-center rounded-full border border-[var(--codey-border-strong)] px-2.5 py-0.5 font-mono text-[11.5px] text-muted"
                         >
                           {cap}
                         </span>
@@ -610,21 +586,21 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   )}
 
                   {plugin.restartRequired && (
-                    <div className="mt-3 rounded-lg border border-amber-200/70 bg-amber-50/70 p-2.5 text-[11.5px] text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                    <div className="mt-3 rounded-2xl bg-[var(--codey-amber-soft)] px-3.5 py-2.5 text-[13px] text-[var(--codey-amber)] sm:ml-[52px]">
                       需要重启 Codey 或停用后重新启用，以应用版本更新或配置变更。
                     </div>
                   )}
 
                   {plugin.lastError && (
-                    <div role="alert" className="mt-3 rounded-lg border border-red-200/70 bg-red-50/70 p-2.5 text-[11.5px] text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+                    <div role="alert" className="mt-3 rounded-2xl bg-[var(--codey-red-soft)] px-3.5 py-2.5 text-[13px] text-[var(--codey-red)] sm:ml-[52px]">
                       {plugin.lastError}
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-default/70 px-4 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-[52px]">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="whitespace-nowrap text-[11px] text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
+                    <span className="whitespace-nowrap text-[12.5px] text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
                       日志 {plugin.logSizeBytes == null ? "大小未知" : formatBytes(plugin.logSizeBytes)}
                     </span>
                     <Button
@@ -732,35 +708,6 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
           })}
         </div>
       )}
-
-      {importOpen ? (
-      <PluginImportDialog
-        open
-        container={container}
-        platform={result?.platform}
-        busy={busy}
-        preview={preview}
-        upgrading={upgrading}
-        error={importError}
-        step={importStep}
-        dragActive={dragActive}
-        fileName={importFileName}
-        onRetry={preview ? handleConfirmImport : retrySource.current ? () => {
-          if (retrySource.current) inspectImport(retrySource.current);
-        } : undefined}
-        onClose={closeImport}
-        onSelectFile={handleSelectPackage}
-        onInspectPath={handleInspectPath}
-        onClearPreview={() => {
-          discardUploadedPackage();
-          setPreview(null);
-          setImportError("");
-          setImportFileName("");
-          retrySource.current = null;
-        }}
-        onConfirm={handleConfirmImport}
-      />
-      ) : null}
 
       {clearLogsPlugin && (
         <Dialog open onOpenChange={(open) => { if (!open && !busy) setClearLogsPlugin(null); }}>

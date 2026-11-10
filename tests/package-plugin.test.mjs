@@ -191,3 +191,13 @@ test("plugin package rejects old configuration flags and invalid output extensio
   for (const flag of ["--schema", "--config-ui"]) assert.notEqual(f.run([flag, f.config]).status, 0);
   assert.equal(existsSync(f.output), false);
 });
+
+test("python plugin packaging scope and scaffold unit suites pass", options, () => {
+  const scriptsDir = fileURLToPath(new URL("../scripts", import.meta.url));
+  const result = spawnSync(
+    python,
+    ["-m", "unittest", "discover", "-s", scriptsDir, "-p", "test_*.py"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
