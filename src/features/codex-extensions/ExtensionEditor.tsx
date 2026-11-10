@@ -207,6 +207,14 @@ export function ExtensionEditor({
                   </span>
                 )}
               </div>
+              {(() => {
+                const parsedName = /^name:\s*(\S+)/m.exec(draft.content)?.[1];
+                return parsedName ? (
+                  <span className="extension-tag is-mono is-blue" title={`解析到的技能名称: ${parsedName}`}>
+                    name: {parsedName}
+                  </span>
+                ) : null;
+              })()}
             </div>
             <textarea
               aria-label="SKILL.md"

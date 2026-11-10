@@ -16,6 +16,35 @@ test("列表只有目标服务显示检查中，其他操作仍由全局锁保�
   assert.match(textContent(cards[0]), /检查中/);
   assert.doesNotMatch(textContent(cards[1]), /检查中/);
   assert.equal(elementProps(button(cards[1], "测试连接")).disabled, true);
+  let opened = null;
+  const interactive = graph.exports.ExtensionList({
+    kind: "mcp",
+    entries,
+    busy: false,
+    onAction(action, entry) {
+      opened = { action, id: entry.id };
+    },
+  });
+  const titleBtn = matching(
+    interactive,
+    (node) => elementType(node) === "button" && textContent(node) === "first",
+  )[0];
+  elementProps(titleBtn).onClick();
+  assert.deepEqual(opened, { action: "edit", id: "first" });
+
+  let cleared = false;
+  const emptyFiltered = graph.exports.ExtensionList({
+    kind: "skill",
+    entries: [],
+    busy: false,
+    filtered: true,
+    onAction() {},
+    onClearFilters() {
+      cleared = true;
+    },
+  });
+  elementProps(button(emptyFiltered, "清除筛选条件")).onClick();
+  assert.equal(cleared, true);
 });
 
 test("安装预览文件列表有界，来源可在预览期间编辑且最终操作含明确确认", () => {

@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "../../components/ui";
 import {
+  IconAlertTriangle,
   IconBook2,
   IconFolderPlus,
   IconPlus,
@@ -460,7 +461,7 @@ function CodexExtensionsPageComponent({
           </div>
         }
       />
-        <div className="space-y-3">
+      <div className="space-y-3.5">
         <ExtensionScope
           kind={kind}
           scope={scope}
@@ -491,15 +492,18 @@ function CodexExtensionsPageComponent({
             </Button>
           </div>
         )}
+
         {inventory?.warnings.map((warning, index) => (
-          <p
+          <div
             key={index}
             role="status"
-            className="m-0 break-words text-xs text-warning"
+            className="flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/8 px-3.5 py-2.5 text-xs leading-relaxed text-warning"
           >
-            {warning}
-          </p>
+            <IconAlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <span className="min-w-0 flex-1 break-words">{warning}</span>
+          </div>
         ))}
+
         <ExtensionFilters
           kind={kind}
           entries={entries}
@@ -507,74 +511,112 @@ function CodexExtensionsPageComponent({
           filter={filter}
           source={source}
           sort={sort}
-          trailing={inventory && (
-            <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted">
-              {filtered.length !== entries.length && (
-                <span className="tabular-nums">
-                  匹配 {filtered.length} / {entries.length} 项
-                </span>
-              )}
-              <Button
-                size="xs"
-                variant="ghost"
-                disabled={unavailable || !currentPage.entries.some(canToggle)}
-                onClick={() =>
-                  setSelected(
-                    currentPage.entries
-                      .filter(canToggle)
-                      .map((entry) => entry.id),
-                  )
-                }
-              >
-                选择本页
-              </Button>
-              {selected.length > 0 && (
-                <>
-                  <span>已选 {selected.length} 项，最多 100 项</span>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={
-                      unavailable || !batchTargets(entries, selected, true).length
-                    }
-                    onClick={() => batch(true)}
-                  >
-                    启用
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={
-                      unavailable ||
-                      !batchTargets(entries, selected, false).length
-                    }
-                    onClick={() => batch(false)}
-                  >
-                    禁用
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    onClick={() => setSelected([])}
-                  >
-                    清空选择
-                  </Button>
-                </>
-              )}
-            </div>
-          )}
+          trailing={
+            inventory && (
+              <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted">
+                {filtered.length !== entries.length && (
+                  <span className="tabular-nums">
+                    匹配 {filtered.length} / {entries.length} 项
+                  </span>
+                )}
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={unavailable || !currentPage.entries.some(canToggle)}
+                  onClick={() =>
+                    setSelected(
+                      currentPage.entries
+                        .filter(canToggle)
+                        .map((entry) => entry.id),
+                    )
+                  }
+                >
+                  选择本页
+                </Button>
+              </div>
+            )
+          }
           onQuery={setQuery}
           onFilter={setFilter}
           onSource={setSource}
           onSort={setSort}
           onClear={clearFilters}
         />
-        {loading && (
-          <div role="status" className="rounded-xl border border-default px-4 py-3 text-xs text-muted">
-            <div className="flex items-center gap-2"><IconRefresh size={14} className="motion-safe:animate-spin" aria-hidden="true" />{inventory ? "正在刷新，暂时显示上次读取结果…" : "正在读取配置…"}</div>
-            {!inventory && <div aria-hidden="true" className="mt-4 space-y-4">{[0, 1, 2].map((row) => <div key={row} className="flex items-center gap-3"><div className="size-9 rounded-lg bg-default/50" /><div className="flex-1 space-y-2"><div className="h-3 w-1/3 rounded bg-default/50" /><div className="h-2 w-2/3 rounded bg-default/30" /></div></div>)}</div>}
+
+        {inventory && selected.length > 0 && (
+          <div className="extension-batch-bar" role="region" aria-label="批量操作">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-semibold text-foreground">
+                已选 {selected.length} 项
+              </span>
+              <span className="text-muted">（最多 100 项）</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={
+                  unavailable || !batchTargets(entries, selected, true).length
+                }
+                onClick={() => batch(true)}
+              >
+                启用
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={
+                  unavailable || !batchTargets(entries, selected, false).length
+                }
+                onClick={() => batch(false)}
+              >
+                禁用
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => setSelected([])}
+              >
+                清空选择
+              </Button>
+            </div>
           </div>
         )}
+
+        {loading && (
+          <div
+            role="status"
+            className="rounded-2xl border border-[var(--codey-border)] bg-[var(--codey-panel)] px-4 py-3.5 text-xs text-muted"
+          >
+            <div className="flex items-center gap-2 font-medium text-foreground/80">
+              <IconRefresh
+                size={14}
+                className="motion-safe:animate-spin text-accent"
+                aria-hidden="true"
+              />
+              {inventory
+                ? "正在刷新，暂时显示上次读取结果…"
+                : "正在读取配置…"}
+            </div>
+            {!inventory && (
+              <div aria-hidden="true" className="mt-3.5 space-y-2.5">
+                {[0, 1, 2].map((row) => (
+                  <div
+                    key={row}
+                    className="flex items-center gap-3.5 rounded-xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-3.5"
+                  >
+                    <div className="size-10 rounded-xl bg-default/50" />
+                    <div className="flex-1 space-y-2">
+                      <div className="h-3.5 w-1/3 rounded bg-default/50" />
+                      <div className="h-2.5 w-2/3 rounded bg-default/30" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {inventory && (
           <ExtensionList
             kind={kind}
@@ -594,32 +636,34 @@ function CodexExtensionsPageComponent({
             checks={controller.checks}
             revision={inventory.revision}
             filtered={!!query.trim() || filter !== "all" || source !== "all"}
+            onClearFilters={clearFilters}
           />
         )}
+
         {inventory && currentPage.pages > 1 && (
-          <nav
-            aria-label="资源分页"
-            className="flex flex-wrap items-center justify-end gap-3 pt-1 text-xs text-muted"
-          >
-            <span>
-              第 {currentPage.page} / {currentPage.pages} 页 · 每页 20 项
+          <nav aria-label="资源分页" className="extension-pagination-bar">
+            <span className="tabular-nums">
+              共 {filtered.length} 项 · 第 {currentPage.page} /{" "}
+              {currentPage.pages} 页 · 每页 20 项
             </span>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={currentPage.page <= 1}
-              onClick={() => setPage(currentPage.page - 1)}
-            >
-              上一页
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={currentPage.page >= currentPage.pages}
-              onClick={() => setPage(currentPage.page + 1)}
-            >
-              下一页
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={currentPage.page <= 1}
+                onClick={() => setPage(currentPage.page - 1)}
+              >
+                上一页
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={currentPage.page >= currentPage.pages}
+                onClick={() => setPage(currentPage.page + 1)}
+              >
+                下一页
+              </Button>
+            </div>
           </nav>
         )}
       </div>
