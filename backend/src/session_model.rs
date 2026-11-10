@@ -349,9 +349,10 @@ struct RolloutFingerprint {
     head_tail_hash: u64,
 }
 
-static ROLLOUT_MODEL_CACHE: OnceLock<
-    Mutex<HashMap<(PathBuf, String), (RolloutFingerprint, Option<RolloutModelTuple>)>>,
-> = OnceLock::new();
+type RolloutModelCache =
+    HashMap<(PathBuf, String), (RolloutFingerprint, Option<RolloutModelTuple>)>;
+
+static ROLLOUT_MODEL_CACHE: OnceLock<Mutex<RolloutModelCache>> = OnceLock::new();
 
 fn rollout_fingerprint(file: &mut File) -> Result<RolloutFingerprint> {
     let metadata = file.metadata()?;

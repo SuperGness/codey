@@ -718,13 +718,21 @@ test("switches stats context when the conversation changes", async () => {
     },
   });
   await flushTimers(30);
-  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
+  const bar = env.bar();
+  assert.equal(field(bar, "totalTokens"), "131,500 Tokens");
+  const totalWrites = [];
+  let currentTotal = bar.__codeyCs.total.textContent;
+  Object.defineProperty(bar.__codeyCs.total, "textContent", {
+    configurable: true,
+    get: () => currentTotal,
+    set: (next) => { totalWrites.push(next); currentTotal = next; },
+  });
 
   env.setConversation("conversation-2");
   env.emitAnchorMutation();
   await flushTimers(200);
 
-  const bar = env.bar();
+  assert.deepEqual(totalWrites, ["总计 900 Tokens"], "fast session switch must not flash a placeholder between sessions");
   assert.equal(field(bar, "totalTokens"), "900 Tokens");
   assert.equal(env.calls.at(-1).payload.sessionId, "conversation-2");
 });

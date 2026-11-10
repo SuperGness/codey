@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 17;
+  const VERSION = 18;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -42,6 +42,7 @@
   const SUBMIT_POLL_DELAY_MS = 300;
   const SUBMIT_WATCH_MS = 15_000;
   const RESCAN_DEBOUNCE_MS = 120;
+  const LOADING_CLEAR_DELAY_MS = 20;
   const compositionKeys = ["cachedInputTokens", "uncachedInputTokens", "outputTokens"];
 
   let statsElement = null;
@@ -52,6 +53,7 @@
   let stats = null;
   let pollTimer = 0;
   let rescanTimer = 0;
+  let clearTimer = 0;
   let positionFrame = 0;
   let fetchInFlight = false;
   let lastFetchOk = false;
@@ -203,11 +205,14 @@
       ${styleScope} .codey-cs-activity-summary:is(:hover, [data-codey-expanded="true"]) .codey-cs-icon { color: var(--cs-accent); }
       ${styleScope} .codey-cs-tokens-summary:is(:hover, [data-codey-expanded="true"]) .codey-cs-icon { color: var(--cs-violet); }
       #${barId}[data-running="true"] .codey-cs-activity-summary .codey-cs-icon { color: var(--cs-live); }
-      ${styleScope} .codey-cs-metric { white-space: nowrap; }
+      ${styleScope} .codey-cs-metric { display: inline-block; white-space: nowrap; text-align: center; }
+      ${styleScope} .codey-cs-activity { min-width: 4.8em; }
       ${styleScope} .codey-cs-sep { opacity: .38; }
       ${styleScope} .codey-cs-speed, ${styleScope} .codey-cs-total { color: var(--cs-text); font-weight: 600; letter-spacing: -.01em; }
+      ${styleScope} .codey-cs-speed { min-width: 6.4em; }
+      ${styleScope} .codey-cs-total { min-width: 8.4em; }
       ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4.5px; }
-      ${styleScope} .codey-cs-cache-rate { color: var(--cs-soft); font-weight: 560; }
+      ${styleScope} .codey-cs-cache-rate { display: inline-block; min-width: 2.4em; text-align: center; color: var(--cs-soft); font-weight: 560; }
       ${styleScope} .codey-cs-ring { --cs-rate: 0; width: 12px; height: 12px; flex: none; border-radius: 50%; background: conic-gradient(var(--cs-cyan) calc(var(--cs-rate) * 1%), var(--cs-line-strong) 0); mask: radial-gradient(circle, transparent 3.4px, #000 3.9px); }
       ${styleScope} .codey-cs-live { position: relative; display: none; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--cs-live); }
       ${styleScope} .codey-cs-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; animation: codey-cs-pulse 1.8s cubic-bezier(.22, 1, .36, 1) infinite; }
@@ -539,7 +544,26 @@
     fetchAttempted = false;
     idleStreak = 0;
     lastStatsKey = "";
+    clearTimeout(clearTimer);
+    clearTimer = 0;
     setExpanded(false);
+  };
+
+  // 会话切换时若旧会话已有统计数据，先保留当前文本最多 20ms 等新会话首包返回，
+  // 避免本地桥接返回前先闪一帧「—」并触发宽度跳变；超时未返回再清空旧值。
+  const switchSession = (sessionId, anchor) => {
+    const hadStats = stats !== null;
+    resetSession(sessionId);
+    if (hadStats && sessionId && anchor && statsElement) {
+      setValue(statsElement, "hidden", false);
+      positionBar(anchor.parentElement, anchor);
+      clearTimer = setTimeout(() => {
+        clearTimer = 0;
+        if (!disposed && !fetchAttempted) render();
+      }, LOADING_CLEAR_DELAY_MS);
+      return;
+    }
+    render(anchor);
   };
 
   const formatSpeed = (value) => (
@@ -583,6 +607,8 @@
 
   const render = (anchor) => {
     if (disposed) return;
+    clearTimeout(clearTimer);
+    clearTimer = 0;
     const bar = ensureBar(anchor);
     if (!bar) {
       // 输入框不可见（例如离开会话页）时，若旧宿主仍在隐藏会话里，显式
@@ -733,8 +759,7 @@
     if (document.visibilityState === "hidden") return;
     const { anchor, sessionId } = resolveSessionContext();
     if (sessionId !== currentSessionId) {
-      resetSession(sessionId);
-      render(anchor);
+      switchSession(sessionId, anchor);
     }
     if (!currentSessionId) {
       schedulePoll(POLL_IDLE_MS);
@@ -789,11 +814,12 @@
       const { anchor, sessionId } = resolveSessionContext();
       const changed = sessionId !== currentSessionId;
       if (changed) {
-        resetSession(sessionId);
+        switchSession(sessionId, anchor);
+        // 会话切换立即拉取，不等下一轮轮询。
+        if (currentSessionId) schedulePoll(0);
+        return;
       }
       render(anchor);
-      // 会话切换立即拉取，不等下一轮轮询。
-      if (changed && currentSessionId) schedulePoll(0);
     }, RESCAN_DEBOUNCE_MS);
   };
 
@@ -920,6 +946,7 @@
         sessionGeneration += 1;
         clearTimeout(pollTimer);
         clearTimeout(rescanTimer);
+        clearTimeout(clearTimer);
         setExpanded(false);
         window.__codeyConversationStatsObserver?.disconnect?.();
         delete window.__codeyConversationStatsObserver;
