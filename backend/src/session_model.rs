@@ -1,11 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 #[cfg(any(windows, target_os = "macos", test))]
 use std::io::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(any(windows, target_os = "macos", test))]
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Weak};
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use codey_runtime_core::codex_sqlite::codex_session_db_paths_from_home;
@@ -306,10 +309,90 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
         return Ok(fallback());
     };
     let path = checked_path(&home, &rollout)?;
+    let model = read_rollout_model(&path, thread_id)?;
+    let Some((model, provider, timestamp, effort)) = model else {
+        return Ok(fallback());
+    };
+    // 缺少可信时间的历史记录不能覆盖明确确认过的选择。
+    if confirmed
+        .as_ref()
+        .is_some_and(|c| timestamp.is_none_or(|time| time <= c.selected_at_ms))
+    {
+        if let Some(confirmed) = confirmed.as_ref().filter(|c| {
+            c.reasoning_effort.is_none()
+                && crate::model_id::equal(&c.model, &model)
+                && c.provider == provider
+        }) {
+            return Ok(model_response(
+                thread_id,
+                &confirmed.model,
+                &confirmed.provider,
+                effort.as_ref(),
+            ));
+        }
+        return Ok(fallback());
+    }
+    Ok(model_response(
+        thread_id,
+        &model,
+        &provider,
+        effort.as_ref(),
+    ))
+}
+
+type RolloutModelTuple = (String, Option<String>, Option<i64>, Option<Value>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RolloutFingerprint {
+    len: u64,
+    modified_ns: Option<u128>,
+    head_tail_hash: u64,
+}
+
+static ROLLOUT_MODEL_CACHE: OnceLock<
+    Mutex<HashMap<(PathBuf, String), (RolloutFingerprint, Option<RolloutModelTuple>)>>,
+> = OnceLock::new();
+
+fn rollout_fingerprint(file: &mut File) -> Result<RolloutFingerprint> {
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos());
+    let mut hasher = DefaultHasher::new();
+    let mut buf = [0u8; 4096];
+    let head_len = file.read(&mut buf)?;
+    buf[..head_len].hash(&mut hasher);
+    if len > 4096 {
+        file.seek(SeekFrom::Start(len.saturating_sub(4096)))?;
+        let tail_len = file.read(&mut buf)?;
+        buf[..tail_len].hash(&mut hasher);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(RolloutFingerprint {
+        len,
+        modified_ns,
+        head_tail_hash: hasher.finish(),
+    })
+}
+
+fn read_rollout_model(path: &Path, thread_id: &str) -> Result<Option<RolloutModelTuple>> {
+    let mut file = File::open(path)?;
+    let fingerprint = rollout_fingerprint(&mut file)?;
+    let cache = ROLLOUT_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (path.to_path_buf(), thread_id.to_owned());
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_fp, cached_model)) = guard.get(&key)
+        && *cached_fp == fingerprint
+    {
+        return Ok(cached_model.clone());
+    }
     let mut model = None;
     let mut session_provider = None;
     let mut identity = RolloutIdentity::default();
-    let mut reader = BufReader::with_capacity(ROLLOUT_READ_BUFFER_BYTES, File::open(path)?);
+    let mut reader = BufReader::with_capacity(ROLLOUT_READ_BUFFER_BYTES, file);
     let mut line = String::new();
     loop {
         line.clear();
@@ -364,34 +447,13 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
         }
     }
     identity.require_owner()?;
-    let Some((model, provider, timestamp, effort)) = model else {
-        return Ok(fallback());
-    };
-    // 缺少可信时间的历史记录不能覆盖明确确认过的选择。
-    if confirmed
-        .as_ref()
-        .is_some_and(|c| timestamp.is_none_or(|time| time <= c.selected_at_ms))
-    {
-        if let Some(confirmed) = confirmed.as_ref().filter(|c| {
-            c.reasoning_effort.is_none()
-                && crate::model_id::equal(&c.model, &model)
-                && c.provider == provider
-        }) {
-            return Ok(model_response(
-                thread_id,
-                &confirmed.model,
-                &confirmed.provider,
-                effort.as_ref(),
-            ));
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 256 && !guard.contains_key(&key) {
+            guard.clear();
         }
-        return Ok(fallback());
+        guard.insert(key, (fingerprint, model.clone()));
     }
-    Ok(model_response(
-        thread_id,
-        &model,
-        &provider,
-        effort.as_ref(),
-    ))
+    Ok(model)
 }
 
 fn checked_path(home: &Path, path: &Path) -> Result<PathBuf> {
@@ -412,6 +474,13 @@ struct MetadataRecordHeader<'a> {
 
 // 正文只做 JSON 结构扫描，避免为无关消息分配完整对象；归属检查仍覆盖整份文件。
 fn metadata_record(line: &str, wanted_type: &str) -> Option<Value> {
+    if !line.contains("\\u")
+        && !line.contains("session_meta")
+        && !line.contains(wanted_type)
+        && !line.contains("thread_settings_applied")
+    {
+        return None;
+    }
     if let Ok(header) = serde_json::from_str::<MetadataRecordHeader<'_>>(line) {
         match header.kind.as_str() {
             Some("session_meta") => {}

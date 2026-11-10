@@ -871,6 +871,35 @@ fn restored_resume_model(
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
+fn cached_catalog_slugs(catalog_path: &str) -> Result<Vec<String>> {
+    type CatalogCache = (String, Vec<u8>, Vec<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CatalogCache>>> =
+        std::sync::OnceLock::new();
+    let bytes = std::fs::read(catalog_path)?;
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_path, cached_bytes, cached_slugs)) = guard.as_ref()
+        && cached_path == catalog_path
+        && *cached_bytes == bytes
+    {
+        return Ok(cached_slugs.clone());
+    }
+    let catalog: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let models = catalog
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .context("模型目录缺少 models")?;
+    let slugs = models
+        .iter()
+        .filter_map(|entry| entry.get("slug")?.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((catalog_path.to_owned(), bytes, slugs.clone()));
+    }
+    Ok(slugs)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
 fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Result<Option<String>> {
     let Some(model) = saved.get("model").and_then(serde_json::Value::as_str) else {
         return Ok(None);
@@ -878,21 +907,13 @@ fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Resu
     let Some(catalog_path) = runtime_override_string(overrides, "model_catalog_json") else {
         return Ok(None);
     };
-    let catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(catalog_path)?)?;
-    let models = catalog
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .context("模型目录缺少 models")?;
-    let slugs = models
-        .iter()
-        .filter_map(|entry| entry.get("slug")?.as_str())
-        .collect::<Vec<_>>();
+    let slugs = cached_catalog_slugs(&catalog_path)?;
     // 当前稳定 ID 优先，不把包含斜杠的上游型号误解为失效的线路 ID。
     if let Some(slug) = slugs
         .iter()
         .find(|slug| crate::model_id::equal(slug, model))
     {
-        return Ok(Some((*slug).to_owned()));
+        return Ok(Some(slug.clone()));
     }
     let provider = saved
         .get("modelProvider")
@@ -906,7 +927,7 @@ fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Resu
         return Ok(slugs
             .iter()
             .find(|slug| crate::model_id::equal(slug, &alias))
-            .map(|slug| (*slug).to_owned()));
+            .cloned());
     }
     let mut matches = slugs.iter().filter(|slug| {
         crate::model_id::parse_alias(slug)
@@ -914,7 +935,7 @@ fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Resu
     });
     let first = matches.next();
     Ok(if matches.next().is_none() {
-        first.map(|slug| (*slug).to_owned())
+        first.cloned()
     } else {
         None
     })
