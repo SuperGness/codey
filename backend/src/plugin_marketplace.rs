@@ -1,11 +1,18 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 use crate::error_log;
+
+type InstalledPluginsCache = HashMap<PathBuf, (Option<Vec<u8>>, HashMap<String, bool>)>;
+type MarketplaceEntriesCache = HashMap<PathBuf, (Vec<u8>, Vec<(String, Map<String, Value>)>)>;
+
+static INSTALLED_PLUGINS_CACHE: OnceLock<Mutex<InstalledPluginsCache>> = OnceLock::new();
+static MARKETPLACE_ENTRIES_CACHE: OnceLock<Mutex<MarketplaceEntriesCache>> = OnceLock::new();
 
 /// Repairs the official/local marketplace registration without touching the
 /// Codex installation directory. The core crate owns the platform-specific
@@ -67,6 +74,7 @@ pub fn marketplaces_status(home: &Path) -> Value {
 
 pub fn list_plugins(home: &Path) -> Result<Value> {
     let installed = installed_plugins(home)?;
+    let entries_cache = MARKETPLACE_ENTRIES_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut plugins = Vec::new();
     for marketplace_path in marketplace_paths(home) {
         let bytes = match fs::read(&marketplace_path) {
@@ -85,6 +93,21 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
                 continue;
             }
         };
+        if let Ok(guard) = entries_cache.lock()
+            && let Some((cached_bytes, cached_entries)) = guard.get(&marketplace_path)
+            && *cached_bytes == bytes
+        {
+            for (id, template) in cached_entries {
+                let mut object = template.clone();
+                object.insert("installed".into(), Value::Bool(installed.contains_key(id)));
+                object.insert(
+                    "enabled".into(),
+                    Value::Bool(installed.get(id).copied().unwrap_or(false)),
+                );
+                plugins.push(Value::Object(object));
+            }
+            continue;
+        }
         let mut marketplace = match serde_json::from_slice::<Value>(&bytes) {
             Ok(marketplace) => marketplace,
             Err(error) => {
@@ -117,6 +140,7 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
         else {
             continue;
         };
+        let mut parsed_entries = Vec::with_capacity(entries.len());
         for entry in entries {
             let Value::Object(mut object) = entry else {
                 continue;
@@ -152,13 +176,21 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
                 "localPath".into(),
                 Value::String(plugin_root.to_string_lossy().to_string()),
             );
-            object.insert("installed".into(), Value::Bool(installed.contains_key(&id)));
-            object.insert(
+            merge_manifest(&mut object, &plugin_root);
+            let mut with_status = object.clone();
+            with_status.insert("installed".into(), Value::Bool(installed.contains_key(&id)));
+            with_status.insert(
                 "enabled".into(),
                 Value::Bool(installed.get(&id).copied().unwrap_or(false)),
             );
-            merge_manifest(&mut object, &plugin_root);
-            plugins.push(Value::Object(object));
+            parsed_entries.push((id, object));
+            plugins.push(Value::Object(with_status));
+        }
+        if let Ok(mut guard) = entries_cache.lock() {
+            if guard.len() >= 32 && !guard.contains_key(&marketplace_path) {
+                guard.clear();
+            }
+            guard.insert(marketplace_path, (bytes, parsed_entries));
         }
     }
     let count = plugins.len();
@@ -203,27 +235,54 @@ fn merge_manifest(plugin: &mut Map<String, Value>, plugin_root: &Path) {
 }
 
 fn installed_plugins(home: &Path) -> Result<HashMap<String, bool>> {
+    let config_path = home.join("config.toml");
+    let config_bytes = match fs::read(&config_path) {
+        Ok(bytes) => Some(Ok(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Err(())),
+        Err(_) => None,
+    };
+    let cache = INSTALLED_PLUGINS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(ref state) = config_bytes
+        && let Ok(guard) = cache.lock()
+        && let Some((cached_bytes, cached_map)) = guard.get(home)
+        && match (state, cached_bytes) {
+            (Ok(bytes), Some(cached)) => bytes == cached,
+            (Err(()), None) => true,
+            _ => false,
+        }
+    {
+        return Ok(cached_map.clone());
+    }
     let snapshot = codey_runtime_core::config_manager::ConfigManager::for_home(home)
         .load()
         .context("读取插件安装配置失败")?;
-    let Some(table) = snapshot
+    let map = snapshot
         .document()
         .get("plugins")
         .and_then(|item| item.as_table_like())
-    else {
-        return Ok(HashMap::new());
-    };
-    Ok(table
-        .iter()
-        .map(|(key, item)| {
-            let enabled = item
-                .as_table_like()
-                .and_then(|table| table.get("enabled"))
-                .and_then(|value| value.as_bool())
-                .unwrap_or(true);
-            (key.to_string(), enabled)
+        .map(|table| {
+            table
+                .iter()
+                .map(|(key, item)| {
+                    let enabled = item
+                        .as_table_like()
+                        .and_then(|table| table.get("enabled"))
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(true);
+                    (key.to_string(), enabled)
+                })
+                .collect::<HashMap<_, _>>()
         })
-        .collect())
+        .unwrap_or_default();
+    if let Some(state) = config_bytes
+        && let Ok(mut guard) = cache.lock()
+    {
+        if guard.len() >= 16 && !guard.contains_key(home) {
+            guard.clear();
+        }
+        guard.insert(home.to_path_buf(), (state.ok(), map.clone()));
+    }
+    Ok(map)
 }
 
 #[cfg(test)]
