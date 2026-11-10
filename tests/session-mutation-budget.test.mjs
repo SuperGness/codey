@@ -777,3 +777,38 @@ test("dispose clears deferred task and node telemetry", () => {
   assert.equal(stats.pending, 0);
   assert.equal(stats.pendingNodes, 0);
 });
+
+test("session identity attribute changes refresh message selection without full-body sidebar scans", () => {
+  const runtime = fixture();
+  runtime.load();
+  const composer = runtime.document.body.appendChild(new FakeElement("div", {
+    "data-above-composer-conversation-id": "session-a",
+  }));
+  const turn = runtime.document.body.appendChild(new FakeElement("div", {
+    "data-turn-key": "turn-1",
+  }));
+  let bodySidebarQueries = 0;
+  const originalBodyQuerySelectorAll = runtime.document.body.querySelectorAll.bind(
+    runtime.document.body,
+  );
+  runtime.document.body.querySelectorAll = (selector) => {
+    if (String(selector).includes("data-app-action-sidebar")) {
+      bodySidebarQueries += 1;
+    }
+    return originalBodyQuerySelectorAll(selector);
+  };
+
+  composer.setAttribute("data-above-composer-conversation-id", "session-b");
+  runtime.emit([
+    attributeMutation(composer, "data-above-composer-conversation-id"),
+  ]);
+  runtime.runTimeout(60);
+
+  assert.equal(bodySidebarQueries, 0);
+  assert.equal(turn.dataset.codeyMessageId, "turn-1");
+  assert.equal(
+    runtime.window.__codeyObserverStats["codey-inject.sessionToolMutations"].pending,
+    0,
+  );
+  runtime.window.__codeySessionToolsInstall.dispose();
+});

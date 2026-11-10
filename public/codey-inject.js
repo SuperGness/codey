@@ -304,6 +304,16 @@
     || key.startsWith("__reactProps")
   ));
 
+  const ignoredReactFiberTraversalKeys = new Set([
+    "child",
+    "sibling",
+    "stateNode",
+    "_owner",
+    "alternate",
+    "_store",
+    "ref",
+  ]);
+
   const messageIdFromReactState = (element, stableTurnOnly = false) => {
     const visited = new WeakSet();
     const stack = reactStateKeys(element).map((key) => ({
@@ -328,6 +338,7 @@
       visited.add(value);
       scanned += 1;
       for (const key of Object.keys(value).slice(0, 80)) {
+        if (ignoredReactFiberTraversalKeys.has(key)) continue;
         let child;
         try {
           child = value[key];
@@ -432,17 +443,22 @@
     }
     for (const key of reactStateKeys(element)) {
       const reactState = element[key];
-      const directEntries = [
-        reactState?.pendingProps?.children?.props?.entry,
-        reactState?.memoizedProps?.children?.props?.entry,
-        reactState?.children?.props?.entry,
-        reactState?.pendingProps?.entry,
-        reactState?.memoizedProps?.entry,
-        reactState?.entry,
-      ];
-      for (const entry of directEntries) {
-        const metadata = metadataFromReactTurnEntry(entry, expectedMessageId);
-        if (metadata) return metadata;
+      for (const target of [reactState, reactState?.return, reactState?.return?.return]) {
+        if (!target || typeof target !== "object") continue;
+        const directEntries = [
+          target.pendingProps?.children?.props?.entry,
+          target.memoizedProps?.children?.props?.entry,
+          target.children?.props?.entry,
+          target.pendingProps?.entry,
+          target.memoizedProps?.entry,
+          target.entry,
+          target.pendingProps,
+          target.memoizedProps,
+        ];
+        for (const entry of directEntries) {
+          const metadata = metadataFromReactTurnEntry(entry, expectedMessageId);
+          if (metadata) return metadata;
+        }
       }
     }
     const visited = new WeakSet();
@@ -471,6 +487,7 @@
         candidates.push({ ...metadata, score });
       }
       for (const key of Object.keys(value).slice(0, 80)) {
+        if (ignoredReactFiberTraversalKeys.has(key)) continue;
         let child;
         try {
           child = value[key];
@@ -4146,6 +4163,8 @@
   const pendingScanRoots = new Set();
   let pendingScanRootsByNode = new WeakMap();
   const pendingScanRootsByIdentity = new Map();
+  let pendingMessageSelectionScan = false;
+  const pendingScanCount = () => pendingScanRoots.size + (pendingMessageSelectionScan ? 1 : 0);
   const deferredMutationBatches = [];
   const deferredMutationSourceQueue = [];
   const deferredMutationInputQueue = [];
@@ -4183,7 +4202,7 @@
       mutations: Number(existing.mutations) || 0,
       nodes: Number(existing.nodes) || 0,
       processedNodes: Number(existing.processedNodes) || 0,
-      pending: deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanRoots.size,
+      pending: deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanCount(),
       pendingNodes: deferredMutationNodeCount + deferredMutationInputNodeCount,
       skipped: Number(existing.skipped) || 0,
       timing: {
@@ -4203,7 +4222,7 @@
       scanMs: (stats.timing.scanMs || 0) + (Number(timing.scanMs) || 0),
     };
     if (changes.timing) stats.__codeyTiming = { ...stats.timing };
-    stats.pending = deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanRoots.size;
+    stats.pending = deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanCount();
     stats.pendingNodes = deferredMutationNodeCount + deferredMutationInputNodeCount;
     (window.__codeyObserverStats ||= {})["codey-inject.sessionToolMutations"] = stats;
     return stats;
@@ -4341,11 +4360,21 @@
     // addPendingScanRoot() maintains a nested-free queue, so the flush must
     // not repeat the same containment checks over every pending root.
     const roots = [...pendingScanRoots].filter((root) => root.isConnected !== false);
+    const shouldScanMessageSelection = pendingMessageSelectionScan;
     pendingScanRoots.clear();
     pendingScanRootsByIdentity.clear();
+    pendingMessageSelectionScan = false;
     updateSessionMutationPending();
     const startedAt = nowMs();
     let scannedRoots = 0;
+    if (
+      shouldScanMessageSelection
+      && !roots.includes(document.body)
+      && !roots.includes(document.documentElement)
+    ) {
+      installMessageSelection(document);
+      scannedRoots += 1;
+    }
     for (let index = 0; index < roots.length; index += 1) {
       const root = roots[index];
       if (scannedRoots > 0) {
@@ -4366,14 +4395,14 @@
       scannedRoots: (Number(stats.scannedRoots) || 0) + scannedRoots,
       timing: { scanMs: nowMs() - startedAt },
     });
-    if (pendingScanRoots.size) scheduleIncrementalScan(null);
+    if (pendingScanCount()) scheduleIncrementalScan(null);
   };
   const scheduleIncrementalScan = (root) => {
     if (disposed) return;
     if (root === null) {
       // A flush already left its overflow roots in the queue. Do not let the
       // root-only scheduling entry point consume the budget a second time.
-      if (!pendingScanRoots.size) return;
+      if (!pendingScanCount()) return;
     } else {
       addPendingScanRoot(root);
     }
@@ -4436,7 +4465,7 @@
           mutations: Number(current.mutations) || 0,
           nodes: Number(current.nodes) || 0,
           processedNodes: Number(current.processedNodes) || 0,
-          pending: deferredMutationTaskCount + pendingScanRoots.size,
+          pending: deferredMutationTaskCount + pendingScanCount(),
           pendingNodes: deferredMutationNodeCount,
           skipped: Number(current.skipped) || 0,
           timing: {
@@ -4981,14 +5010,16 @@
             mutation.attributeName !== "class"
             && !pureUiAttributeChange
           )) {
-            const topologyRoot = (
-              threadRow
-              || nearestScanRoot(target)
-              || (sessionIdentityAttributes.includes(mutation.attributeName)
-                ? document.body
-                : null)
-            );
+            const topologyRoot = threadRow || nearestScanRoot(target);
             if (addPendingScanRoot(topologyRoot)) {
+              processedNodes += 1;
+            } else if (
+              !topologyRoot
+              && sessionIdentityAttributes.includes(mutation.attributeName)
+              && !pendingMessageSelectionScan
+            ) {
+              pendingMessageSelectionScan = true;
+              updateSessionMutationPending();
               processedNodes += 1;
             }
           }
@@ -5051,7 +5082,7 @@
       });
       if (addPendingScanRoot(topologyRoot)) processedNodes += 1;
     });
-    if (pendingScanRoots.size) {
+    if (pendingScanCount()) {
       scheduleIncrementalScan(null);
     }
     if (sawNonTurnMutation && !completionReconcileCheckTimer && !completionReconcileInFlight) {
@@ -5129,6 +5160,7 @@
     threadRunningRecheckTimers.clear();
     pendingScanRoots.clear();
     pendingScanRootsByIdentity.clear();
+    pendingMessageSelectionScan = false;
     pendingScanRootsByNode = new WeakMap();
     deferredMutationBatches.length = 0;
     deferredMutationSourceQueue.length = 0;
