@@ -170,13 +170,13 @@
       #${accountUsageId} .codey-usage-segment { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 3px; }
       #${accountUsageId}[data-window-count="1"]:has(.codey-usage-segment[data-window="weekly"]) { padding: 12px 14px 11px; }
       #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] { column-gap: 14px; row-gap: 0; }
-      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-value { grid-area: 1 / 2 / 4 / 3; align-self: center; font-size: 27px; line-height: 1; }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-value { grid-area: 1 / 2 / 4 / 3; align-self: center; font-size: 31px; line-height: 1; }
       #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-meter { grid-area: 2 / 1 / 3 / 2; height: 4.5px; min-height: 4.5px; max-height: 4.5px; margin-top: 7px; margin-bottom: 6px; box-shadow: none; }
       #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-reset { grid-area: 3 / 1 / 4 / 2; }
       #${accountUsageId} .codey-usage-segment + .codey-usage-segment { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--codey-usage-line); }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-segment + .codey-usage-segment { margin-top: 0; padding-top: 0; border-top: 0; padding-inline-start: 12px; border-inline-start: 1px solid var(--codey-usage-line); }
-      #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 21px; }
+      #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 26px; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list:has(.codey-usage-plan-tag) { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); }
       #${accountUsageId} .codey-usage-overview > * { flex-shrink: 0; }
       #${accountUsageId} .codey-usage-overview .codey-usage-window-label { flex-shrink: 1; }
@@ -189,7 +189,7 @@
       #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="100"] { border-color: light-dark(#94a3b8, #64748b); background: linear-gradient(135deg, light-dark(#f8fafc, #475569) 0%, light-dark(#e2e8f0, #334155) 52%, light-dark(#cbd5e1, #1e293b) 100%); color: light-dark(#1e293b, #f1f5f9); box-shadow: inset 0 1px 0 light-dark(rgba(255, 255, 255, .85), rgba(255, 255, 255, .2)), 0 1px 2.5px light-dark(rgba(100, 116, 139, .18), rgba(0, 0, 0, .3)); }
       #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="200"] { border-color: light-dark(#d4a134, #b88a2e); background: linear-gradient(135deg, light-dark(#fff3c4, #634816) 0%, light-dark(#f7d774, #46310d) 52%, light-dark(#e8b949, #332208) 100%); color: light-dark(#5c3904, #ffe299); box-shadow: inset 0 1px 0 light-dark(rgba(255, 255, 255, .78), rgba(255, 232, 163, .28)), 0 1px 3px light-dark(rgba(212, 161, 52, .26), rgba(0, 0, 0, .35)); }
       #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="500"] { border-color: light-dark(#c69d45, #d4ac54); background: linear-gradient(135deg, light-dark(#3a2d24, #46362b) 0%, light-dark(#1f1814, #281f19) 55%, light-dark(#120e0c, #17120f) 100%); color: light-dark(#ffe4a0, #ffebb5); box-shadow: inset 0 1px 0 rgba(255, 234, 184, .32), 0 1.5px 3.5px rgba(18, 14, 12, .26); }
-      #${accountUsageId} .codey-usage-value { display: block; grid-area: 1 / 2 / 3 / 3; align-self: center; color: var(--codey-usage-accent); font-family: "Codey Chakra Petch", "DIN Alternate", "Bahnschrift", monospace; font-size: 23px; font-variant-numeric: tabular-nums; font-weight: 700; letter-spacing: -.01em; line-height: 1; white-space: nowrap; }
+      #${accountUsageId} .codey-usage-value { display: block; grid-area: 1 / 2 / 3 / 3; align-self: center; color: var(--codey-usage-accent); font-family: "Codey Chakra Petch", "DIN Alternate", "Bahnschrift", monospace; font-size: 27px; font-variant-numeric: tabular-nums; font-weight: 700; letter-spacing: -.01em; line-height: 1; white-space: nowrap; }
       #${accountUsageId} .codey-usage-unit { margin-inline-start: 1.5px; font-size: .56em; font-weight: 700; letter-spacing: 0; opacity: .78; }
       #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; }
       #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: var(--codey-usage-accent); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; transition: transform .25s ease-out; }
@@ -221,11 +221,11 @@
       #${accountUsageId} .codey-usage-detail-meta .is-expiring { color: var(--codey-usage-accent); font-weight: 600; }
       #${accountUsageId} .codey-usage-credit-dot { flex: 0 0 auto; width: 6px; height: 6px; margin-inline-start: -2px; border-radius: 999px; background: currentColor; color: light-dark(#d70015, #ff453a); animation: codey-usage-breathe 1.6s ease-in-out infinite; }
       @keyframes codey-usage-breathe { 0%, 100% { opacity: .3; transform: scale(.72); box-shadow: 0 0 0 0 rgba(255, 59, 48, .5); } 50% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 5px rgba(255, 59, 48, .06); } }
-      @container (max-width: 300px) {
+      @container (max-width: 260px) {
         #${accountUsageId}[data-window-count="2"] .codey-usage-list { column-gap: 10px; }
         #${accountUsageId}[data-window-count="2"] .codey-usage-segment { column-gap: 4px; }
         #${accountUsageId}[data-window-count="2"] .codey-usage-segment + .codey-usage-segment { padding-inline-start: 10px; }
-        #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 20px; }
+        #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 24px; }
         #${accountUsageId}[data-window-count="2"] .codey-usage-reset { font-size: 10.5px; }
       }
       @media (prefers-reduced-motion: reduce) {
