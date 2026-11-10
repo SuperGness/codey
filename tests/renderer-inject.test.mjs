@@ -86,8 +86,11 @@ const createRuntime = ({ styleSheets = [] } = {}) => {
   window.__codeyMutationDispatcher = {
     snapshot: () => ({ observerInstalled: true }),
     subscribe(handler, options) {
-      subscribers.push({ handler, options });
-      return () => {};
+      const entry = { handler, options, disconnected: false };
+      subscribers.push(entry);
+      return () => {
+        entry.disconnected = true;
+      };
     },
   };
   vm.runInContext(source, context);
@@ -98,7 +101,7 @@ const createRuntime = ({ styleSheets = [] } = {}) => {
     bootstrap.options.attributeFilter.includes("data-state"),
     "renderer bootstrap should include data-state in attributeFilter",
   );
-  return { body, bootstrap, document, documentElement, timers, window };
+  return { body, bootstrap, document, documentElement, subscribers, timers, window };
 };
 
 const attributeMutation = (target, attributeName) => ({
@@ -305,3 +308,62 @@ test("runtime stylesheet fallback rewrites unpatched link stylesheets and skips 
     /:where\(\.group\):is\(:has\(\[aria-expanded=true\]\),\[data-codey-open-within\]\)/,
   );
 });
+
+test("open-within sync remains active after session tools disconnect bootstrap and adapts to renamed bundle classes", async () => {
+  const prePatchedLink = new FakeElement("link", {
+    attributes: {
+      rel: "stylesheet",
+      href: "app://-/assets/async/future-bundle-99aabbcc.css",
+    },
+  });
+  const prePatchedSheet = {
+    ownerNode: prePatchedLink,
+    disabled: false,
+    cssRules: [
+      {
+        selectorText: ":where(.threadCard-Zx98Ab)[data-codey-open-within], :where(.threadCard-Zx98Ab > *)[data-codey-open-within]",
+        cssText: ":where(.threadCard-Zx98Ab)[data-codey-open-within], :where(.threadCard-Zx98Ab > *)[data-codey-open-within] { content-visibility: visible; }",
+      },
+      {
+        selectorText: ":root",
+        cssText: ":root { --codey-css-open-state-has-patched: 1; }",
+      },
+    ],
+  };
+  const runtime = createRuntime({ styleSheets: [prePatchedSheet] });
+  await runtime.window.__codeyLoadSessionTools();
+
+  assert.equal(runtime.bootstrap.disconnected, true, "bootstrap observer should disconnect once session tools load");
+  const openStateSubscriber = runtime.subscribers.find(
+    (entry) => entry !== runtime.bootstrap && !entry.disconnected && entry.options.attributeFilter?.includes("data-state"),
+  );
+  assert.ok(openStateSubscriber, "dedicated open-state observer should stay subscribed after bootstrap disconnects");
+
+  const customCard = runtime.documentElement.appendChild(new FakeElement("div", {
+    attributes: { class: "threadCard-Zx98Ab group/future-sidebar" },
+  }));
+  const cardChild = customCard.appendChild(new FakeElement("div", {
+    attributes: { class: "has-[[data-state=open]]:bg-primary-ghost-hover" },
+  }));
+  const buttonHost = cardChild.appendChild(new FakeElement("div", {
+    attributes: { class: "has-[button[data-state=open]]:bg-primary-ghost-hover" },
+  }));
+  const menuButton = buttonHost.appendChild(new FakeElement("button", {
+    attributes: { "data-state": "closed" },
+  }));
+
+  menuButton.setAttribute("data-state", "open");
+  openStateSubscriber.handler([attributeMutation(menuButton, "data-state")]);
+
+  assert.equal(customCard.getAttribute("data-codey-open-within"), "");
+  assert.equal(cardChild.getAttribute("data-codey-open-within"), "");
+  assert.equal(buttonHost.getAttribute("data-codey-open-within"), "");
+
+  menuButton.setAttribute("data-state", "closed");
+  openStateSubscriber.handler([attributeMutation(menuButton, "data-state")]);
+
+  assert.equal(customCard.hasAttribute("data-codey-open-within"), false);
+  assert.equal(cardChild.hasAttribute("data-codey-open-within"), false);
+  assert.equal(buttonHost.hasAttribute("data-codey-open-within"), false);
+});
+

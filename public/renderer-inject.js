@@ -76,6 +76,8 @@
   let sessionToolsInteractionArmed = false;
   let sessionToolsIdleLoadScheduled = false;
   let bootstrapObserver = null;
+  let openStateObserver = null;
+  let ensureOpenStateObserver = null;
   let headerMountDirty = true;
   let navigationRailSeen = false;
   const openWithinAttribute = "data-codey-open-within";
@@ -90,6 +92,13 @@
   ];
   const openWithinButtonAncestorClass = "has-[button[data-state=open]]:opacity-100";
   const openWithinDirectCardClass = "card-ineZLT";
+  const openWithinDynamicAncestorClasses = new Set(openWithinAncestorClasses);
+  const openWithinDynamicButtonAncestorClasses = new Set([
+    openWithinButtonAncestorClass,
+  ]);
+  const openWithinDynamicDirectClasses = new Set([openWithinDirectCardClass]);
+  const openWithinHashedCardClassPattern = /^card-[A-Za-z0-9_-]{4,}$/;
+  const boundStylesheetLinks = new WeakSet();
   const openStateCssAriaAndDataStateHasPattern =
     /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
   const openStateCssDataStateHasPattern =
@@ -149,42 +158,45 @@
       #${buttonId}[data-codey-header-actions="true"]::after { top: 4px; right: 4px; }
       #${buttonId}[data-codey-runtime-state="unavailable"][data-codey-update-available="true"]::after { top: auto; right: 3px; bottom: 3px; width: 5px; height: 5px; }
       /* 跟随宿主 color-scheme；明确的主题类优先于系统偏好。iOS 液态玻璃质感。 */
-      #${accountUsageId} { --codey-usage-ink: light-dark(#1d1d1f, #f5f5f7); --codey-usage-muted: light-dark(#86868b, #98989d); --codey-usage-line: light-dark(rgba(60, 60, 67, .09), rgba(235, 235, 245, .09)); --codey-usage-track: light-dark(rgba(0, 0, 0, .05), rgba(255, 255, 255, .08)); -webkit-app-region: no-drag !important; position: relative; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 13px 14px 14px; border: 0; border-radius: 12px; background: light-dark(#ffffff, #222226); box-shadow: 0 1px 5px -1px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .4)); color: var(--codey-usage-ink); container-type: inline-size; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.4; pointer-events: auto !important; user-select: none; transition: box-shadow .18s ease; }
+      @font-face { font-family: "Codey Chakra Petch"; font-style: normal; font-weight: 600 700; font-display: block; src: url("data:font/woff2;base64,d09GMgABAAAAAARcAA0AAAAACIgAAAQMAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG1wcLgZgAEQRCAqGXIUBCxwAATYCJAM0BCAFhCwHIBuwBsgEHvh38z03BAvwppal4lhFDWpG/WItzPSLibnyw/1M/2icgGuh2VB/5FtEWSRl4TDB1jrbrpsPW/FA+FSi85i+PDIj3o4ANPKpwNTS1hNg+/B8Msr2ydX5NbZHJaD+DTlyaTOKbYDn6ioKNgQ4NxIItnUL7NpvSb/ClRRSqLkz5ig2PlJQapR7MZcpRytjQHcvR8zgF/lLscOShbaVeze3dOtciE6l6cP/nwX1Q6VMF+IUExY/K/dKqY4JUKDHbg8Q2qvi3SvYFsd1sqg8E2yAePPSH6W/SL+8GVHkC0Q6zVYjcLW8XdmdgPxoFxUbgJqCAhDQK5o1ydlmVbXZrNvu4TBvv63NtsVmU4j6122zLtUZMjvVUdOoK6gEnKP1pjqtRqmdDYhRh6qNrog6rQZNjLqCLOLCOSoc1DrqRb4mHAVLnjcwSMAZcooVh+JAQxs1aWOseWCd0+TCiStIwHkUK9p21mHHzCn1ok4LUCuFU7hY1UNieIjHTa5AavTjPcrEBrQRcb62ydGFnkkxyrpCW3GsapMFIl/LJW9pVj86+YDxJ8568qy50sm8ScoSryYSZYk267fEPQffczt+ATfkn957yE3zkXtTZJ+50tbOxbSn4lLuLuWZC9XayuavGDKaauVWNtJPJp9MR7ie1lRUylwp79/beEj/R24mjxg6quzGSx4PJoNHpsw/+dXnM7ZQKDdTndzM+QyufptcPtwaDv8gZSFl8lMp3VIupiqNG43LrnxHyo+k9P+cMI4xju/oChks1Nlnkt8evnP1ifjk/d+33CylW8qbW76/X8qmP88xlo0bjWXjrhwjbjxqxA2q5XjKbVxtXJR6T8rPpPTL/d8r9+nNhoYN41bjBIOcc17s777++v1/vvDOWOvSeVOUNwYODVRhomp1vT4TmUC8hbveeftYeb89uVfObzWr6cl70jUPnXutddKff/l/ff0+rd6kfILC+iPjG5Oex/qP/+v5/Q73rtSaKTJfSy4TYWr+rcizl4lB2UerIUCbJUJrRlBmKlCjlioZZORS/ksBvkuQStnPRjJV6zDwwHddjY/mDM6t28d8ptoykgp35HfuR6L/XUhNl3ClVMThdaqaJgNSCTgm7BW+BVZIkiVOFBw8JQmyyRpykFrhJfFQYNzE2WcFDP2300Mwq80g2mWeAJZKEWKWIJmKEWWSEJTZ3OyhGFB0fbryltxr9WLuWmWcfksRYBS8a18ll341Gy8ij9+vC1xt4+c200I0+6OCsqKQtNtsMb5wDrh9W7kuhjh8vPiosG8C0S+hn5h5gU+LrLBHaDRqvEFbvHSQS6l7rE+JdYW2lex8Wkl0hYkTwEKFENofwsYRH9xdpvXtHyPs5o+Gs9G34KQAA") format("woff2"); unicode-range: U+25, U+30-39; }
+      #${accountUsageId} { --codey-usage-ink: light-dark(#1d1d1f, #f5f5f7); --codey-usage-muted: light-dark(#86868b, #98989d); --codey-usage-line: light-dark(rgba(60, 60, 67, .08), rgba(235, 235, 245, .09)); --codey-usage-track: light-dark(rgba(0, 0, 0, .06), rgba(255, 255, 255, .09)); -webkit-app-region: no-drag !important; position: relative; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 12px 14px; border: 0; border-radius: 12px 12px 0 12px; background: light-dark(#ffffff, #222226); box-shadow: 0 0 0 1px light-dark(rgba(0, 0, 0, .055), rgba(255, 255, 255, .07)), 0 2px 6px -1px light-dark(rgba(0, 0, 0, .05), rgba(0, 0, 0, .35)); color: var(--codey-usage-ink); container-type: inline-size; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.4; pointer-events: auto !important; user-select: none; transition: box-shadow .18s ease; }
       :where(.light, [data-theme="light"]) #${accountUsageId} { color-scheme: light; }
       :where(.dark, [data-theme="dark"]) #${accountUsageId} { color-scheme: dark; }
-      #${accountUsageId}:hover { box-shadow: 0 3px 14px -3px light-dark(rgba(0, 0, 0, .12), rgba(0, 0, 0, .5)); }
+      #${accountUsageId}:hover { box-shadow: 0 0 0 1px light-dark(rgba(0, 0, 0, .08), rgba(255, 255, 255, .11)), 0 4px 12px -2px light-dark(rgba(0, 0, 0, .09), rgba(0, 0, 0, .45)); }
       #${accountUsageId}[data-codey-state="stale"] .codey-usage-details-updated::before { content: "上次成功数据 · "; }
       #${accountUsageId}[data-codey-state="error"] { padding-block: 8px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; }
       #${accountUsageId} .codey-usage-list { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); }
-      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#00a37a, #37d9a1); --codey-usage-accent-bg: light-dark(rgba(0, 163, 122, .14), rgba(55, 217, 161, .22)); min-width: 0; }
+      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#128a68, #32c48d); --codey-usage-accent-bg: light-dark(rgba(18, 138, 104, .12), rgba(50, 196, 141, .18)); min-width: 0; }
       #${accountUsageId} .codey-usage-segment { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 3px; }
-      #${accountUsageId}[data-window-count="1"]:has(.codey-usage-segment[data-window="weekly"]) { padding: 15px 17px; border-radius: 16px; box-shadow: 0 3px 9px light-dark(rgba(36, 36, 38, .03), rgba(0, 0, 0, .15)), 0 1px 2px light-dark(rgba(36, 36, 38, .015), rgba(0, 0, 0, .1)); }
-      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] { row-gap: 5px; }
-      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-value { text-shadow: none; }
-      #${accountUsageId} .codey-usage-border-progress { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-      #${accountUsageId} .codey-usage-border-progress rect { width: calc(100% - 2px); height: calc(100% - 2px); fill: none; stroke: var(--codey-usage-accent); stroke-width: 1.6px; stroke-linecap: round; filter: drop-shadow(0 0 2px color-mix(in srgb, var(--codey-usage-accent) 42%, transparent)) drop-shadow(0 0 5px color-mix(in srgb, var(--codey-usage-accent) 16%, transparent)); }
+      #${accountUsageId}[data-window-count="1"]:has(.codey-usage-segment[data-window="weekly"]) { padding: 12px 14px 11px; }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] { column-gap: 14px; row-gap: 0; }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-value { grid-area: 1 / 2 / 4 / 3; align-self: center; font-size: 27px; line-height: 1; }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-meter { grid-area: 2 / 1 / 3 / 2; height: 4.5px; min-height: 4.5px; max-height: 4.5px; margin-top: 7px; margin-bottom: 6px; box-shadow: none; }
+      #${accountUsageId}[data-window-count="1"] .codey-usage-segment[data-window="weekly"] .codey-usage-reset { grid-area: 3 / 1 / 4 / 2; }
       #${accountUsageId} .codey-usage-segment + .codey-usage-segment { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--codey-usage-line); }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-segment + .codey-usage-segment { margin-top: 0; padding-top: 0; border-top: 0; padding-inline-start: 12px; border-inline-start: 1px solid var(--codey-usage-line); }
-      #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 24px; }
+      #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 21px; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list:has(.codey-usage-plan-tag) { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); }
       #${accountUsageId} .codey-usage-overview > * { flex-shrink: 0; }
       #${accountUsageId} .codey-usage-overview .codey-usage-window-label { flex-shrink: 1; }
-      #${accountUsageId} .codey-usage-overview { display: flex; grid-area: 1 / 1; min-width: 0; min-height: 17px; align-items: center; gap: 5px; }
+      #${accountUsageId} .codey-usage-overview { display: flex; grid-area: 1 / 1; min-width: 0; min-height: 18px; align-items: center; gap: 6px; }
       #${accountUsageId} .codey-usage-window-label { min-width: 0; overflow: hidden; color: var(--codey-usage-ink); font-size: 12px; font-weight: 600; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-plan-tag { flex: 0 0 auto; overflow: hidden; max-width: 44%; border: 1px solid color-mix(in srgb, #0a84ff 32%, transparent); border-radius: 999px; padding: 1px 6px; background: color-mix(in srgb, #0a84ff 13%, transparent); color: light-dark(#0068cc, #69b1ff); font-size: 9px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; box-shadow: inset 0 1px 0.5px light-dark(rgba(255, 255, 255, .6), rgba(255, 255, 255, .2)); }
-      #${accountUsageId} .codey-usage-plan-tag[data-plan="plus"] { border-color: light-dark(#a4d4c8, #37695e); background: light-dark(#e6f5f1, #193d37); color: light-dark(#0f766e, #91d6c1); }
-      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="100"] { border-color: light-dark(#cbd5e1, #64748b); background: linear-gradient(135deg, light-dark(#f8fafc, #394452), light-dark(#e2e8f0, #262e39)); color: light-dark(#475569, #dbe4ef); box-shadow: inset 0 1px 0.5px rgb(255 255 255 / .35), 0 1px 2px rgb(0 0 0 / .06); }
-      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="200"] { border-color: light-dark(#d6b86b, #8f7035); background: linear-gradient(135deg, light-dark(#fff8e7, #4b3b1f), light-dark(#f2dfb0, #302719)); color: light-dark(#78530e, #f2d58d); box-shadow: inset 0 1px 0.5px rgb(255 255 255 / .4), 0 1px 2px rgb(0 0 0 / .08); }
-      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="500"] { border-color: light-dark(#b89654, #c6a663); background: linear-gradient(135deg, light-dark(#49305f, #59406e), light-dark(#25182f, #302039)); color: light-dark(#f8e5af, #ffe9b0); box-shadow: inset 0 1px 0.5px rgb(255 234 184 / .4), 0 1px 3px rgb(37 28 54 / .2); }
-      #${accountUsageId} .codey-usage-value { display: block; grid-area: 1 / 2 / 3 / 3; color: var(--codey-usage-accent); font-size: 30px; font-variant-numeric: tabular-nums; font-weight: 600; letter-spacing: -.03em; line-height: 1; text-shadow: 0 0 12px color-mix(in srgb, var(--codey-usage-accent) 35%, transparent); white-space: nowrap; }
-      #${accountUsageId} .codey-usage-unit { margin-inline-start: 1px; font-size: .5em; font-weight: 600; letter-spacing: 0; opacity: .85; }
-      #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; box-shadow: inset 0 0.5px 1px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .25)); }
-      #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, color-mix(in srgb, var(--codey-usage-accent) 80%, white 20%), var(--codey-usage-accent)); box-shadow: 0 0 6px color-mix(in srgb, var(--codey-usage-accent) 45%, transparent), inset 0 0.5px 0 rgba(255, 255, 255, .4); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; transition: transform .25s ease-out; }
-      #${accountUsageId} .codey-usage-reset { display: block; grid-area: 2 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: color-mix(in srgb, var(--codey-usage-ink) 62%, transparent); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 500; line-height: 1.3; white-space: nowrap; }
-      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#3478f6, #72a8ff); --codey-usage-accent-bg: light-dark(rgba(52, 120, 246, .12), rgba(114, 168, 255, .20)); }
-      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#d68100, #ffc05c); --codey-usage-accent-bg: light-dark(rgba(214, 129, 0, .14), rgba(255, 192, 92, .20)); }
-      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#f04452, #ff7d89); --codey-usage-accent-bg: light-dark(rgba(240, 68, 82, .14), rgba(255, 125, 137, .22)); }
+      #${accountUsageId} .codey-usage-plan-tag { flex: 0 0 auto; overflow: hidden; max-width: 48%; border: 1px solid color-mix(in srgb, #0a84ff 28%, transparent); border-radius: 999px; padding: 1.5px 6.5px; background: color-mix(in srgb, #0a84ff 13%, transparent); color: light-dark(#0068cc, #69b1ff); font-size: 10px; font-weight: 650; letter-spacing: .01em; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; box-shadow: inset 0 1px 0 light-dark(rgba(255, 255, 255, .65), rgba(255, 255, 255, .14)); }
+      #${accountUsageId} .codey-usage-plan-tag[data-plan="plus"] { border-color: light-dark(#8fd1c1, #37695e); background: linear-gradient(135deg, light-dark(#ebfaf6, #1f4a42), light-dark(#d5f2ea, #15352f)); color: light-dark(#0d6e66, #99e2ce); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier] { display: inline-flex; align-items: center; gap: 3px; padding-inline: 5.5px 6.5px; }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier]::before { content: ""; flex: 0 0 auto; width: 10.5px; height: 10.5px; background: currentColor; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6'/%3E%3C/svg%3E") no-repeat center / contain; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6'/%3E%3C/svg%3E") no-repeat center / contain; }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="100"] { border-color: light-dark(#94a3b8, #64748b); background: linear-gradient(135deg, light-dark(#f8fafc, #475569) 0%, light-dark(#e2e8f0, #334155) 52%, light-dark(#cbd5e1, #1e293b) 100%); color: light-dark(#1e293b, #f1f5f9); box-shadow: inset 0 1px 0 light-dark(rgba(255, 255, 255, .85), rgba(255, 255, 255, .2)), 0 1px 2.5px light-dark(rgba(100, 116, 139, .18), rgba(0, 0, 0, .3)); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="200"] { border-color: light-dark(#d4a134, #b88a2e); background: linear-gradient(135deg, light-dark(#fff3c4, #634816) 0%, light-dark(#f7d774, #46310d) 52%, light-dark(#e8b949, #332208) 100%); color: light-dark(#5c3904, #ffe299); box-shadow: inset 0 1px 0 light-dark(rgba(255, 255, 255, .78), rgba(255, 232, 163, .28)), 0 1px 3px light-dark(rgba(212, 161, 52, .26), rgba(0, 0, 0, .35)); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="500"] { border-color: light-dark(#c69d45, #d4ac54); background: linear-gradient(135deg, light-dark(#3a2d24, #46362b) 0%, light-dark(#1f1814, #281f19) 55%, light-dark(#120e0c, #17120f) 100%); color: light-dark(#ffe4a0, #ffebb5); box-shadow: inset 0 1px 0 rgba(255, 234, 184, .32), 0 1.5px 3.5px rgba(18, 14, 12, .26); }
+      #${accountUsageId} .codey-usage-value { display: block; grid-area: 1 / 2 / 3 / 3; align-self: center; color: var(--codey-usage-accent); font-family: "Codey Chakra Petch", "DIN Alternate", "Bahnschrift", monospace; font-size: 23px; font-variant-numeric: tabular-nums; font-weight: 700; letter-spacing: -.01em; line-height: 1; white-space: nowrap; }
+      #${accountUsageId} .codey-usage-unit { margin-inline-start: 1.5px; font-size: .56em; font-weight: 700; letter-spacing: 0; opacity: .78; }
+      #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; }
+      #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: var(--codey-usage-accent); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; transition: transform .25s ease-out; }
+      #${accountUsageId} .codey-usage-reset { display: block; grid-area: 2 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--codey-usage-muted); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 450; line-height: 1.3; white-space: nowrap; }
+      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#2e6be6, #6ba4ff); --codey-usage-accent-bg: light-dark(rgba(46, 107, 230, .11), rgba(107, 164, 255, .18)); }
+      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#c87600, #f5b34c); --codey-usage-accent-bg: light-dark(rgba(200, 118, 0, .13), rgba(245, 179, 76, .20)); }
+      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#dc3545, #ff6b78); --codey-usage-accent-bg: light-dark(rgba(220, 53, 69, .13), rgba(255, 107, 120, .20)); }
       #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 8px; bottom: calc(100% + 7px); left: 8px; box-sizing: border-box; min-width: 0; padding: 14px 15px 15px; border: 0; border-radius: 14px; background: light-dark(#ffffff, #222226); box-shadow: 0 18px 44px -10px light-dark(rgba(20, 40, 70, .2), rgba(0, 0, 0, .6)), 0 4px 14px -4px light-dark(rgba(20, 40, 70, .1), rgba(0, 0, 0, .4)); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(6px) scale(.97); transition: opacity .2s cubic-bezier(.16, 1, .3, 1), transform .2s cubic-bezier(.16, 1, .3, 1), visibility .2s cubic-bezier(.16, 1, .3, 1); visibility: hidden; }
       #${accountUsageId}:hover .codey-usage-details, #${accountUsageId}:focus-visible .codey-usage-details { opacity: 1; transform: translateY(0) scale(1); visibility: visible; pointer-events: auto; }
       #${accountUsageId} .codey-usage-details::after { content: ""; position: absolute; inset: 100% 0 auto; height: 9px; }
@@ -198,11 +210,11 @@
       #${accountUsageId} .codey-usage-detail-label { overflow: hidden; font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-value { margin-inline-start: auto; font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-row[data-tone] .codey-usage-detail-value { padding: 1.5px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--codey-usage-accent) 30%, transparent); background: linear-gradient(180deg, light-dark(rgba(255, 255, 255, .35), rgba(255, 255, 255, .12)) 0%, transparent 100%), var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10.5px; font-weight: 650; box-shadow: inset 0 1px 0.5px light-dark(rgba(255, 255, 255, .7), rgba(255, 255, 255, .25)), 0 1px 3px light-dark(rgba(0, 0, 0, .05), rgba(0, 0, 0, .2)); }
-      #${accountUsageId} .codey-usage-detail-row .codey-usage-meter { height: 5px; min-height: 5px; max-height: 5px; border-radius: 999px; background: var(--codey-usage-track); box-shadow: inset 0 1px 2px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .3)); }
+      #${accountUsageId} .codey-usage-detail-row .codey-usage-meter { height: 5px; min-height: 5px; max-height: 5px; border-radius: 999px; background: var(--codey-usage-track); }
       #${accountUsageId} .codey-usage-detail-reset { flex: 0 1 auto; margin-inline-start: auto; overflow: hidden; color: color-mix(in srgb, var(--codey-usage-ink) 78%, transparent); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-gauge { display: flex; min-width: 0; align-items: center; gap: 9px; margin-top: 8px; }
       #${accountUsageId} .codey-usage-detail-gauge .codey-usage-meter { flex: 1 1 auto; margin-top: 0; }
-      #${accountUsageId} .codey-usage-detail-percent { flex: 0 0 auto; color: var(--codey-usage-accent); font-size: 16px; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1.1; text-shadow: 0 0 12px color-mix(in srgb, var(--codey-usage-accent) 35%, transparent); white-space: nowrap; }
+      #${accountUsageId} .codey-usage-detail-percent { flex: 0 0 auto; color: var(--codey-usage-accent); font-family: "Codey Chakra Petch", "DIN Alternate", "Bahnschrift", monospace; font-size: 15.5px; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1.1; white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-meta { flex-wrap: wrap; margin-top: 6px; gap: 3px 8px; color: color-mix(in srgb, var(--codey-usage-ink) 66%, transparent); font-size: 10.5px; font-variant-numeric: tabular-nums; line-height: 1.35; }
       #${accountUsageId} .codey-usage-detail-meta span { white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-meta span + span { margin-inline-start: auto; }
@@ -715,7 +727,7 @@
     ? "critical"
     : remaining <= 40 ? "warning" : remaining <= 70 ? "normal" : "healthy";
 
-  const accountUsageWindowSegment = (window, kind, plan = "", creditDot = false, borderProgress = false) => {
+  const accountUsageWindowSegment = (window, kind, plan = "", creditDot = false, singleWindow = false) => {
     if (!window || accountUsageWindowKind(window) !== kind) return null;
     const proTier = /^Pro (100|200|500)$/.exec(plan)?.[1];
     const remaining = Math.max(0, Math.min(100, 100 - Number(window.usedPercent)));
@@ -723,23 +735,23 @@
     const ariaLabel = kind === "weekly" ? "周额度" : "5 小时额度";
     const label = kind === "weekly" ? "每周" : "5 小时";
     const reset = accountUsageResetLabel(window.resetsAt);
-    const dayTime = accountUsageDayTimeLabel(window.resetsAt, borderProgress);
-    const resetTime = borderProgress
+    const dayTime = accountUsageDayTimeLabel(window.resetsAt, singleWindow);
+    const resetTime = singleWindow
       ? dayTime && `${dayTime} 重置`
       : dayTime.replace(/^(\d+)月(\d+)日/, "$1/$2");
     const tone = accountUsageTone(roundedRemaining);
     return {
       aria: `${ariaLabel}剩余 ${roundedRemaining}%${reset ? `，${reset}` : ""}`,
       html: `
-        <span class="codey-usage-segment" data-window="${kind}" data-tone="${tone}">
+        <span class="codey-usage-segment" data-window="${kind}" data-tone="${tone}"${singleWindow ? ` style="--codey-usage-remaining:${remaining / 100}"` : ""}>
           <span class="codey-usage-overview">
             ${creditDot ? `<span class="codey-usage-credit-dot" aria-hidden="true"></span>` : ""}
             ${plan ? `<span class="codey-usage-plan-tag"${plan === "Plus" ? ' data-plan="plus"' : ""}${proTier ? ` data-pro-tier="${proTier}"` : ""}>${escapeAccountUsageText(plan)}</span>` : ""}
             <span class="codey-usage-window-label">${label}</span>
           </span>
           <span class="codey-usage-value">${roundedRemaining}<span class="codey-usage-unit">%</span></span>
+          ${singleWindow ? `<span class="codey-usage-meter" aria-hidden="true"><span></span></span>` : ""}
           ${resetTime ? `<span class="codey-usage-reset">${resetTime}</span>` : ""}
-          ${borderProgress ? `<svg class="codey-usage-border-progress" aria-hidden="true" focusable="false"${remaining === 0 ? ' opacity="0"' : ""}><rect x="1" y="1" rx="15" pathLength="100" stroke-dasharray="${remaining} 100" /></svg>` : ""}
         </span>
       `,
     };
@@ -1348,6 +1360,7 @@
     disarmSessionToolsInteraction();
     bootstrapObserver?.disconnect();
     bootstrapObserver = null;
+    ensureOpenStateObserver?.();
     return true;
   };
 
@@ -1565,20 +1578,74 @@
     if (!raw || !raw.includes(token)) return false;
     return raw.trim().split(/\s+/).includes(token);
   };
+  const tokenMatchesOpenWithinDirectClass = (token) =>
+    Boolean(
+      token && (
+        openWithinDynamicDirectClasses.has(token)
+        || openWithinHashedCardClassPattern.test(token)
+      ),
+    );
+  const elementHasOpenWithinDirectClass = (element) => {
+    const raw = elementClassText(element);
+    if (!raw) return false;
+    for (const token of openWithinDynamicDirectClasses) {
+      if (raw.includes(token) && elementHasClass(element, token)) return true;
+    }
+    if (!raw.includes("card-")) return false;
+    return raw.trim().split(/\s+/).some((token) => {
+      if (!tokenMatchesOpenWithinDirectClass(token)) return false;
+      openWithinDynamicDirectClasses.add(token);
+      openWithinDynamicAncestorClasses.add(token);
+      return true;
+    });
+  };
+  const tokenMatchesOpenWithinAncestor = (token, isButton) => {
+    if (!token) return false;
+    if (
+      token === "group"
+      || token.startsWith("group/")
+      || openWithinDynamicAncestorClasses.has(token)
+      || openWithinHashedCardClassPattern.test(token)
+    ) {
+      openWithinDynamicAncestorClasses.add(token);
+      return true;
+    }
+    if (token.includes("button[data-state=open]")) {
+      openWithinDynamicButtonAncestorClasses.add(token);
+      return Boolean(isButton);
+    }
+    if (
+      token.includes("[data-state=open]")
+      || token.includes("data-[state=open]")
+    ) {
+      openWithinDynamicAncestorClasses.add(token);
+      return true;
+    }
+    return Boolean(isButton && openWithinDynamicButtonAncestorClasses.has(token));
+  };
   const elementMatchesOpenWithinAncestor = (element, isButton) => {
     const raw = elementClassText(element);
     if (!raw) return false;
-    for (const token of openWithinAncestorClasses) {
+    for (const token of openWithinDynamicAncestorClasses) {
       if (raw.includes(token) && elementHasClass(element, token)) return true;
     }
-    if (
-      isButton
-      && raw.includes(openWithinButtonAncestorClass)
-      && elementHasClass(element, openWithinButtonAncestorClass)
-    ) {
-      return true;
+    if (isButton) {
+      for (const token of openWithinDynamicButtonAncestorClasses) {
+        if (raw.includes(token) && elementHasClass(element, token)) return true;
+      }
     }
-    return false;
+    if (
+      !raw.includes("group/")
+      && !raw.includes("data-state=open")
+      && !raw.includes("state=open")
+      && !raw.includes("card-")
+    ) {
+      return false;
+    }
+    return raw
+      .trim()
+      .split(/\s+/)
+      .some((token) => tokenMatchesOpenWithinAncestor(token, isButton));
   };
   const isElementConnected = (element) => {
     if (!element || element.isConnected === false) return false;
@@ -1603,8 +1670,8 @@
       if (
         parent
         && (
-          elementHasClass(parent, openWithinDirectCardClass)
-          || elementHasClass(parent.parentElement, openWithinDirectCardClass)
+          elementHasOpenWithinDirectClass(parent)
+          || elementHasOpenWithinDirectClass(parent.parentElement)
         )
       ) {
         nextContainers.add(parent);
@@ -1680,16 +1747,74 @@
       syncOpenWithinContainers();
     }
   };
+  const unescapeCssClassToken = (rawToken) =>
+    String(rawToken || "")
+      .replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_, hex) => {
+        const codePoint = Number.parseInt(hex, 16);
+        return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : "";
+      })
+      .replace(/\\(.)/g, "$1");
+  const openWithinDirectSelectorClassPattern =
+    /\.((?:\\[0-9a-fA-F]{1,6}\s?|\\.|[A-Za-z0-9_-])+)\s*>\s*\*\s*\)/g;
+  const openWithinAncestorSelectorClassPattern =
+    /\.((?:\\[0-9a-fA-F]{1,6}\s?|\\.|[A-Za-z0-9_-])+)(?:\)|\s)*?(?=:is\([^)]*\[data-codey-open-within\]|\[data-codey-open-within\])/g;
+  const harvestOpenWithinClassesFromText = (text) => {
+    if (typeof text !== "string" || !text.includes(openWithinAttribute)) {
+      return false;
+    }
+    let added = false;
+    for (const match of text.matchAll(openWithinDirectSelectorClassPattern)) {
+      const token = unescapeCssClassToken(match[1]);
+      if (!token) continue;
+      if (!openWithinDynamicDirectClasses.has(token)) {
+        openWithinDynamicDirectClasses.add(token);
+        added = true;
+      }
+      if (!openWithinDynamicAncestorClasses.has(token)) {
+        openWithinDynamicAncestorClasses.add(token);
+        added = true;
+      }
+    }
+    for (const match of text.matchAll(openWithinAncestorSelectorClassPattern)) {
+      const token = unescapeCssClassToken(match[1]);
+      if (!token) continue;
+      const targetSet = token.includes("button[data-state=open]")
+        ? openWithinDynamicButtonAncestorClasses
+        : openWithinDynamicAncestorClasses;
+      if (!targetSet.has(token)) {
+        targetSet.add(token);
+        added = true;
+      }
+    }
+    return added;
+  };
+  const harvestOpenWithinClassesFromRuleList = (rules) => {
+    if (!rules) return false;
+    let added = false;
+    for (let index = 0; index < rules.length; index += 1) {
+      const rule = rules[index];
+      if (!rule) continue;
+      if (harvestOpenWithinClassesFromText(rule.selectorText || rule.cssText)) {
+        added = true;
+      }
+      if (rule.cssRules && harvestOpenWithinClassesFromRuleList(rule.cssRules)) {
+        added = true;
+      }
+    }
+    return added;
+  };
   const rewriteOpenStateCssText = (cssText) => {
     if (typeof cssText !== "string" || !cssText.includes("data-state")) {
       return cssText;
     }
-    return cssText
+    const rewritten = cssText
       .replace(
         openStateCssAriaAndDataStateHasPattern,
         `:is(:has([aria-expanded=true]),[${openWithinAttribute}])`,
       )
       .replace(openStateCssDataStateHasPattern, `[${openWithinAttribute}]`);
+    harvestOpenWithinClassesFromText(rewritten);
+    return rewritten;
   };
   const selectorHasOpenStateHas = (selectorText) =>
     typeof selectorText === "string"
@@ -1711,6 +1836,7 @@
     const sheets = document.styleSheets;
     if (!sheets || typeof sheets.length !== "number") return 0;
     let patchedCount = 0;
+    let harvestedNewClasses = false;
     for (let index = 0; index < sheets.length; index += 1) {
       const sheet = sheets[index];
       const ownerNode = sheet?.ownerNode;
@@ -1732,6 +1858,9 @@
       }
       const lastRuleText = String(rules[rules.length - 1]?.cssText || "");
       if (lastRuleText.includes(openStateCssPatchedMarker)) {
+        if (harvestOpenWithinClassesFromRuleList(rules)) {
+          harvestedNewClasses = true;
+        }
         ownerNode.setAttribute?.(openStateCssPatchedDatasetKey, "true");
         continue;
       }
@@ -1752,6 +1881,7 @@
         ownerNode.textContent = nextCssText;
         ownerNode.setAttribute?.(openStateCssPatchedDatasetKey, "true");
         patchedCount += 1;
+        harvestedNewClasses = true;
         continue;
       }
       if (tagName === "LINK" && ownerNode.parentElement) {
@@ -1776,7 +1906,11 @@
         } catch {}
         ownerNode.remove?.();
         patchedCount += 1;
+        harvestedNewClasses = true;
       }
+    }
+    if (harvestedNewClasses && openStateElements.size > 0) {
+      syncOpenWithinContainers();
     }
     return patchedCount;
   };
@@ -1792,8 +1926,12 @@
     if (rel && !rel.split(/\s+/).includes("stylesheet")) return;
     if (element.sheet) {
       patchLoadedOpenStateStylesheets();
-      return;
+      if (element.getAttribute?.(openStateCssPatchedDatasetKey) === "true") {
+        return;
+      }
     }
+    if (boundStylesheetLinks.has(element)) return;
+    boundStylesheetLinks.add(element);
     element.addEventListener?.(
       "load",
       () => {
@@ -1803,10 +1941,11 @@
     );
   };
   patchLoadedOpenStateStylesheets();
+  for (const link of queryWithin(document.documentElement, "link")) {
+    bindStylesheetPatchOnLink(link);
+  }
   collectOpenStateElements(document);
-  const handleBootstrapMutations = (mutations) =>
-    codeyTimed("renderer-inject.bootstrapMutations", mutations?.length ?? 0, () => handleBootstrapMutationsImpl(mutations));
-  const handleBootstrapMutationsImpl = (mutations) => {
+  const handleOpenStateMutationsImpl = (mutations) => {
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
@@ -1859,6 +1998,43 @@
         collectAddedOpenStateElements(mutation.addedNodes);
       }
     }
+  };
+  const handleOpenStateMutations = (mutations) =>
+    codeyTimed(
+      "renderer-inject.openStateMutations",
+      mutations?.length ?? 0,
+      () => handleOpenStateMutationsImpl(mutations),
+    );
+  const openStateMutationOptions = {
+    attributes: true,
+    attributeFilter: ["data-state"],
+    childList: true,
+    subtree: true,
+  };
+  ensureOpenStateObserver = () => {
+    if (openStateObserver || bootstrapObserver) return;
+    const dispatcher = window.__codeyMutationDispatcher;
+    if (typeof dispatcher?.subscribe === "function") {
+      const unsubscribe = dispatcher.subscribe(
+        handleOpenStateMutations,
+        openStateMutationOptions,
+      );
+      if (dispatcher.snapshot?.().observerInstalled) {
+        openStateObserver = { disconnect: unsubscribe };
+        return;
+      }
+      unsubscribe?.();
+    }
+    if (typeof MutationObserver === "function" && document.documentElement) {
+      const observer = new MutationObserver(handleOpenStateMutations);
+      observer.observe(document.documentElement, openStateMutationOptions);
+      openStateObserver = observer;
+    }
+  };
+  const handleBootstrapMutations = (mutations) =>
+    codeyTimed("renderer-inject.bootstrapMutations", mutations?.length ?? 0, () => handleBootstrapMutationsImpl(mutations));
+  const handleBootstrapMutationsImpl = (mutations) => {
+    handleOpenStateMutationsImpl(mutations);
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target

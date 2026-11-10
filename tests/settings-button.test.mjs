@@ -785,8 +785,10 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(usage.innerHTML, /Credits 余额|剩余重置次数|codey-usage-credit-dot/);
   assert.equal(usage.dataset.creditExpiring, undefined);
   assert.match(usage.innerHTML, /class="codey-usage-reset">11月11日 15:03 重置<\/span>/);
-  assert.match(usage.innerHTML, /class="codey-usage-border-progress" aria-hidden="true" focusable="false"/);
-  assert.match(usage.innerHTML, /pathLength="100" stroke-dasharray="15 100"/);
+  assert.doesNotMatch(usage.innerHTML, /codey-usage-border-progress/);
+  const singleWeeklySummary = usage.innerHTML.split('class="codey-usage-details"')[0];
+  assert.match(singleWeeklySummary, /style="--codey-usage-remaining:0\.15"/);
+  assert.match(singleWeeklySummary, /class="codey-usage-meter" aria-hidden="true"><span><\/span><\/span>/);
 
   accountUsageResult = { status: "error", message: "官方额度接口返回 401", authGeneration: 1 };
   appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
@@ -895,8 +897,9 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     await window.__codeyRefreshAccountUsage();
     const summary = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
     assert.ok(summary.includes(`data-window="weekly" data-tone="${tone}"`));
-    assert.ok(summary.includes(`stroke-dasharray="${remaining} 100"`));
-    assert.equal(summary.includes('opacity="0"'), remaining === 0, "zero remaining hides the rounded border endpoint");
+    assert.ok(summary.includes(`style="--codey-usage-remaining:${remaining / 100}"`));
+    assert.ok(summary.includes('class="codey-usage-meter" aria-hidden="true"><span></span></span>'));
+    assert.doesNotMatch(summary, /codey-usage-border-progress/);
   }
 
   accountUsageResult = {
@@ -905,12 +908,12 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   };
   await window.__codeyRefreshAccountUsage();
   assert.equal(remountedUsage.dataset.windowCount, "2");
-  assert.doesNotMatch(remountedUsage.innerHTML, /codey-usage-border-progress/);
+  assert.doesNotMatch(remountedUsage.innerHTML.split('class="codey-usage-details"')[0], /codey-usage-meter/);
 
   accountUsageResult = { ...accountUsageResult, primary: null };
   await window.__codeyRefreshAccountUsage();
   assert.equal(remountedUsage.dataset.windowCount, "1");
-  assert.doesNotMatch(remountedUsage.innerHTML, /codey-usage-border-progress/);
+  assert.doesNotMatch(remountedUsage.innerHTML.split('class="codey-usage-details"')[0], /codey-usage-meter/);
   assert.match(remountedUsage.innerHTML, /data-window="five-hour"/);
 
   accountUsageResult = { status: "disabled" };
