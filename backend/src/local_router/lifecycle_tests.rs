@@ -20,7 +20,6 @@ struct CapturedDownstream {
     cancel_compaction_delivery: bool,
 }
 
-#[async_trait]
 impl ResponsesDownstream for CapturedDownstream {
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         self.probe.as_ref()

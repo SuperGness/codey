@@ -345,7 +345,7 @@ async fn forward_codex_exit_to_codey_shutdown(
         #[cfg(windows)]
         Some(&crash_recovery::SystemRecovery),
         #[cfg(all(test, not(windows)))]
-        None,
+        None::<&crash_recovery::SystemRecovery>,
     )
     .await;
 }
@@ -354,7 +354,7 @@ async fn forward_codex_exit_with_operations(
     exit_state: Arc<AppState>,
     codex_exit: oneshot::Receiver<CodexExit>,
     runtime_generation: u64,
-    #[cfg(any(windows, test))] recovery: Option<&dyn crash_recovery::RecoveryOperations>,
+    #[cfg(any(windows, test))] recovery: Option<&impl crash_recovery::RecoveryOperations>,
 ) {
     let Ok(exit) = codex_exit.await else {
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(

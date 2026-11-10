@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 
+use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -71,11 +72,15 @@ pub(super) fn is_confirmed_windows_crash(exit: CodexExit) -> bool {
     }
 }
 
-#[async_trait::async_trait]
 pub(super) trait RecoveryOperations: Send + Sync {
     async fn session_is_interactive(&self) -> Result<bool, String>;
     async fn stop(&self, state: &Arc<AppState>) -> Result<(), String>;
-    async fn launch(&self, state: &Arc<AppState>, intent: u64) -> Result<RecoveryLaunch, String>;
+    // 启动流程会创建下一次退出监视任务；显式的 Send 返回类型用于解除循环类型推导。
+    fn launch<'a>(
+        &'a self,
+        state: &'a Arc<AppState>,
+        intent: u64,
+    ) -> BoxFuture<'a, Result<RecoveryLaunch, String>>;
 }
 
 pub(super) enum RecoveryLaunch {
@@ -97,7 +102,7 @@ impl std::fmt::Display for SessionNotInteractive {
 #[cfg(windows)]
 impl std::error::Error for SessionNotInteractive {}
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub(super) struct SystemRecovery;
 
 #[cfg(windows)]
@@ -118,7 +123,6 @@ pub(super) async fn query_current_session() -> anyhow::Result<bool> {
 }
 
 #[cfg(windows)]
-#[async_trait::async_trait]
 impl RecoveryOperations for SystemRecovery {
     async fn session_is_interactive(&self) -> Result<bool, String> {
         query_current_session()
@@ -130,16 +134,41 @@ impl RecoveryOperations for SystemRecovery {
         stop_codey_runtime_locked(state).await.map(|_| ())
     }
 
-    async fn launch(&self, state: &Arc<AppState>, intent: u64) -> Result<RecoveryLaunch, String> {
+    fn launch<'a>(
+        &'a self,
+        state: &'a Arc<AppState>,
+        intent: u64,
+    ) -> BoxFuture<'a, Result<RecoveryLaunch, String>> {
         // 不取消正在执行的启动 future；启动完成后由 intent 检查负责清理，
         // 避免在创建子进程之后丢弃 future，留下无法回收的进程。
-        match launch_codey_inner_locked_for_intent(state, Some(intent)).await {
-            Ok(_) => Ok(RecoveryLaunch::Started),
-            Err(error) if error.is::<SessionNotInteractive>() => {
-                Ok(RecoveryLaunch::SessionUnavailable)
+        Box::pin(async move {
+            match launch_codey_inner_locked_for_intent(state, Some(intent)).await {
+                Ok(_) => Ok(RecoveryLaunch::Started),
+                Err(error) if error.is::<SessionNotInteractive>() => {
+                    Ok(RecoveryLaunch::SessionUnavailable)
+                }
+                Err(error) => Err(format!("{error:#}")),
             }
-            Err(error) => Err(format!("{error:#}")),
-        }
+        })
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+impl RecoveryOperations for SystemRecovery {
+    async fn session_is_interactive(&self) -> Result<bool, String> {
+        unreachable!()
+    }
+
+    async fn stop(&self, _state: &Arc<AppState>) -> Result<(), String> {
+        unreachable!()
+    }
+
+    fn launch<'a>(
+        &'a self,
+        _state: &'a Arc<AppState>,
+        _intent: u64,
+    ) -> BoxFuture<'a, Result<RecoveryLaunch, String>> {
+        unreachable!()
     }
 }
 
@@ -222,7 +251,7 @@ impl RecoveryContext<'_> {
             .request_shutdown_with_reason(super::super::AppShutdownReason::RuntimeRestartFailed);
     }
 
-    async fn query(&mut self, operations: &dyn RecoveryOperations) -> Option<bool> {
+    async fn query(&mut self, operations: &impl RecoveryOperations) -> Option<bool> {
         if !self.active() {
             return None;
         }
@@ -263,7 +292,7 @@ impl RecoveryContext<'_> {
         Some(false)
     }
 
-    async fn wait_for_session(&mut self, operations: &dyn RecoveryOperations) -> bool {
+    async fn wait_for_session(&mut self, operations: &impl RecoveryOperations) -> bool {
         loop {
             match self.query(operations).await {
                 Some(true) => return true,
@@ -279,7 +308,7 @@ pub(super) async fn recover_codex_exit(
     generation: u64,
     intent: u64,
     exit: CodexExit,
-    operations: &dyn RecoveryOperations,
+    operations: &impl RecoveryOperations,
 ) {
     if !is_confirmed_windows_crash(exit) || !recovery_is_current(state, generation, intent) {
         return;

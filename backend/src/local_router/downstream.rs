@@ -8,7 +8,6 @@ use std::{
 #[cfg(test)]
 use tokio::io::AsyncWrite;
 
-#[async_trait]
 pub(crate) trait ResponsesDownstream: Send {
     async fn wait_for_admission<T, F>(&mut self, future: F) -> Result<T>
     where
@@ -160,7 +159,7 @@ where
         || downstream.event_stream_started()
         || downstream.compaction_disconnect_monitor()
     {
-        downstream.wait_for_upstream(future).await
+        Box::pin(downstream.wait_for_upstream(Box::pin(future))).await
     } else {
         Ok(future.await)
     }
@@ -224,7 +223,6 @@ where
     }
 }
 
-#[async_trait]
 impl<D> ResponsesDownstream for ObservedResponsesDownstream<'_, D>
 where
     D: ResponsesDownstream + ?Sized,
@@ -546,7 +544,6 @@ impl AsyncWrite for ControlledHttpWrite<'_> {
     }
 }
 
-#[async_trait]
 impl ResponsesDownstream for HttpResponsesDownstream {
     async fn wait_for_admission<T, F>(&mut self, future: F) -> Result<T>
     where

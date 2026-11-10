@@ -9,16 +9,20 @@ fn client_config(roots: RootCertStore) -> ClientConfig {
         .with_no_client_auth()
 }
 
-pub(super) fn connector() -> Connector {
+pub(crate) fn shared_client_config() -> Arc<ClientConfig> {
     // Keep the same Mozilla roots and TLS defaults as tungstenite. Sharing the
     // config retains rustls's bounded, server-name-scoped session ticket cache.
     // Early data remains disabled: Responses requests must never use TLS 0-RTT.
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    Connector::Rustls(Arc::clone(CONFIG.get_or_init(|| {
+    Arc::clone(CONFIG.get_or_init(|| {
         Arc::new(client_config(RootCertStore::from_iter(
             webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
         )))
-    })))
+    }))
+}
+
+pub(super) fn connector() -> Connector {
+    Connector::Rustls(shared_client_config())
 }
 
 #[cfg(test)]

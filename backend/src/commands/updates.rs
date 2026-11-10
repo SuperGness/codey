@@ -2298,7 +2298,7 @@ mod tests {
         let mut asset = asset_info(&valid_asset());
         asset.file_name = file_name.to_string();
         asset.size = contents.len() as u64;
-        asset.sha256 = format!("{:x}", Sha256::digest(contents));
+        asset.sha256 = crate::fs_util::sha256_hex(contents);
         UpdateCheck {
             current_version: "1.0.0".to_string(),
             latest_version: version.to_string(),

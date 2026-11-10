@@ -679,7 +679,6 @@ struct AdmissionDownstream {
     probe: Option<RouteRequestLogProbe>,
 }
 
-#[async_trait]
 impl ResponsesDownstream for AdmissionDownstream {
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         self.probe.as_ref()

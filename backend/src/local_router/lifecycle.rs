@@ -602,7 +602,6 @@ impl<D: ResponsesDownstream + ?Sized> LifecycleDownstream<'_, D> {
     }
 }
 
-#[async_trait]
 impl<D: ResponsesDownstream + ?Sized> ResponsesDownstream for LifecycleDownstream<'_, D> {
     async fn wait_for_admission<T, F>(&mut self, future: F) -> Result<T>
     where

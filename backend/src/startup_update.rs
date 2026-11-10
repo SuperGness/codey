@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-
 use crate::commands::{self, AppState, UpdateCandidate, UpdateDownload};
 use crate::native_update_ui::NativeUpdateUi;
 
@@ -21,7 +19,6 @@ enum CheckMode {
     AfterLaunchFailure,
 }
 
-#[async_trait]
 trait StartupUpdateUi: Send + Sync {
     fn show_status(&self, message: &str) -> Result<(), String>;
     fn hide_status(&self) -> Result<(), String>;
@@ -34,7 +31,6 @@ trait StartupUpdateUi: Send + Sync {
     async fn show_update_failure(&self, error: &str) -> Result<(), String>;
 }
 
-#[async_trait]
 impl StartupUpdateUi for NativeUpdateUi {
     fn show_status(&self, message: &str) -> Result<(), String> {
         NativeUpdateUi::show_status(self, message)
@@ -58,7 +54,6 @@ impl StartupUpdateUi for NativeUpdateUi {
     }
 }
 
-#[async_trait]
 trait StartupUpdateBackend: Send + Sync {
     async fn auto_check_enabled(&self) -> bool;
     async fn check(&self) -> Result<UpdateCandidate, String>;
@@ -70,7 +65,6 @@ struct LiveBackend<'a> {
     state: &'a Arc<AppState>,
 }
 
-#[async_trait]
 impl StartupUpdateBackend for LiveBackend<'_> {
     async fn auto_check_enabled(&self) -> bool {
         self.state.config.read().await.codey_update_policy != crate::config::CodeyUpdatePolicy::Off
@@ -217,7 +211,6 @@ mod tests {
         status_error: AtomicBool,
     }
 
-    #[async_trait]
     impl StartupUpdateUi for FakeUi {
         fn show_status(&self, message: &str) -> Result<(), String> {
             if self.status_error.load(Ordering::Relaxed) {
@@ -260,7 +253,6 @@ mod tests {
         install_error: Option<String>,
     }
 
-    #[async_trait]
     impl StartupUpdateBackend for FakeBackend {
         async fn auto_check_enabled(&self) -> bool {
             self.auto_check_enabled.load(Ordering::Relaxed)

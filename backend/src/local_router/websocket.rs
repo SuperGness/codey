@@ -1594,7 +1594,6 @@ impl WebSocketResponsesDownstream {
     }
 }
 
-#[async_trait]
 impl ResponsesDownstream for WebSocketResponsesDownstream {
     async fn wait_for_admission<T, F>(&mut self, future: F) -> Result<T>
     where

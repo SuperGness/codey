@@ -57,7 +57,6 @@ impl Default for FakeRecovery {
     }
 }
 
-#[async_trait::async_trait]
 impl RecoveryOperations for FakeRecovery {
     async fn session_is_interactive(&self) -> Result<bool, String> {
         self.queries.fetch_add(1, Ordering::SeqCst);
@@ -88,31 +87,37 @@ impl RecoveryOperations for FakeRecovery {
         Ok(())
     }
 
-    async fn launch(&self, state: &Arc<AppState>, intent: u64) -> Result<RecoveryLaunch, String> {
-        if self.relock_during_preparation.swap(false, Ordering::SeqCst) {
-            self.interactive.store(false, Ordering::SeqCst);
-            return Ok(RecoveryLaunch::SessionUnavailable);
-        }
-        self.launches.fetch_add(1, Ordering::SeqCst);
-        #[cfg(unix)]
-        if self.spawn_before_failure.load(Ordering::SeqCst) {
-            *self.child.lock().await = Some(
-                tokio::process::Command::new("sh")
-                    .args(["-c", "exec sleep 60"])
-                    .kill_on_drop(true)
-                    .spawn()
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        self.launch_entered.notify_one();
-        if let Some(release) = self.launch_release.lock().await.take() {
-            let _ = release.await;
-        }
-        if self.fail_launch.load(Ordering::SeqCst) || *state.runtime_intent.borrow() != intent {
-            return Err("injected launch failure or cancellation".into());
-        }
-        state.runtime_generation.fetch_add(1, Ordering::SeqCst);
-        Ok(RecoveryLaunch::Started)
+    fn launch<'a>(
+        &'a self,
+        state: &'a Arc<AppState>,
+        intent: u64,
+    ) -> BoxFuture<'a, Result<RecoveryLaunch, String>> {
+        Box::pin(async move {
+            if self.relock_during_preparation.swap(false, Ordering::SeqCst) {
+                self.interactive.store(false, Ordering::SeqCst);
+                return Ok(RecoveryLaunch::SessionUnavailable);
+            }
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            #[cfg(unix)]
+            if self.spawn_before_failure.load(Ordering::SeqCst) {
+                *self.child.lock().await = Some(
+                    tokio::process::Command::new("sh")
+                        .args(["-c", "exec sleep 60"])
+                        .kill_on_drop(true)
+                        .spawn()
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            self.launch_entered.notify_one();
+            if let Some(release) = self.launch_release.lock().await.take() {
+                let _ = release.await;
+            }
+            if self.fail_launch.load(Ordering::SeqCst) || *state.runtime_intent.borrow() != intent {
+                return Err("injected launch failure or cancellation".into());
+            }
+            state.runtime_generation.fetch_add(1, Ordering::SeqCst);
+            Ok(RecoveryLaunch::Started)
+        })
     }
 }
 

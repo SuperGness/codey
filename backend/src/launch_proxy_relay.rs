@@ -87,8 +87,26 @@ impl UpstreamProxy {
     }
 }
 
-fn percent_decode(value: &str) -> Vec<u8> {
-    percent_encoding::percent_decode_str(value).collect()
+pub(crate) fn percent_decode(value: &str) -> Vec<u8> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (
+                (bytes[index + 1] as char).to_digit(16),
+                (bytes[index + 2] as char).to_digit(16),
+            )
+        {
+            decoded.push(((high << 4) | low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    decoded
 }
 
 /// URL 中的 IPv6 主机带方括号；网络连接与 SOCKS 地址编码使用裸 IP。
@@ -290,21 +308,7 @@ async fn open_upstream_stream(upstream: &UpstreamProxy) -> anyhow::Result<Upstre
 }
 
 fn tls_connector() -> tokio_rustls::TlsConnector {
-    static CONNECTOR: std::sync::OnceLock<tokio_rustls::TlsConnector> = std::sync::OnceLock::new();
-    CONNECTOR
-        .get_or_init(|| {
-            let roots =
-                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let config = rustls::ClientConfig::builder_with_provider(
-                rustls::crypto::ring::default_provider().into(),
-            )
-            .with_safe_default_protocol_versions()
-            .expect("rustls 默认协议版本可用")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-            tokio_rustls::TlsConnector::from(Arc::new(config))
-        })
-        .clone()
+    tokio_rustls::TlsConnector::from(crate::local_router::shared_client_config())
 }
 
 async fn accept_loop(listener: TcpListener, upstream: Arc<UpstreamProxy>) {

@@ -336,10 +336,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -387,10 +385,8 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 name = "codey"
 version = "1.2.5"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "arc-swap",
- "async-trait",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -412,7 +408,6 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
- "percent-encoding",
  "qrcode",
  "reqwest",
  "rfd",
@@ -430,7 +425,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml_edit",
  "uuid",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.9",
  "windows 0.58.0",
  "winres",
  "zip",
@@ -496,18 +491,6 @@ dependencies = [
  "uuid",
  "windows 0.58.0",
  "zip",
-]
-
-[[package]]
-name = "codey-runtime-data"
-version = "1.2.5"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "codey-runtime-core",
- "rusqlite",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -1401,7 +1384,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -2540,7 +2522,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3254,7 +3235,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

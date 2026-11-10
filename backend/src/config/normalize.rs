@@ -144,9 +144,9 @@ pub(crate) fn validate_codex_launch_proxy(value: &str) -> Result<(), String> {
         if url.port().is_none() {
             return Err("Codex 启动代理的 SOCKS 地址必须带端口".into());
         }
-        let username = percent_encoding::percent_decode_str(url.username()).collect::<Vec<u8>>();
-        let password = percent_encoding::percent_decode_str(url.password().unwrap_or_default())
-            .collect::<Vec<u8>>();
+        let username = crate::launch_proxy_relay::percent_decode(url.username());
+        let password =
+            crate::launch_proxy_relay::percent_decode(url.password().unwrap_or_default());
         if crate::launch_proxy_relay::socks_credentials_too_long(&username, &password) {
             return Err("Codex 启动代理的 SOCKS 用户名或密码不能超过 255 字节".into());
         }

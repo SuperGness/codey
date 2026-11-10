@@ -1028,7 +1028,6 @@ impl ControlledSseDownstream {
     }
 }
 
-#[async_trait]
 impl ResponsesDownstream for ControlledSseDownstream {
     fn event_stream_started(&self) -> bool {
         self.inner.event_stream_started()

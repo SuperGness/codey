@@ -1178,7 +1178,6 @@ async fn gateway_compaction_handoff_failures_keep_json_and_stream_contracts() {
 #[tokio::test]
 async fn gateway_compaction_cancelled_errors_return_without_logging_or_writing() {
     struct UntouchedDownstream;
-    #[async_trait]
     impl ResponsesDownstream for UntouchedDownstream {
         fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
             panic!("cancelled requests must not be observed as upstream failures")

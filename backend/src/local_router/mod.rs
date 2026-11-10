@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::client::proxy::matcher::Matcher as SystemProxyMatcher;
@@ -255,6 +254,7 @@ pub(crate) use upstream_response::*;
 pub(crate) use websocket::*;
 pub(crate) use websocket_context::*;
 pub(crate) use websocket_ingress::*;
+pub(crate) use websocket_tls::shared_client_config;
 pub(crate) use xai::*;
 
 #[cfg(test)]

@@ -8,6 +8,10 @@ default-run = "codey"
 [package.metadata.cargo-machete]
 ignored = ["winres"]
 
+[features]
+default = ["unit-tests"]
+unit-tests = []
+
 [lib]
 name = "codey_lib"
 crate-type = ["rlib"]
@@ -23,14 +27,13 @@ path = "src/bin/codey-fastctx.rs"
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
-async-trait = "0.1"
 base64.workspace = true
 bytes.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono.workspace = true
 codey-runtime-core = { path = "../vendor/CodeyRuntime/crates/codey-runtime-core" }
 codey-plugin-sdk = { path = "../crates/codey-plugin-sdk" }
 codey-codex-extensions = { path = "../crates/codey-codex-extensions" }
-libloading = "0.8"
+libloading.workspace = true
 zip.workspace = true
 tempfile.workspace = true
 directories.workspace = true
@@ -41,13 +44,12 @@ http-body = "1"
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"], default-features = false }
 memchr = "2"
 notify = "8.2"
-percent-encoding = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { workspace = true, features = ["socks", "gzip"] }
 ring = "0.17"
 rusqlite = { workspace = true, features = ["functions", "hooks"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-semver = "1"
+semver.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 sha2.workspace = true
@@ -57,11 +59,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tokio-tungstenite.workspace = true
 toml_edit.workspace = true
 uuid.workspace = true
-webpki-roots = "0.26"
-zstd = "0.13"
+webpki-roots = "1"
+zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
-aho-corasick = "1"
 flate2 = "1"
 tokio = { workspace = true, features = ["test-util"] }
 
@@ -79,14 +80,13 @@ winres = "0.1"
 rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
 windows = { version = "0.58", default-features = false, features = [
   "Wdk_System_SystemServices",
+  "Wdk_System_Threading",
   "Win32_Foundation",
-  "Win32_Globalization",
   "Win32_Security",
   "Win32_Graphics_Gdi",
   "Win32_Networking_WinSock",
   "Win32_Storage_FileSystem",
   "Win32_Storage_Packaging_Appx",
-  "Win32_System_LibraryLoader",
   "Win32_System_Com",
   "Win32_System_Console",
   "Win32_System_IO",
