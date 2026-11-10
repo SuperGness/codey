@@ -1933,7 +1933,7 @@
     window.__codeySharedRuntime.reactInternalKeys(element, { includeContainer: true });
 
   const reactModelStateNodes = (forceScan = false) => {
-    const nodes = [
+    const primary = [
       document.body,
       document.documentElement,
       document.getElementById?.("root"),
@@ -1941,10 +1941,17 @@
         "[role='menu'], [role='dialog'], [role='listbox'], [data-radix-popper-content-wrapper]",
       ) || []),
     ].filter(Boolean);
+    const seen = new Set(primary);
+    const primaryCount = seen.size;
     if (forceScan) {
-      nodes.push(...Array.from(document.querySelectorAll?.("*") || []).slice(0, maxReactScanNodes));
+      const allNodes = document.querySelectorAll?.("*") || [];
+      const limit = Math.min(allNodes.length || 0, maxReactScanNodes);
+      for (let index = 0; index < limit; index += 1) {
+        const node = allNodes[index];
+        if (node) seen.add(node);
+      }
     }
-    return nodes.filter((node, index, all) => all.indexOf(node) === index);
+    return { nodes: [...seen], primaryCount };
   };
 
   const scanReactObjectGraph = (forceScan = false, discover = false) =>
@@ -1961,6 +1968,7 @@
       };
     }
     const queryClients = new Set(knownModelQueryClients);
+    const initialClientCount = queryClients.size;
     const visited = new WeakSet();
     let visitedCount = 0;
 
@@ -2025,7 +2033,12 @@
       }
     };
 
-    for (const node of reactModelStateNodes(forceScan)) {
+    const { nodes, primaryCount } = reactModelStateNodes(forceScan);
+    for (let index = 0; index < nodes.length; index += 1) {
+      if (index >= primaryCount && queryClients.size > initialClientCount) {
+        break;
+      }
+      const node = nodes[index];
       for (const key of reactFiberKeys(node)) {
         let root;
         try {

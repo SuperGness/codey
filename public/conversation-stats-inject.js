@@ -78,6 +78,26 @@
 
   const composerInputSelector =
     "textarea, [contenteditable='true'], [role='textbox']";
+  const fallbackSessionAttributes = sessionIdAttributes.slice(1);
+  const fallbackSessionAttributeSelector = fallbackSessionAttributes
+    .map((attribute) => `[${attribute}]`)
+    .join(", ");
+  const rescanNodeSelector = [
+    sessionAttributeSelector,
+    activeThreadSelector,
+    composerInputSelector,
+  ].join(", ");
+
+  const isVisibleComposerInput = (input, viewportHeight) => {
+    if (!(input instanceof HTMLElement) || input.isConnected === false) return false;
+    if (input.closest?.("[hidden], [aria-hidden='true']")) return false;
+    const rect = input.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+    if (viewportHeight > 0 && (rect.bottom <= 0 || rect.top >= viewportHeight)) {
+      return false;
+    }
+    return true;
+  };
 
   // 锚点是只带数据属性的标记元素，自身通常没有布局矩形，不能用
   // getClientRects 判断。当前对话的判定标准是锚点所在 composer 容器内
@@ -87,16 +107,20 @@
     if (!host) return false;
     const viewportHeight =
       window.innerHeight || document.documentElement.clientHeight || 0;
-    for (const input of host.querySelectorAll?.(composerInputSelector) || []) {
-      if (!(input instanceof HTMLElement)) continue;
-      if (input.closest?.("[hidden], [aria-hidden='true']")) continue;
-      const rect = input.getBoundingClientRect?.();
-      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
-      if (viewportHeight > 0 && (rect.bottom <= 0 || rect.top >= viewportHeight)) {
-        continue;
-      }
+    const cachedInput = anchor?.__codeyVisibleComposerInput;
+    if (
+      cachedInput
+      && host.contains?.(cachedInput) !== false
+      && isVisibleComposerInput(cachedInput, viewportHeight)
+    ) {
       return true;
     }
+    for (const input of host.querySelectorAll?.(composerInputSelector) || []) {
+      if (!isVisibleComposerInput(input, viewportHeight)) continue;
+      if (anchor) anchor.__codeyVisibleComposerInput = input;
+      return true;
+    }
+    if (anchor) anchor.__codeyVisibleComposerInput = null;
     return false;
   };
 
@@ -121,10 +145,24 @@
   const resolveSessionId = (anchor = findVisibleComposerAnchor()) => {
     // 可见输入框的空标识表示会话尚未建立，不从旧 URL 或侧边栏取回旧会话。
     if (anchor) return normalizeSessionId(anchor.getAttribute(conversationAttribute));
-    for (const attribute of sessionIdAttributes.slice(1)) {
-      const value = visibleSessionElement(`[${attribute}]`)?.getAttribute(attribute);
-      const normalized = normalizeSessionId(value);
-      if (normalized) return normalized;
+    const candidates = [
+      ...(document.querySelectorAll?.(fallbackSessionAttributeSelector) || []),
+    ];
+    if (candidates.length) {
+      const renderedCandidates = candidates.filter(isRendered);
+      for (const attribute of fallbackSessionAttributes) {
+        const value = renderedCandidates
+          .find((element) => element.hasAttribute?.(attribute))
+          ?.getAttribute(attribute);
+        const normalized = normalizeSessionId(value);
+        if (normalized) return normalized;
+      }
+    } else {
+      for (const attribute of fallbackSessionAttributes) {
+        const value = visibleSessionElement(`[${attribute}]`)?.getAttribute(attribute);
+        const normalized = normalizeSessionId(value);
+        if (normalized) return normalized;
+      }
     }
     const activeThread = visibleSessionElement(activeThreadSelector)
       ?.getAttribute("data-app-action-sidebar-thread-id");
@@ -768,16 +806,9 @@
           continue;
         }
         if (
-          node.matches?.(sessionAttributeSelector)
-          || node.querySelector?.(sessionAttributeSelector)
-          || node.matches?.(activeThreadSelector)
-          || node.querySelector?.(activeThreadSelector)
+          node.matches?.(rescanNodeSelector)
+          || node.querySelector?.(rescanNodeSelector)
         ) {
-          scheduleRescan();
-          return;
-        }
-        // 会话容器子树变化一律重扫，代价只是一次 debounce 查询。
-        if (node.matches?.(composerInputSelector) || node.querySelector?.(composerInputSelector)) {
           scheduleRescan();
           return;
         }

@@ -1655,3 +1655,42 @@ test("re-applies the switch when the console saves config", async () => {
   assert.equal(env.getObserverState().active, true);
   assert.equal(env.getObserverState().observeCalls, 1);
 });
+
+test("ignores outer container attribute mutations and scroll events while the inline button is mounted", async () => {
+  const env = createEnvironment({ enabled: true, apiKeyConfigured: true });
+  await flush();
+
+  const button = env.getElementById("codey-prompt-optimize-button");
+  assert.ok(button);
+  assert.equal(button.style.display, "inline-flex");
+
+  // Simulate real DOM where outer containers (<main>/body/scope) return the
+  // descendant composer anchor when queried downward with querySelector.
+  env.scope.querySelector = (selector) => (
+    selector === "[data-above-composer-conversation-id]" ? env.anchor : null
+  );
+
+  const beforeQueries = env.getComposerQueryCount();
+  const beforeMeasures = env.getGeometryMeasureCount();
+
+  env.emitMutation([
+    {
+      type: "attributes",
+      target: env.scope,
+      attributeName: "class",
+    },
+    {
+      type: "attributes",
+      target: env.scope,
+      attributeName: "style",
+    },
+  ]);
+  const scrollMeasurements = await env.measureGeometryAfter(() => {
+    env.emitWindowEvent("scroll");
+  }, 260);
+
+  assert.equal(scrollMeasurements, 0);
+  assert.equal(env.getComposerQueryCount(), beforeQueries);
+  assert.equal(env.getGeometryMeasureCount(), beforeMeasures);
+});
+

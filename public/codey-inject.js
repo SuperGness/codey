@@ -4942,6 +4942,7 @@
   const handleSessionToolMutationsImpl = (mutations) => {
     if (disposed) return 0;
     let processedNodes = 0;
+    let sawNonTurnMutation = false;
     const removalTargets = new Set();
     const relevanceCache = new WeakMap();
     const removalRelevanceCache = new WeakMap();
@@ -4965,6 +4966,7 @@
         : mutation.target?.parentElement;
       if (mutation.type === "attributes") {
         if (target && !isCodeyOwned(target)) {
+          sawNonTurnMutation = true;
           const { threadRow } = contextForTarget(target);
           const relevantThreadClassChange = threadRow
             && mutation.attributeName === "class"
@@ -4998,6 +5000,7 @@
       // discovery. Rejecting the whole record before inspecting every added or
       // removed node keeps streaming churn off the optional tool path.
       if (targetContext.conversationTurn) continue;
+      sawNonTurnMutation = true;
       // Depends only on mutation.target, so it is identical for every node in
       // this record; streaming appends many text nodes per record.
       let interactiveRoot;
@@ -5051,7 +5054,7 @@
     if (pendingScanRoots.size) {
       scheduleIncrementalScan(null);
     }
-    if (!completionReconcileCheckTimer && !completionReconcileInFlight) {
+    if (sawNonTurnMutation && !completionReconcileCheckTimer && !completionReconcileInFlight) {
       completionReconcileCheckTimer = window.setTimeout(() => {
         completionReconcileCheckTimer = 0;
         void reconcileStaleCompletedTask();

@@ -188,7 +188,7 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
 
   assert.match(
     launcherModules,
-    /stop_codex_processes\([\s\S]*?&self\.codex_app_path,[\s\S]*?self\.process_id,[\s\S]*?self\.process_group_id/,
+    /stop_codex_processes\([\s\S]*?&self\.codex_app_path,[\s\S]*?self\.current_process_id\(\),[\s\S]*?self\.process_group_id/,
   );
   // Any Codex install can hold Electron's single-instance lock, so the
   // pre-launch stop sweeps every instance instead of one executable path.

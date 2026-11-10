@@ -91,9 +91,14 @@
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   };
 
+  const findClosestComposerAnchorNode = (node) => {
+    if (!node || typeof node !== "object") return null;
+    return node.closest?.(composerAnchorSelector) || null;
+  };
+
   const findComposerAnchorNode = (node) => {
     if (!node || typeof node !== "object") return null;
-    const target = node.closest?.(composerAnchorSelector);
+    const target = findClosestComposerAnchorNode(node);
     return target || node.querySelector?.(composerAnchorSelector) || null;
   };
 
@@ -231,7 +236,7 @@
   const trackedComposerRegion = () => {
     const buttonHost = button?.parentElement;
     if (buttonHost) return buttonHost.parentElement || buttonHost;
-    const scope = findComposerAnchorNode(inputElement)?.parentElement;
+    const scope = findClosestComposerAnchorNode(inputElement)?.parentElement;
     return scope || inputElement?.parentElement || null;
   };
 
@@ -392,8 +397,7 @@
       element?.getAttribute?.("aria-label"),
       element?.getAttribute?.("title"),
       element?.getAttribute?.("data-testid"),
-      element?.textContent,
-      element?.innerText,
+      element?.textContent || element?.innerText,
     ]
       .filter((value) => typeof value === "string" && value.trim())
       .join(" ")
@@ -819,15 +823,17 @@
     repositionTimer = setTimeout(updateButtonPosition, repositionDelayMs);
   };
 
-  const nodeTouchesTrackedComposer = (node) => {
-    if (!node || typeof node !== "object") return false;
-    const buttonHost = button?.parentElement;
-    return Boolean(
-      node === inputElement?.parentElement ||
-        node === buttonHost?.parentElement ||
-        (node !== inputElement && inputElement?.contains?.(node)) ||
-        buttonHost?.contains?.(node),
-    );
+  const handleScrollReposition = () => {
+    if (
+      enabled &&
+      button?.isConnected &&
+      inputElement?.isConnected &&
+      !buttonHiddenWithoutTarget &&
+      button.style.display !== "none"
+    ) {
+      return;
+    }
+    scheduleReposition();
   };
 
   const nodeContainsComposerCandidate = (node) =>
@@ -892,7 +898,7 @@
       ...(mutation?.removedNodes || []),
     ];
     if (
-      findComposerAnchorNode(mutation?.target) ||
+      findClosestComposerAnchorNode(mutation?.target) ||
       changedNodes.some(findComposerAnchorNode)
     ) {
       return true;
@@ -1119,7 +1125,7 @@
     ready = false;
     loadConfig();
   });
-  window.addEventListener("scroll", scheduleReposition, true);
+  window.addEventListener("scroll", handleScrollReposition, true);
   window.addEventListener("resize", scheduleReposition);
   window.addEventListener("hashchange", () => scheduleScan(true));
   window.addEventListener("popstate", () => scheduleScan(true));
