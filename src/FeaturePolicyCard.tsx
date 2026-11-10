@@ -89,6 +89,7 @@ const SUBAGENT_TASK_TYPES = [
 }>;
 
 export type SubagentPolicyCardProps = {
+  active?: boolean;
   config: Config;
   isBusy: boolean;
   subagentModelOptions: SubagentModelOption[];
@@ -393,9 +394,20 @@ export function SubagentPolicyCardComponent({
   );
 }
 
-export const SubagentPolicyCard = memo(SubagentPolicyCardComponent);
+export const SubagentPolicyCard = memo(SubagentPolicyCardComponent, (prev, next) => {
+  if (prev.active === false && next.active === false) return true;
+  if (prev.active !== next.active) return false;
+  return (
+    prev.config === next.config &&
+    prev.isBusy === next.isBusy &&
+    prev.subagentModelOptions === next.subagentModelOptions &&
+    prev.onConfigChange === next.onConfigChange &&
+    prev.onSubagentOptimizationChange === next.onSubagentOptimizationChange
+  );
+});
 
 type FeaturePolicyCardProps = {
+  active?: boolean;
   config: Config;
   fastContextToolsStatus: FastContextToolsStatus;
   isMacClient: boolean;
@@ -834,4 +846,22 @@ function FeaturePolicyCardComponent({
   );
 }
 
-export const FeaturePolicyCard = memo(FeaturePolicyCardComponent);
+export const FeaturePolicyCard = memo(FeaturePolicyCardComponent, (prev, next) => {
+  if (prev.active === false && next.active === false) return true;
+  if (prev.active !== next.active) return false;
+  return (
+    prev.config === next.config &&
+    prev.fastContextToolsStatus === next.fastContextToolsStatus &&
+    prev.isMacClient === next.isMacClient &&
+    prev.isWindowsClient === next.isWindowsClient &&
+    prev.cleanupBusy === next.cleanupBusy &&
+    prev.onAnalyzeDiagnosticStorage === next.onAnalyzeDiagnosticStorage &&
+    prev.popupContainer === next.popupContainer &&
+    prev.isBusy === next.isBusy &&
+    prev.configEditingDisabled === next.configEditingDisabled &&
+    prev.onConfigChange === next.onConfigChange &&
+    prev.onAddChannel === next.onAddChannel &&
+    prev.onChannelChange === next.onChannelChange &&
+    prev.onRequestRemoveChannel === next.onRequestRemoveChannel
+  );
+});

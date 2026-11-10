@@ -35,6 +35,7 @@ const MANUAL_PROTOCOL_OPTIONS = [
 ] as const;
 
 type PromptOptimizationCardProps = {
+  active?: boolean;
   config: Config;
   isBusy: boolean;
   subagentModelOptions: SubagentModelOption[];
@@ -536,4 +537,17 @@ function PromptOptimizationCardComponent({
   );
 }
 
-export const PromptOptimizationCard = memo(PromptOptimizationCardComponent);
+export const PromptOptimizationCard = memo(
+  PromptOptimizationCardComponent,
+  (prev, next) => {
+    if (prev.active === false && next.active === false) return true;
+    if (prev.active !== next.active) return false;
+    return (
+      prev.config === next.config &&
+      prev.isBusy === next.isBusy &&
+      prev.subagentModelOptions === next.subagentModelOptions &&
+      prev.onConfigChange === next.onConfigChange &&
+      prev.onNotice === next.onNotice
+    );
+  },
+);

@@ -999,7 +999,7 @@ function ModelSectionComponent({
                       if (routeConfigReadOnly || !acceptsRouteDrop || isBusy || dirty) return;
                       event.preventDefault();
                       event.dataTransfer.dropEffect = "move";
-                      setDropRouteId(profile.id);
+                      setDropRouteId((current) => (current === profile.id ? current : profile.id));
                     }}
                     onDrop={(event) => {
                       event.preventDefault();
@@ -1178,7 +1178,11 @@ function ModelSectionComponent({
                                   if (!acceptsModelDrop || isBusy || dirty) return;
                                   event.preventDefault();
                                   event.dataTransfer.dropEffect = "move";
-                                  setDropModel({ routeId: profile.id, model });
+                                  setDropModel((current) =>
+                                    current?.routeId === profile.id && modelIdsEqual(current.model, model)
+                                      ? current
+                                      : { routeId: profile.id, model },
+                                  );
                                 }}
                                 onDrop={(event) => {
                                   if (!draggedModel) return;
@@ -2148,4 +2152,36 @@ function ModelSectionComponent({
   );
 }
 
-export const ModelSection = memo(ModelSectionComponent);
+export const ModelSection = memo(ModelSectionComponent, (prev, next) => {
+  if (prev.active === false && next.active === false) return true;
+  if (prev.active !== next.active) return false;
+  return (
+    prev.config === next.config &&
+    prev.runtimeStatus === next.runtimeStatus &&
+    prev.currentProvider === next.currentProvider &&
+    prev.officialAccountAvailable === next.officialAccountAvailable &&
+    prev.popupContainer === next.popupContainer &&
+    prev.modelState === next.modelState &&
+    prev.dirty === next.dirty &&
+    prev.canSyncCurrentProvider === next.canSyncCurrentProvider &&
+    prev.isBusy === next.isBusy &&
+    prev.busy === next.busy &&
+    prev.showAccountUsageInHeader === next.showAccountUsageInHeader &&
+    prev.subagentModelOptions === next.subagentModelOptions &&
+    prev.onToggleLocalRouter === next.onToggleLocalRouter &&
+    prev.onToggleRouteRequestLog === next.onToggleRouteRequestLog &&
+    prev.onOpenUsageAnalysis === next.onOpenUsageAnalysis &&
+    prev.onSaveRoute === next.onSaveRoute &&
+    prev.onSetRouteEnabled === next.onSetRouteEnabled &&
+    prev.onReorderRoute === next.onReorderRoute &&
+    prev.onReorderRouteModels === next.onReorderRouteModels &&
+    prev.onDeleteRoute === next.onDeleteRoute &&
+    prev.onFetchRouteModels === next.onFetchRouteModels &&
+    prev.onOfficialAccountsChanged === next.onOfficialAccountsChanged &&
+    prev.onNotice === next.onNotice &&
+    prev.onSaveOfficialRouteSettings === next.onSaveOfficialRouteSettings &&
+    prev.onSetDefaultModel === next.onSetDefaultModel &&
+    prev.onConfigChange === next.onConfigChange &&
+    prev.onRequestConfirmation === next.onRequestConfirmation
+  );
+});

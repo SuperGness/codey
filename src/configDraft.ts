@@ -18,10 +18,16 @@ function equal(left: unknown, right: unknown): boolean {
 }
 
 export function configsHaveSameDraftValues(left: Config | null, right: Config | null) {
-  if (!left || !right) return left === right;
-  const { settingsRevision: _leftRevision, ...leftValues } = left;
-  const { settingsRevision: _rightRevision, ...rightValues } = right;
-  return equal(leftValues, rightValues);
+  if (Object.is(left, right)) return true;
+  if (!left || !right) return false;
+  const leftKeys = Object.keys(left).filter((key) => key !== "settingsRevision");
+  const rightKeys = Object.keys(right).filter((key) => key !== "settingsRevision");
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(right, key) &&
+      equal(left[key as keyof Config], right[key as keyof Config]),
+  );
 }
 
 function object(value: unknown): value is Record<string, unknown> {

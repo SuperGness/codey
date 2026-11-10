@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   Collection,
   ComboBox,
@@ -31,7 +31,7 @@ type ModelComboboxProps = {
   value: string;
 };
 
-export function ModelCombobox({
+function ModelComboboxComponent({
   "aria-label": ariaLabel,
   disabled = false,
   onChange,
@@ -141,3 +141,5 @@ export function ModelCombobox({
     </ComboBox>
   );
 }
+
+export const ModelCombobox = memo(ModelComboboxComponent);

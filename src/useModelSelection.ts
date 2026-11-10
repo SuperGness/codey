@@ -140,7 +140,7 @@ export function useModelSelection({
     return Object.fromEntries(Object.entries(
       profile?.pluginOwnerId ? profile.pluginRouteSpec?.modelReasoningEfforts ?? {} : {},
     ).map(([model, levels]) => [modelKey(model), levels]));
-  }, [config, modelPickerRouteId]);
+  }, [config?.activeProfileId, config?.profiles, modelPickerRouteId]);
   const officialSlugKeys = useMemo(
     () =>
       new Set(
@@ -207,7 +207,15 @@ export function useModelSelection({
         officialAccountAvailable,
         currentProvider,
       ),
-    [config, currentProvider, modelState, officialAccountAvailable],
+    [
+      config?.activeProfileId,
+      config?.localRouterEnabled,
+      config?.profiles,
+      config?.selectedModelsByProvider,
+      currentProvider,
+      modelState,
+      officialAccountAvailable,
+    ],
   );
 
   const openModelPicker = useCallback((

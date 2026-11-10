@@ -74,6 +74,11 @@
   padding: 8px 0 20px;
 }
 
+.settings-page .route-catalog-pane > div:not([hidden]),
+.settings-page .route-auxiliary-bar:not([hidden]) {
+  animation: codey-panel-enter 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .catalog-aggregate-heading,
 .route-editor-footer {
   display: flex;
@@ -410,7 +415,12 @@
   user-select: none;
   position: relative;
   box-shadow: none;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+  transition:
+    border-color 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 110ms cubic-bezier(0.22, 1, 0.36, 1);
   line-height: 1.35;
 }
 
@@ -418,6 +428,7 @@
   background: var(--codey-blue-soft);
   border-color: var(--codey-blue-border);
   color: var(--codey-blue);
+  transform: translateY(-1px);
 }
 
 .model-tag-pill:focus-visible {
@@ -427,6 +438,7 @@
 
 .model-tag-pill:active:not(:disabled) {
   background: var(--codey-press);
+  transform: translateY(0) scale(0.97);
 }
 
 .model-tag-pill:disabled {

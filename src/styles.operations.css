@@ -136,6 +136,14 @@
   font-weight: 500;
 }
 
+.status-strip-toggle svg {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.status-strip-item.is-expanded .status-strip-toggle svg {
+  transform: translateY(-1px);
+}
+
 .status-strip-item:hover .status-strip-toggle,
 .status-strip-item.is-expanded .status-strip-toggle {
   color: var(--codey-blue);
@@ -161,6 +169,7 @@
   border: 1px solid var(--codey-border);
   border-radius: 18px;
   background: var(--codey-card);
+  animation: codey-panel-enter 170ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .operations-expanded-card {

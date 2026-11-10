@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { IconAlertCircle, IconBrandOpenai, IconClipboard, IconClock, IconDownload, IconFolderOpen, IconLogin2 as IconLogin, IconPlus, IconRefresh, IconSparkles, IconTrash } from "@tabler/icons-react";
 
 import { invoke } from "./api";
@@ -230,7 +230,7 @@ export type OfficialAccountsPanelProps = {
   onRequestConfirmation?: (confirmation: Confirmation) => void;
 };
 
-export function OfficialAccountsPanel({
+function OfficialAccountsPanelComponent({
   officialAccountAvailable,
   isBusy,
   active,
@@ -1184,3 +1184,5 @@ export function OfficialAccountsPanel({
     </div>
   );
 }
+
+export const OfficialAccountsPanel = memo(OfficialAccountsPanelComponent);

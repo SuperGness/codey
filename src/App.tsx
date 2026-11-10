@@ -1629,7 +1629,7 @@ export function App({
         contentRef={settingsScroll}
         sidebarFooter={sidebarFooter}
         sections={{
-          overview: (
+          overview: (active) => (
             <>
               <SettingsPageHeader
                 id="overview-title"
@@ -1655,6 +1655,7 @@ export function App({
                 fastContextToolsStatus={fastContextToolsStatus}
                 isMacClient={status.clientPlatform === "macos"}
                 isWindowsClient={status.clientPlatform === "windows"}
+                active={active}
                 cleanupBusy={busy === "clear-diagnostic-storage"}
                 onAnalyzeDiagnosticStorage={handleAnalyzeDiagnosticStorage}
                 popupContainer={popupContainer}
@@ -1700,8 +1701,9 @@ export function App({
               onRequestConfirmation={setConfirmation}
             />
           ),
-          prompt: (
+          prompt: (active) => (
             <PromptOptimizationCard
+              active={active}
               config={config}
               isBusy={isBusy}
               subagentModelOptions={subagentModelOptions}
@@ -1709,8 +1711,9 @@ export function App({
               onNotice={setNotice}
             />
           ),
-          subagents: (
+          subagents: (active) => (
             <SubagentPolicyCard
+              active={active}
               config={config}
               isBusy={isBusy}
               subagentModelOptions={subagentModelOptions}
