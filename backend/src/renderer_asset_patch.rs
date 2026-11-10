@@ -1376,15 +1376,7 @@ fn store_entry(dir: &Path, name: &str, patch: Option<StoredPatch>) -> Result<()>
 }
 
 fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}", std::process::id()));
-    let temporary = PathBuf::from(temporary);
-    std::fs::write(&temporary, contents)
-        .with_context(|| format!("写入补丁缓存 {} 失败", temporary.display()))?;
-    std::fs::rename(&temporary, path).with_context(|| {
-        let _ = std::fs::remove_file(&temporary);
-        format!("替换补丁缓存 {} 失败", path.display())
-    })
+    crate::fs_util::atomic_write(path, contents).map_err(anyhow::Error::msg)
 }
 
 fn record_patch_log(payload: &str) {

@@ -91,13 +91,11 @@ impl ConfigStore {
     /// user's original out of reach. Copies are named after their content, so
     /// relaunching with the same broken files adds nothing.
     pub fn preserve_unreadable(&self) -> Vec<PathBuf> {
-        use sha2::{Digest, Sha256};
-
         std::iter::once(self.path.clone())
             .chain((1..=CONFIG_BACKUP_COUNT).map(|index| self.backup_path(index)))
             .filter_map(|path| {
                 let bytes = fs::read(&path).ok()?;
-                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let digest = crate::fs_util::sha256_hex(&bytes);
                 let file_name = path.file_name()?.to_string_lossy().into_owned();
                 let target =
                     path.with_file_name(format!("{file_name}.unreadable-{}", &digest[..12]));

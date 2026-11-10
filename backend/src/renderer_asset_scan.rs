@@ -323,7 +323,6 @@ fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<Ass
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aho_corasick::AhoCorasick;
 
     fn anchors() -> Vec<String> {
         vec![
@@ -611,43 +610,33 @@ mod tests {
         }
         if installed.is_some() {
             let source = AssetSource::locate(&app).unwrap();
-            let baseline = AhoCorasick::new(&anchors).unwrap();
             let finders = anchors
                 .iter()
                 .map(|anchor| Finder::new(anchor.as_bytes()))
                 .collect::<Vec<_>>();
-            let mut timings = [Vec::new(), Vec::new()];
-            for run in 0..10 {
-                for index in if run % 2 == 0 { [0, 1] } else { [1, 0] } {
-                    let started = std::time::Instant::now();
-                    let matches = |bytes: &[u8]| {
-                        if index == 0 {
-                            baseline.is_match(bytes)
-                        } else {
-                            finders.iter().any(|finder| finder.find(bytes).is_some())
-                        }
-                    };
-                    let scan = match &source {
-                        AssetSource::Asar { archive, unpacked } => {
-                            scan_asar(archive, unpacked, &matches)
-                        }
-                        AssetSource::Directory { app } => {
-                            scan_directory(&app.join("webview/assets"), &matches)
-                        }
+            let mut timings = Vec::new();
+            for _ in 0..10 {
+                let started = std::time::Instant::now();
+                let matches =
+                    |bytes: &[u8]| finders.iter().any(|finder| finder.find(bytes).is_some());
+                let scan = match &source {
+                    AssetSource::Asar { archive, unpacked } => {
+                        scan_asar(archive, unpacked, &matches)
                     }
-                    .unwrap();
-                    timings[index].push(started.elapsed().as_secs_f64() * 1000.0);
-                    assert_eq!(Some(&scan), expected.as_ref());
+                    AssetSource::Directory { app } => {
+                        scan_directory(&app.join("webview/assets"), &matches)
+                    }
                 }
+                .unwrap();
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(Some(&scan), expected.as_ref());
             }
-            for (index, name) in ["aho_corasick_baseline", "memmem"].iter().enumerate() {
-                timings[index].sort_by(f64::total_cmp);
-                println!(
-                    "BENCH {}",
-                    serde_json::json!({"case":"asset_matcher", "kind":name,
-                    "p50_ms":timings[index][4], "p95_ms":timings[index][9]})
-                );
-            }
+            timings.sort_by(f64::total_cmp);
+            println!(
+                "BENCH {}",
+                serde_json::json!({"case":"asset_matcher", "kind":"memmem",
+                "p50_ms":timings[4], "p95_ms":timings[9]})
+            );
         }
     }
 }

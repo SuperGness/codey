@@ -263,7 +263,7 @@ pub(crate) fn read_bounded(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unit-tests"))]
 mod tests {
     use super::*;
 

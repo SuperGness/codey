@@ -135,64 +135,6 @@
     }
     return patched;
   };
-  const replaceNearestRendererGateBeforeAnchor = (
-    source,
-    pattern,
-    replacement,
-    name,
-    anchor,
-    maximumDistance,
-  ) => {
-    if (activeRendererPatchFailures?.has(name)) return source;
-    const anchorIndexes = [];
-    for (
-      let index = source.indexOf(anchor);
-      index >= 0;
-      index = source.indexOf(anchor, index + anchor.length)
-    ) anchorIndexes.push(index);
-    if (anchorIndexes.length !== 1) {
-      return recordIncompatibleRendererGate(source, name, anchorIndexes.length);
-    }
-
-    const anchorIndex = anchorIndexes[0];
-    const scopeStart = Math.max(0, anchorIndex - maximumDistance);
-    const scope = source.slice(scopeStart, anchorIndex + anchor.length);
-    const gates = Array.isArray(pattern) ? pattern : [{ pattern, replacement }];
-    const candidates = [];
-    for (const gate of gates) {
-      scope.replace(gate.pattern, (...args) => {
-        candidates.push({ args, gate, offset: args.at(-2) });
-        return args[0];
-      });
-    }
-    if (candidates.length === 0) {
-      return recordIncompatibleRendererGate(source, name, 0);
-    }
-
-    const nearestOffset = Math.max(
-      ...candidates.map((candidate) => candidate.offset),
-    );
-    const nearestCandidates = candidates.filter(
-      (candidate) => candidate.offset === nearestOffset,
-    );
-    if (nearestCandidates.length !== 1) {
-      return recordIncompatibleRendererGate(
-        source,
-        name,
-        nearestCandidates.length,
-      );
-    }
-
-    const [{ args, gate, offset }] = nearestCandidates;
-    const effectiveReplacement = gate.replacement ?? replacement;
-    const replaced = typeof effectiveReplacement === "function"
-      ? effectiveReplacement(...args)
-      : effectiveReplacement;
-    const absoluteOffset = scopeStart + offset;
-    return source.slice(0, absoluteOffset) +
-      replaced +
-      source.slice(absoluteOffset + args[0].length);
-  };
   const replacePetRendererImportWithStubs = (match, importClause) => {
     if (typeof importClause !== "string" || importClause.trim() === "") {
       return "";
@@ -393,6 +335,8 @@
     "electron-app-state-snapshot-request",
     "activeInteractions=new Map",
     ":has([data-state=open])",
+    ":has(>[data-state=open])",
+    ":has(button[data-state=open])",
     ":has(:is(button[data-state=open]))",
     ":has([aria-expanded=true],[data-state=open])"
   ]/*end-codey-renderer-patch-anchors*/;
