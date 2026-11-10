@@ -1079,9 +1079,13 @@ impl RouterServer {
         downstream: &mut D,
     ) -> Result<()> {
         if !is_compaction_request(&body, kind) {
-            return Box::pin(
-                self.proxy_parsed_responses_inner(request, body, encoded_body, kind, downstream),
-            )
+            return Box::pin(self.proxy_parsed_responses_inner(
+                request,
+                body,
+                encoded_body,
+                kind,
+                downstream,
+            ))
             .await;
         }
         let keys = request_binding_keys(&request);
@@ -1107,9 +1111,13 @@ impl RouterServer {
         let cancelled = guard.operation.cancel.subscribe();
         let result = await_compaction_operation(
             cancelled.clone(),
-            Box::pin(
-                self.proxy_parsed_responses_inner(request, body, encoded_body, kind, downstream),
-            ),
+            Box::pin(self.proxy_parsed_responses_inner(
+                request,
+                body,
+                encoded_body,
+                kind,
+                downstream,
+            )),
         )
         .await;
         downstream.set_compaction_disconnect_monitor(false);

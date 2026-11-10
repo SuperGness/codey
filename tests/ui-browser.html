@@ -140,6 +140,7 @@
       const restartPreview = new URLSearchParams(location.search).get("state");
       let restartState = restartPreview || "waiting";
       let restartRevision = 1;
+      let lastRuntimeStatusRevision = 0;
       let restartRequests = 0;
       let saveRequestCount = 0;
       let saveAttemptCount = 0;
@@ -163,6 +164,7 @@
         }
         const result = await mock(command, args);
         if (!restartCheck || command !== "runtime_status") return result;
+        lastRuntimeStatusRevision = restartRevision;
         return {
           ...result,
           restartRequired: restartState === "pending" || restartState === "waiting" || restartState === "restarting",
@@ -270,18 +272,21 @@
         restartState = "pending";
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
-        await waitFor(() => [...shadow.querySelectorAll('[role="status"]')].some(notice => notice.textContent.includes("配置已保存，正在应用")));
+        await waitFor(() => lastRuntimeStatusRevision === restartRevision);
+        await new Promise(requestAnimationFrame);
+        if ([...shadow.querySelectorAll('[role="status"]')].some(notice => notice.textContent.includes("配置已保存"))) throw new Error("应用中仍显示顶部保存横幅");
         if (action().textContent.trim() !== "重启" || action().classList.contains("is-warning")) throw new Error("应用未结束时错误显示等待重启");
         restartState = "saved";
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
-        await waitFor(() => !shadow.textContent.includes("配置已保存，正在应用"));
+        await waitFor(() => lastRuntimeStatusRevision === restartRevision);
+        await new Promise(requestAnimationFrame);
         if ([...shadow.querySelectorAll('[role="status"]')].some(notice => notice.textContent.includes("配置已保存"))) throw new Error("保存成功后仍显示保存横幅");
         restartState = "failed";
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
         await waitFor(() => [...shadow.querySelectorAll('[role="alert"]')].some(alert => alert.textContent.includes("测试：配置应用失败")));
-        document.body.dataset.restartStateResult = "PASS：等待重启及保存成功均无横幅，重启流程、应用中和失败提示正常";
+        document.body.dataset.restartStateResult = "PASS：等待重启、应用中及保存成功均无横幅，重启流程和失败提示正常";
       }
       if (new URLSearchParams(location.search).get("check") === "theme-sync") {
         const host = document.querySelector("#codey-settings-overlay-host");

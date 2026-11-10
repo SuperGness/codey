@@ -1606,10 +1606,9 @@ export function App({
         </Button>
       )}
 
-      {status.configApply && (status.configApply.state === "pending" || status.configApply.state === "failed" || configApplyError) && (
-        <div role={status.configApply.state === "failed" || configApplyError ? "alert" : "status"}
+      {status.configApply && (status.configApply.state === "failed" || configApplyError) && (
+        <div role="alert"
           className="flex flex-wrap items-center gap-2 border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 px-5 py-2 text-xs">
-          {status.configApply.state === "pending" && !configApplyError && <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />}
           <span>{configApplyError || configApplyNotice(status.configApply).text}</span>
           {configApplyError && <Button size="sm" variant="outline" onClick={() => void retryConfigApply()}>重新查询状态</Button>}
         </div>
