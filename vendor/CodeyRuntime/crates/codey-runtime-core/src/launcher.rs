@@ -12,47 +12,11 @@ use anyhow::Context;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexLaunch {
-    Process {
-        command: Vec<String>,
-        wait_strategy: ProcessWaitStrategy,
-        macos_cleanup_policy: Option<MacosCleanupPolicy>,
-    },
     PackagedActivation {
         app_user_model_id: String,
         arguments: String,
         process_id: Option<u32>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessWaitStrategy {
-    TrackedChild,
-    ExternalWaitCommand,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MacosCleanupPolicy {
-    QuitIfNotPreviouslyRunning,
-    SkipQuitBecauseAlreadyRunning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowsProcessControlStrategy {
-    NativeWindowsApi,
-}
-
-#[cfg(windows)]
-pub fn windows_process_control_strategy() -> WindowsProcessControlStrategy {
-    WindowsProcessControlStrategy::NativeWindowsApi
-}
-
-impl CodexLaunch {
-    pub fn process_id(&self) -> Option<u32> {
-        match self {
-            Self::PackagedActivation { process_id, .. } => *process_id,
-            Self::Process { .. } => None,
-        }
-    }
 }
 
 fn normalize_codex_extra_args(args: &[String]) -> Vec<String> {
@@ -108,11 +72,6 @@ pub fn build_macos_open_command(
     ];
     command.extend(build_codex_arguments(debug_port, extra_args));
     command
-}
-
-#[cfg(windows)]
-pub async fn wait_for_windows_process_id(process_id: u32) -> anyhow::Result<()> {
-    wait_for_windows_process_exit(process_id).await.map(|_| ())
 }
 
 /// Waits for the original process handle and returns its exit code when available.
@@ -204,11 +163,6 @@ async fn wait_for_windows_process_handle(
             ),
         }
     }
-}
-
-#[cfg(not(windows))]
-pub async fn wait_for_windows_process_id(process_id: u32) -> anyhow::Result<()> {
-    anyhow::bail!("cannot wait for Windows process id {process_id} on this platform")
 }
 
 fn command_line_arguments(args: &[String]) -> String {
@@ -360,7 +314,7 @@ mod tests {
             assert!(
                 tokio::time::timeout(
                     Duration::from_millis(20),
-                    wait_for_windows_process_id(process_id),
+                    wait_for_windows_process_exit(process_id),
                 )
                 .await
                 .is_err()
@@ -410,7 +364,6 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn missing_windows_process_is_already_exited() {
-        wait_for_windows_process_id(u32::MAX).await.unwrap();
         assert_eq!(wait_for_windows_process_exit(u32::MAX).await.unwrap(), None);
     }
 
