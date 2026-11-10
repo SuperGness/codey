@@ -27,7 +27,20 @@ const WINDOWS_CODEX_GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(windows)]
-pub(super) struct WindowsStartupProcess(pub(super) std::os::windows::io::OwnedHandle);
+pub(super) struct WindowsStartupProcess(
+    pub(super) std::os::windows::io::OwnedHandle,
+    WindowsDesktopProcessIdentity,
+    std::sync::Arc<std::sync::atomic::AtomicU32>,
+);
+
+#[cfg(any(windows, test))]
+#[derive(Clone)]
+struct WindowsDesktopProcessIdentity {
+    process_id: u32,
+    executable_path: std::path::PathBuf,
+    creation_time: u64,
+    session_id: Option<u32>,
+}
 
 #[cfg(windows)]
 impl WindowsStartupProcess {
@@ -54,10 +67,16 @@ impl WindowsStartupProcess {
     }
 
     pub(super) fn open(process_id: u32) -> Result<Self> {
-        use std::os::windows::io::FromRawHandle;
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use std::sync::{Arc, atomic::AtomicU32};
+        use windows::Win32::Foundation::{FILETIME, HANDLE};
         use windows::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            QueryFullProcessImageNameW,
         };
+        use windows::core::PWSTR;
 
         let handle = unsafe {
             OpenProcess(
@@ -69,9 +88,221 @@ impl WindowsStartupProcess {
         .context("打开 Windows Codex 启动进程句柄失败")?;
         // Keep the process object alive through startup so PID reuse cannot
         // change the process being observed and its exit code remains readable.
-        Ok(Self(unsafe {
-            std::os::windows::io::OwnedHandle::from_raw_handle(handle.0)
-        }))
+        let handle = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.0) };
+        let raw = HANDLE(handle.as_raw_handle());
+        let mut path = vec![0u16; 32768];
+        let mut length = path.len() as u32;
+        unsafe {
+            QueryFullProcessImageNameW(
+                raw,
+                Default::default(),
+                PWSTR(path.as_mut_ptr()),
+                &mut length,
+            )
+        }
+        .context("读取 Windows Codex 启动进程路径失败")?;
+        let executable_path =
+            std::path::PathBuf::from(OsString::from_wide(&path[..length as usize]));
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        unsafe { GetProcessTimes(raw, &mut created, &mut exited, &mut kernel, &mut user) }
+            .context("读取 Windows Codex 启动进程创建时间失败")?;
+        let identity = WindowsDesktopProcessIdentity {
+            process_id,
+            executable_path,
+            creation_time: (u64::from(created.dwHighDateTime) << 32)
+                | u64::from(created.dwLowDateTime),
+            session_id: codey_runtime_core::windows_process_session_id(process_id),
+        };
+        Ok(Self(handle, identity, Arc::new(AtomicU32::new(process_id))))
+    }
+
+    pub(super) fn process_id(&self) -> u32 {
+        self.1.process_id
+    }
+
+    pub(super) fn tracked_process_id(&self) -> std::sync::Arc<std::sync::atomic::AtomicU32> {
+        std::sync::Arc::clone(&self.2)
+    }
+
+    /// 启动入口可在创建桌面子进程后正常退出，后续继续观察该子进程。
+    pub(super) fn refresh(&mut self) -> Result<bool> {
+        let mut visited = HashSet::from([(self.1.process_id, self.1.creation_time)]);
+        loop {
+            match self.exit_code()? {
+                None => return Ok(true),
+                Some(0) => {}
+                Some(_) => return Ok(false),
+            }
+            let processes = codey_runtime_core::windows_enumerate_processes()
+                .context("查找 Windows Codex 启动入口的桌面子进程失败")?;
+            let candidates = windows_desktop_successors(
+                &self.1,
+                processes.iter().map(|process| {
+                    (
+                        process.process_id,
+                        process.parent_process_id,
+                        process.executable_path.as_deref(),
+                        process.creation_time,
+                        process.session_id,
+                    )
+                }),
+            );
+            let mut desktop = None;
+            let mut last_live_error = None;
+            for (process_id, creation_time) in candidates {
+                if !visited.insert((process_id, creation_time)) {
+                    continue;
+                }
+                let mut successor = match Self::open(process_id) {
+                    Ok(successor) if successor.1.creation_time == creation_time => successor,
+                    Ok(successor) => {
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "launcher.windows_desktop_candidate_skipped",
+                            serde_json::json!({
+                                "launcherProcessId": self.process_id(),
+                                "candidateProcessId": process_id,
+                                "reason": "creation_time_changed",
+                                "expectedCreationTime": creation_time,
+                                "actualCreationTime": successor.1.creation_time,
+                            }),
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "launcher.windows_desktop_candidate_skipped",
+                            serde_json::json!({
+                                "launcherProcessId": self.process_id(),
+                                "candidateProcessId": process_id,
+                                "reason": "open_failed",
+                                "detail": format!("{error:#}"),
+                            }),
+                        );
+                        continue;
+                    }
+                };
+                match successor.is_desktop_main_process() {
+                    Ok(true) => {
+                        successor.2 = std::sync::Arc::clone(&self.2);
+                        desktop = Some(successor);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        let candidate_alive = successor.exit_code().ok().flatten().is_none();
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "launcher.windows_desktop_candidate_skipped",
+                            serde_json::json!({
+                                "launcherProcessId": self.process_id(),
+                                "candidateProcessId": process_id,
+                                "candidateAlive": candidate_alive,
+                                "reason": "command_line_query_failed",
+                                "detail": format!("{error:#}"),
+                            }),
+                        );
+                        if candidate_alive {
+                            last_live_error = Some(error);
+                        }
+                    }
+                }
+            }
+            let Some(successor) = desktop else {
+                if let Some(error) = last_live_error {
+                    return Err(error);
+                }
+                return Ok(false);
+            };
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_desktop_process_handoff",
+                serde_json::json!({
+                    "launcherProcessId": self.process_id(),
+                    "processId": successor.process_id(),
+                    "executablePath": successor.1.executable_path,
+                }),
+            );
+            // Update the shared PID while both kernel handles are open so the
+            // published PID never refers to a released process object.
+            self.2
+                .store(successor.process_id(), std::sync::atomic::Ordering::Release);
+            *self = successor;
+        }
+    }
+
+    fn is_desktop_main_process(&self) -> Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Wdk::System::Threading::{
+            NtQueryInformationProcess, ProcessCommandLineInformation,
+        };
+        use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree, UNICODE_STRING};
+        use windows::Win32::UI::Shell::CommandLineToArgvW;
+        use windows::core::PCWSTR;
+
+        let handle = HANDLE(self.0.as_raw_handle());
+        let mut length = 0;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                handle,
+                ProcessCommandLineInformation,
+                std::ptr::null_mut(),
+                0,
+                &mut length,
+            )
+        };
+        if length == 0 {
+            status
+                .ok()
+                .context("读取 Windows Codex 子进程命令行长度失败")?;
+            anyhow::bail!(
+                "Windows Codex 子进程命令行长度为空：PID {}",
+                self.process_id()
+            );
+        }
+        let mut buffer = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
+        unsafe {
+            NtQueryInformationProcess(
+                handle,
+                ProcessCommandLineInformation,
+                buffer.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            )
+        }
+        .ok()
+        .context("读取 Windows Codex 子进程命令行失败")?;
+        let command_line = unsafe { &*buffer.as_ptr().cast::<UNICODE_STRING>() };
+        let utf16_len = usize::from(command_line.Length) / std::mem::size_of::<u16>();
+        anyhow::ensure!(
+            !command_line.Buffer.is_null() && utf16_len > 0,
+            "Windows Codex 子进程命令行为空：PID {}",
+            self.process_id()
+        );
+        // UNICODE_STRING is length-delimited and not guaranteed to be NUL-terminated.
+        let mut command_line_utf16 = Vec::with_capacity(utf16_len + 1);
+        command_line_utf16.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(command_line.Buffer.0, utf16_len)
+        });
+        command_line_utf16.push(0);
+        let mut count = 0;
+        let arguments =
+            unsafe { CommandLineToArgvW(PCWSTR(command_line_utf16.as_ptr()), &mut count) };
+        anyhow::ensure!(
+            !arguments.is_null(),
+            "解析 Windows Codex 子进程命令行失败：PID {}",
+            self.process_id()
+        );
+        let arguments_slice = unsafe { std::slice::from_raw_parts(arguments, count as usize) };
+        let decoded = arguments_slice
+            .iter()
+            .skip(1)
+            .map(|argument| {
+                unsafe { argument.to_string() }.context("解码 Windows Codex 子进程参数失败")
+            })
+            .collect::<Result<Vec<_>>>();
+        let _ = unsafe { LocalFree(HLOCAL(arguments.cast())) };
+        Ok(is_desktop_main_arguments(&decoded?))
     }
 
     pub(super) fn exit_code(&self) -> Result<Option<u32>> {
@@ -92,6 +323,47 @@ impl WindowsStartupProcess {
                 .context("检测 Windows Codex 启动进程状态失败"),
         }
     }
+}
+
+#[cfg(any(windows, test))]
+fn is_desktop_main_arguments<I, S>(arguments: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    !arguments.into_iter().any(|argument| {
+        let argument = argument.as_ref();
+        argument == "--type" || argument.starts_with("--type=") || argument == "--crashpad-handler"
+    })
+}
+
+#[cfg(any(windows, test))]
+fn windows_desktop_successors<'a>(
+    launcher: &WindowsDesktopProcessIdentity,
+    processes: impl IntoIterator<Item = (u32, u32, Option<&'a Path>, Option<u64>, Option<u32>)>,
+) -> Vec<(u32, u64)> {
+    let Some(app_dir) = launcher.executable_path.parent() else {
+        return Vec::new();
+    };
+    let mut candidates = processes
+        .into_iter()
+        .filter(|(_, parent_process_id, path, created, session_id)| {
+            *parent_process_id == launcher.process_id
+                && created.is_some_and(|time| time >= launcher.creation_time)
+                && launcher.session_id.is_some()
+                && *session_id == launcher.session_id
+                && path.is_some_and(|path| {
+                    let normalized = normalized_windows_path(path);
+                    normalized
+                        .rsplit_once('\\')
+                        .is_some_and(|(_, name)| WINDOWS_CODEX_EXECUTABLE_NAMES.contains(&name))
+                        && windows_executable_sits_at_app_root(path, app_dir)
+                })
+        })
+        .map(|(process_id, _, _, created, _)| (process_id, created.unwrap()))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(process_id, created)| (*created, *process_id));
+    candidates
 }
 
 #[cfg(windows)]
@@ -351,11 +623,24 @@ pub(super) async fn spawn_windows_codex(
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
     let process_id = child.id();
+    let startup_process = process_id.and_then(|process_id| {
+        WindowsStartupProcess::open(process_id)
+            .map_err(|error| {
+                error_log::record_failure(
+                    "process_watch_failed",
+                    "capture_windows_startup_process",
+                    format!("{error:#}"),
+                    serde_json::json!({ "processId": process_id }),
+                );
+                error
+            })
+            .ok()
+    });
     Ok((
         SpawnedCodex {
             child: Some(child),
             process_id,
-            startup_process: None,
+            startup_process,
             performance_status: String::new(),
             performance_detail: String::new(),
             startup_injection_mode: String::new(),
@@ -583,6 +868,10 @@ pub(super) async fn stop_windows_spawned_codex(
     spawned: &mut SpawnedCodex,
     app_dir: &std::path::Path,
 ) -> Result<()> {
+    if let Some(process) = &mut spawned.startup_process {
+        let _ = process.refresh();
+        spawned.process_id = Some(process.process_id());
+    }
     let process_id = spawned.process_id;
     let process_stop = terminate_windows_codex_processes_with_timeout(
         app_dir,
@@ -613,6 +902,8 @@ pub(super) async fn complete_spawned_codex_cleanup(
     // 清理失败时保留同一进程身份，交给启动失败后的统一清理继续处理。
     process_stop?;
     spawned.process_id.take();
+    #[cfg(windows)]
+    spawned.startup_process.take();
     if let Some(child) = spawned.child.take() {
         reap_child_after_cleanup(child, "reap_child_after_startup_patch_failure").await;
     }
@@ -1488,6 +1779,66 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 
 #[cfg(test)]
 mod compatibility_tests {
+    #[test]
+    fn desktop_handoff_is_scoped_to_new_children_of_the_launched_install() {
+        let app_dir = Path::new(r"C:\Users\tester\Codex\app");
+        let launcher = WindowsDesktopProcessIdentity {
+            process_id: 19248,
+            executable_path: app_dir.join("Codex.exe"),
+            creation_time: 1000,
+            session_id: Some(1),
+        };
+        let main_path = app_dir.join("ChatGPT.exe");
+        let cli_path = app_dir.join("resources").join("codex.exe");
+        let other_path = Path::new(r"C:\OtherCodex\ChatGPT.exe");
+        let main = (3684, 19248, Some(main_path.as_path()), Some(1001), Some(1));
+        for excluded in [
+            (36584, 19248, Some(cli_path.as_path()), Some(1001), Some(1)),
+            (3684, 10, Some(main_path.as_path()), Some(1001), Some(1)),
+            (3684, 19248, Some(main_path.as_path()), Some(999), Some(1)),
+            (3684, 19248, Some(main_path.as_path()), Some(1001), Some(2)),
+            (3684, 19248, Some(main_path.as_path()), Some(1001), None),
+            (3684, 19248, Some(other_path), Some(1001), Some(1)),
+            (3684, 19248, Some(main_path.as_path()), None, Some(1)),
+        ] {
+            assert!(windows_desktop_successors(&launcher, [excluded]).is_empty());
+        }
+        assert_eq!(
+            windows_desktop_successors(&launcher, [main]),
+            [(3684, 1001)]
+        );
+        let unknown_session = WindowsDesktopProcessIdentity {
+            session_id: None,
+            ..launcher
+        };
+        assert!(windows_desktop_successors(&unknown_session, [main]).is_empty());
+        assert!(is_desktop_main_arguments(["--remote-debugging-port=12345"]));
+        assert!(!is_desktop_main_arguments(["--type=renderer"]));
+        assert!(!is_desktop_main_arguments(["--type", "gpu-process"]));
+        assert!(!is_desktop_main_arguments(["--crashpad-handler"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_process_query_excludes_electron_helpers() {
+        for (argument, expected_main) in [
+            ("--type=renderer", false),
+            ("--crashpad-handler", false),
+            ("--remote-debugging-port=12345", true),
+        ] {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/d", "/c", "set /p value=", argument])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let process = WindowsStartupProcess::open(child.id()).unwrap();
+            let result = process.is_desktop_main_process();
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert_eq!(result.unwrap(), expected_main);
+        }
+    }
     use super::*;
 
     #[test]

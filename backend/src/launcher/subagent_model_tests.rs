@@ -650,6 +650,8 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
         injection_websocket_url: Arc::new(RwLock::new(Arc::from(""))),
         child: Arc::new(Mutex::new(None)),
         process_id: None,
+        #[cfg(windows)]
+        tracked_process_id: None,
         #[cfg(unix)]
         process_group_id: None,
         watchdog_shutdown: Mutex::new(None),

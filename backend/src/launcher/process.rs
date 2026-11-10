@@ -126,6 +126,7 @@ pub(super) fn spawn_codex_exit_watcher(
 pub(super) fn spawn_codex_exit_watcher(
     child: Arc<Mutex<Option<Child>>>,
     process_id: Option<u32>,
+    startup_process: Option<WindowsStartupProcess>,
     codex_exited: Arc<AtomicBool>,
 ) -> (
     oneshot::Sender<()>,
@@ -135,18 +136,52 @@ pub(super) fn spawn_codex_exit_watcher(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let (exit_tx, exit_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
-        let watched_process_id = match process_id {
+        let mut watched_process_id = match startup_process
+            .as_ref()
+            .map(WindowsStartupProcess::process_id)
+            .or(process_id)
+        {
             Some(process_id) => Some(process_id),
             None => child.lock().await.as_ref().and_then(Child::id),
         };
-        let mut source = if process_id.is_some() {
+        let mut source = if startup_process.is_some() {
+            "windows_desktop_process"
+        } else if process_id.is_some() {
             "windows_process_wait"
         } else {
             "direct_child"
         };
         let watched_at = record_codex_exit_watch_started(watched_process_id, source);
         let mut exit_code = None;
-        let natural_exit = if let Some(process_id) = process_id {
+        let natural_exit = if let Some(mut process) = startup_process {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break false,
+                    _ = interval.tick() => match process.refresh() {
+                        Ok(true) => {
+                            watched_process_id = Some(process.process_id());
+                            let _ = child_process_state(&child).await;
+                        }
+                        Ok(false) => {
+                            watched_process_id = Some(process.process_id());
+                            let _ = child_process_state(&child).await;
+                            exit_code = process.exit_code().ok().flatten();
+                            break true;
+                        }
+                        Err(error) => {
+                            watched_process_id = Some(process.process_id());
+                            error_log::record_failure(
+                                "process_watch_failed",
+                                "track_windows_codex_desktop_process",
+                                format!("{error:#}"),
+                                serde_json::json!({ "processId": process.process_id() }),
+                            );
+                        }
+                    }
+                }
+            }
+        } else if let Some(process_id) = process_id {
             tokio::select! {
                 _ = &mut shutdown_rx => false,
                 result = codey_runtime_core::launcher::wait_for_windows_process_exit(process_id) => {
@@ -420,6 +455,7 @@ pub(super) async fn spawn_codex(
 
             match startup_result {
                 Ok(()) => {
+                    let _ = spawned_codex_alive(&mut spawned).await;
                     spawned.startup_injection_mode = "cli".to_string();
                     spawned.performance_status = "ready".to_string();
                     spawned.performance_detail = "Codex 启动成功".to_string();
@@ -427,8 +463,8 @@ pub(super) async fn spawn_codex(
                 }
                 Err(error) => {
                     let retryable = startup_error_allows_retry(&error);
-                    // Exit code 0 during the wait is Electron's single-instance
-                    // handoff: a Codex that Codey did not launch holds the lock.
+                    // 启动入口的桌面子进程由进程跟踪器继续观察；无后继的正常
+                    // 退出仍可能来自 Electron 的单实例转交。
                     let single_instance_exit = error
                         .downcast_ref::<crate::codex_startup_patch::StartupProcessExited>()
                         .is_some_and(|exited| exited.exit_code == Some(0));
@@ -1464,6 +1500,20 @@ async fn launch_windows_codex_without_compatibility(
 
 #[cfg(any(windows, target_os = "macos"))]
 async fn spawned_codex_alive(spawned: &mut SpawnedCodex) -> Result<bool> {
+    #[cfg(windows)]
+    if let Some(process) = &mut spawned.startup_process {
+        let alive = process.refresh()?;
+        spawned.process_id = Some(process.process_id());
+        if let Some(child) = spawned.child.as_mut()
+            && child
+                .try_wait()
+                .context("回收 Windows Codex 启动入口失败")?
+                .is_some()
+        {
+            spawned.child.take();
+        }
+        return Ok(alive);
+    }
     if let Some(child) = spawned.child.as_mut() {
         return child
             .try_wait()
@@ -1472,9 +1522,6 @@ async fn spawned_codex_alive(spawned: &mut SpawnedCodex) -> Result<bool> {
     }
     #[cfg(windows)]
     if let Some(process_id) = spawned.process_id {
-        if let Some(process) = &spawned.startup_process {
-            return process.exit_code().map(|code| code.is_none());
-        }
         // If opening the activation handle failed, keep the conservative PID probe.
         return codey_runtime_core::windows_process_is_running(process_id);
     }

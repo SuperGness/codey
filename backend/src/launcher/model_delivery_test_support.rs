@@ -33,6 +33,8 @@ impl CodeyRuntime {
             injection_websocket_url: Arc::new(RwLock::new(Arc::from(websocket_url))),
             child: Arc::new(Mutex::new(None)),
             process_id: None,
+            #[cfg(windows)]
+            tracked_process_id: None,
             #[cfg(unix)]
             process_group_id: None,
             watchdog_shutdown: Mutex::new(None),

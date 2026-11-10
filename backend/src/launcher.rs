@@ -296,6 +296,8 @@ pub struct CodeyRuntime {
     injection_websocket_url: Arc<RwLock<Arc<str>>>,
     child: Arc<Mutex<Option<Child>>>,
     process_id: Option<u32>,
+    #[cfg(windows)]
+    tracked_process_id: Option<Arc<std::sync::atomic::AtomicU32>>,
     #[cfg(unix)]
     process_group_id: Option<u32>,
     watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -709,14 +711,6 @@ fn validated_router_subagent_runtime_config(
         model_catalog::validate_runtime_subagent_models(&path, &runtime.subagent_roles)?;
     }
     Ok(runtime)
-}
-
-#[test]
-fn model_context_explicit_official_budget_requires_generated_catalog() {
-    assert!(!should_install_codey_model_catalog(true, true, false));
-    assert!(should_install_codey_model_catalog(true, true, true));
-    assert!(!should_install_codey_model_catalog(true, false, true));
-    assert!(should_install_codey_model_catalog(false, true, false));
 }
 
 fn runtime_default_model(
@@ -1403,7 +1397,7 @@ async fn inject_initial_renderer(
     handler: codey_runtime_core::bridge::BridgeHandler,
     injection_scripts: &cdp::PreparedInjectionScripts,
     app_dir: &std::path::Path,
-    spawned: &SpawnedCodex,
+    spawned: &mut SpawnedCodex,
     child: &Arc<Mutex<Option<Child>>>,
     restore_context: RuntimeConfigRestoreContext<'_>,
     prefetched_target: Option<crate::target_prefetch::PrefetchTask>,
@@ -1420,6 +1414,11 @@ async fn inject_initial_renderer(
         Ok(target) => return Ok(target),
         Err(failure) => failure,
     };
+    #[cfg(windows)]
+    if let Some(process) = &mut spawned.startup_process {
+        let _ = process.refresh();
+        spawned.process_id = Some(process.process_id());
+    }
     let error_message = format!("{failure:#}");
     let failure_detail = failure.detail().map(str::to_string);
     let failure_metadata = error_log::FailureMetadata {
@@ -1725,6 +1724,8 @@ struct RuntimeWatcherInputs {
     injection_scripts: cdp::PreparedInjectionScripts,
     child: Arc<Mutex<Option<Child>>>,
     process_id: Option<u32>,
+    #[cfg(windows)]
+    startup_process: Option<WindowsStartupProcess>,
     protect_crashpad_pending: bool,
     crashpad_pending_stats: CrashpadPendingStatsHandle,
 }
@@ -2122,7 +2123,7 @@ async fn spawn_and_inject_runtime(
         handler.clone(),
         injection_scripts,
         &storage.app_dir,
-        &spawned,
+        &mut spawned,
         &child,
         RuntimeConfigRestoreContext {
             home,
@@ -2157,6 +2158,8 @@ fn spawn_runtime_watchers(inputs: RuntimeWatcherInputs) -> RuntimeWatchers {
         injection_scripts,
         child,
         process_id,
+        #[cfg(windows)]
+        startup_process,
         protect_crashpad_pending,
         crashpad_pending_stats,
     } = inputs;
@@ -2174,7 +2177,7 @@ fn spawn_runtime_watchers(inputs: RuntimeWatcherInputs) -> RuntimeWatchers {
         spawn_crashpad_guard_watcher(crashpad_guard_enabled.clone(), crashpad_pending_stats);
     #[cfg(windows)]
     let (exit_watchdog_shutdown, codex_exit, exit_watchdog_task) =
-        spawn_codex_exit_watcher(child, process_id, codex_exited);
+        spawn_codex_exit_watcher(child, process_id, startup_process, codex_exited);
     #[cfg(not(windows))]
     let (exit_watchdog_shutdown, codex_exit, exit_watchdog_task) =
         spawn_codex_exit_watcher(child, codex_exited);
@@ -2516,6 +2519,11 @@ impl CodeyRuntime {
         stage_timings.mark("spawnAndInjectMs");
         stage_timings.report();
         let process_id = spawned.process_id;
+        #[cfg(windows)]
+        let tracked_process_id = spawned
+            .startup_process
+            .as_ref()
+            .map(WindowsStartupProcess::tracked_process_id);
         // 会话内的官方额度数据按启动时的登录身份刷新；记下这个身份，之后
         // 切换默认账号时页面可以区分哪些官方线路已经换了凭据。
         let session_official_account_id =
@@ -2541,6 +2549,8 @@ impl CodeyRuntime {
             injection_scripts: injection_scripts.clone(),
             child: child.clone(),
             process_id,
+            #[cfg(windows)]
+            startup_process: spawned.startup_process,
             protect_crashpad_pending: config.protect_crashpad_pending,
             crashpad_pending_stats,
         });
@@ -2562,6 +2572,8 @@ impl CodeyRuntime {
                 injection_websocket_url,
                 child,
                 process_id,
+                #[cfg(windows)]
+                tracked_process_id,
                 #[cfg(unix)]
                 process_group_id: spawned.process_group_id,
                 watchdog_shutdown: Mutex::new(Some(watchdog_shutdown)),
@@ -2578,13 +2590,21 @@ impl CodeyRuntime {
         ))
     }
 
+    fn current_process_id(&self) -> Option<u32> {
+        #[cfg(windows)]
+        if let Some(tracked) = &self.tracked_process_id {
+            return Some(tracked.load(Ordering::Acquire));
+        }
+        self.process_id
+    }
+
     pub async fn stop(&self) -> Result<()> {
         #[cfg(windows)]
         let renderer_websocket_url = self.injection_websocket_url.read().await.clone();
         self.stop_with_cleanup(
             stop_codex_processes(
                 &self.codex_app_path,
-                self.process_id,
+                self.current_process_id(),
                 #[cfg(windows)]
                 Some(&renderer_websocket_url),
                 #[cfg(unix)]
@@ -2626,7 +2646,7 @@ impl CodeyRuntime {
                 format!("{error:#}"),
                 serde_json::json!({
                     "appPath": self.codex_app_path,
-                    "processId": self.process_id,
+                    "processId": self.current_process_id(),
                 }),
             );
             return Err(error.context("清理 Codex 遗留进程失败"));
@@ -2893,6 +2913,14 @@ async fn restore_runtime_config_after_error(
             anyhow::anyhow!("{error:#}；启动失败后恢复临时 Codex 配置也失败：{restore_error:#}")
         }
     }
+}
+
+#[test]
+fn model_context_explicit_official_budget_requires_generated_catalog() {
+    assert!(!should_install_codey_model_catalog(true, true, false));
+    assert!(should_install_codey_model_catalog(true, true, true));
+    assert!(!should_install_codey_model_catalog(true, false, true));
+    assert!(should_install_codey_model_catalog(false, true, false));
 }
 
 #[cfg(test)]

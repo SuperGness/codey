@@ -82,3 +82,50 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
   assert.doesNotMatch(api, /"refresh_diagnostic_storage_stats"|"refresh_trace_log_stats"/);
   assert.match(api, /"clear_diagnostic_storage"/);
 });
+
+test("maintenance metrics cross the backend boundary as structured fields", async () => {
+  const [launcher, types, operationsPanel] = await Promise.all([
+    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8"),
+    readFile(new URL("../src/App.types.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/OperationsPanel.tsx", import.meta.url), "utf8"),
+  ]);
+
+  for (const [rustField, wireField] of [
+    ["session_files_fixed", "sessionFilesFixed"],
+    ["sqlite_rows_updated", "sqliteRowsUpdated"],
+    ["ghost_tasks_pruned", "ghostTasksPruned"],
+  ]) {
+    assert.match(launcher, new RegExp(`pub ${rustField}: usize`));
+    assert.match(types, new RegExp(`${wireField}\\?: number`));
+    assert.match(operationsPanel, new RegExp(`maintenance\\?\\.${wireField}`));
+  }
+
+  assert.doesNotMatch(operationsPanel, /sessionDetailStr\.match/);
+  assert.doesNotMatch(operationsPanel, /\.match\(\/修复/);
+  assert.doesNotMatch(operationsPanel, /\.match\(\/更新/);
+  assert.doesNotMatch(operationsPanel, /\.match\(\/清理/);
+});
+
+test("startup renders a loading state and desktop/FastCtx entrypoints keep crash logging wired", async () => {
+  const [app, notice, errorLog, main, fastctx, startupPatch] = await Promise.all([
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/useAppNotice.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/error_log.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/bin/codey-fastctx.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/renderer_asset_patch.js", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(app, /if \(!config \|\| !provider\)/);
+  assert.match(app, /正在载入 Codey/);
+  assert.match(
+    app,
+    /<p>\s*<NoticeLoadingText controller=\{noticeController\} \/>\s*<\/p>/,
+  );
+  assert.match(notice, /return <>\{notice\.text\}<\/>/);
+  assert.match(errorLog, /codey-errors\.log/);
+  assert.match(main, /install_crash_log_hook\("codey"/);
+  assert.match(main, /record_process_failure/);
+  assert.match(fastctx, /install_crash_log_hook\("fastctx"/);
+  assert.match(startupPatch, /recordCodeyPatchFailure/);
+});
