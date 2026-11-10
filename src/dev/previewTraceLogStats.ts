@@ -1,4 +1,4 @@
-import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
+import type { CrashpadPendingStats, TraceLogStats } from "../traceLogTypes";
 
 const capturedAt = Math.floor(Date.now() / 1000);
 

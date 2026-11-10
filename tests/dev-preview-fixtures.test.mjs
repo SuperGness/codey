@@ -10,7 +10,7 @@ const source = fs.readFileSync(
 
 test("GPT-6 preview matches the bundled model reasoning metadata", async () => {
   const { previewOfficialModels, previewUpstreamModels } = await loadTypeScriptModule(
-    new URL("../src/previewModels.ts", import.meta.url),
+    new URL("../src/dev/previewModels.ts", import.meta.url),
   );
   const { models } = JSON.parse(fs.readFileSync(
     new URL("../vendor/CodeyRuntime/assets/model-catalog-metadata.json", import.meta.url),
