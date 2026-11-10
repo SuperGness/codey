@@ -260,6 +260,14 @@ fn run_desktop_application_inner(lifecycle: Arc<DesktopLifecycle>) -> Result<()>
     #[cfg(not(target_os = "macos"))]
     {
         #[cfg(windows)]
+        {
+            windows_session::clear_admin_launch_settings();
+            if windows_session::relaunch_deelevated_if_needed() {
+                lifecycle.set_reason("relaunched_deelevated");
+                return Ok(());
+            }
+        }
+        #[cfg(windows)]
         let Some(_desktop_instance) = desktop_instance::claim() else {
             lifecycle.set_reason("instance_not_acquired");
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(

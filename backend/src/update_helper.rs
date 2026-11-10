@@ -848,6 +848,7 @@ fn restart_codey(invocation: &UpdateHelperInvocation, log_path: &Path) -> Result
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
 
+    crate::windows_session::clear_admin_launch_settings();
     let installed_executable = invocation.install_dir.join(INSTALLED_EXECUTABLE_NAME);
     let mut candidates = vec![installed_executable];
     if !candidates

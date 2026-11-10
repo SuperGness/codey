@@ -10,6 +10,7 @@ Unicode true
   !define PROJECT_ROOT "..\..\.."
 !endif
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Codey"
+!define APPCOMPAT_LAYERS_KEY "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
 
 Name "Codey"
 OutFile "${PROJECT_ROOT}\dist\windows\Codey-${VERSION}-windows-x64-setup.exe"
@@ -47,8 +48,16 @@ Section "Codey" SEC_CODEY
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\Codey"
+  Delete "$SMPROGRAMS\Codey\Codey.lnk"
+  Delete "$SMPROGRAMS\Codey\Uninstall Codey.lnk"
   CreateShortcut "$SMPROGRAMS\Codey\Codey.lnk" "$INSTDIR\Codey.exe" "" "$INSTDIR\Codey.exe" 0
   CreateShortcut "$SMPROGRAMS\Codey\Uninstall Codey.lnk" "$INSTDIR\Uninstall.exe"
+
+  DeleteRegValue HKCU "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\Codey.exe"
+  DeleteRegValue HKCU "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\codey-fastctx.exe"
+  DeleteRegValue HKLM "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\Codey.exe"
+  DeleteRegValue HKLM "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\codey-fastctx.exe"
+  ClearErrors
 
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "Codey"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
@@ -67,6 +76,7 @@ Section "Codey" SEC_CODEY
 SectionEnd
 
 Section "Desktop shortcut" SEC_DESKTOP
+  Delete "$DESKTOP\Codey.lnk"
   CreateShortcut "$DESKTOP\Codey.lnk" "$INSTDIR\Codey.exe" "" "$INSTDIR\Codey.exe" 0
 SectionEnd
 
@@ -75,6 +85,11 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\Codey\Codey.lnk"
   Delete "$SMPROGRAMS\Codey\Uninstall Codey.lnk"
   RMDir "$SMPROGRAMS\Codey"
+  DeleteRegValue HKCU "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\Codey.exe"
+  DeleteRegValue HKCU "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\codey-fastctx.exe"
+  DeleteRegValue HKLM "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\Codey.exe"
+  DeleteRegValue HKLM "${APPCOMPAT_LAYERS_KEY}" "$INSTDIR\codey-fastctx.exe"
+  ClearErrors
   Delete "$INSTDIR\Codey.exe"
   Delete "$INSTDIR\codey-fastctx.exe"
   Delete "$INSTDIR\README.md"

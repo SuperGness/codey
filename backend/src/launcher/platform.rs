@@ -618,6 +618,7 @@ pub(super) async fn spawn_windows_codex(
     // A stale WSL_DISTRO_NAME inherited by the native Windows app makes
     // current Codex builds synchronously probe wsl.exe during startup.
     child_command.env_remove("WSL_DISTRO_NAME");
+    child_command.env_remove("__COMPAT_LAYER");
     child_command.creation_flags(codey_runtime_core::windows_create_no_window());
     let child = child_command
         .spawn()

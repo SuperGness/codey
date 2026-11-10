@@ -6,11 +6,14 @@ import { readSource } from "./helpers/read-source.mjs";
 
 // Static contracts keep Windows-only wiring visible on non-Windows CI jobs. Runtime
 // behavior remains covered by Rust tests and the dedicated Windows build job.
-test("Windows source contract: Codey uses the GUI subsystem", async () => {
-  const [main, library, manifest] = await Promise.all([
+test("Windows source contract: Codey uses the GUI subsystem and non-admin execution", async () => {
+  const [main, library, manifest, buildScript, nsisScript, windowsSession] = await Promise.all([
     readSource("backend/src/main.rs"),
     readSource("backend/src/lib.rs"),
     readSource("backend/Cargo.toml"),
+    readSource("backend/build.rs"),
+    readSource("scripts/installer/windows/Codey.nsi"),
+    readSource("backend/src/windows_session.rs"),
   ]);
 
   assert.match(
@@ -21,6 +24,24 @@ test("Windows source contract: Codey uses the GUI subsystem", async () => {
   assert.doesNotMatch(main, /AllocConsole|AttachConsole|ShowWindow|GetConsoleWindow/);
   assert.doesNotMatch(library, /AllocConsole|AttachConsole|ShowWindow|GetConsoleWindow/);
   assert.match(manifest, /Win32_UI_WindowsAndMessaging/);
+  assert.match(manifest, /Win32_System_Registry/);
+  assert.match(
+    buildScript,
+    /<requestedExecutionLevel\s+level="asInvoker"\s+uiAccess="false"\s*\/>/,
+  );
+  assert.doesNotMatch(buildScript, /requireAdministrator|highestAvailable/);
+  assert.match(nsisScript, /RequestExecutionLevel user/);
+  assert.match(
+    nsisScript,
+    /DeleteRegValue HKCU "\$\{APPCOMPAT_LAYERS_KEY\}" "\$INSTDIR\\Codey\.exe"/,
+  );
+  assert.match(
+    library,
+    /windows_session::clear_admin_launch_settings\(\);[\s\S]*?windows_session::relaunch_deelevated_if_needed\(\)[\s\S]*?desktop_instance::claim\(\)/,
+  );
+  assert.match(windowsSession, /strip_runasadmin_layer/);
+  assert.match(windowsSession, /clear_shortcut_runas_flag/);
+  assert.match(windowsSession, /CreateProcessWithTokenW/);
 });
 
 test("Windows source contract: fatal startup failures remain visible", async () => {

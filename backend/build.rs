@@ -70,6 +70,13 @@ fn embed_windows_icon() {
       />
     </dependentAssembly>
   </dependency>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
 </assembly>"#,
     );
     resource.compile().expect("无法嵌入 Codey Windows 图标");
