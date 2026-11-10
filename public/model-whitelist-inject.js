@@ -1544,9 +1544,15 @@
     if (element.matches?.(subagentModelLabelSelector)) {
       observeSubagentModelLabel(element);
     }
-    for (const label of element.querySelectorAll?.(subagentModelLabelSelector) || []) {
-      if (probe && !probe.admit(label)) break;
-      observeSubagentModelLabel(label);
+    const roots = element.closest?.("[class*='h-toolbar-pane']")
+      ? [element]
+      : Array.from(element.querySelectorAll?.("[class*='h-toolbar-pane']") || []);
+    for (const root of roots) {
+      if (!allowTurn && root.closest?.("[data-turn-key]")) continue;
+      for (const label of root.querySelectorAll?.(subagentModelLabelSelector) || []) {
+        if (probe && !probe.admit(label)) break;
+        observeSubagentModelLabel(label);
+      }
     }
   };
 
