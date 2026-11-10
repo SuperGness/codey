@@ -579,23 +579,34 @@ test("rejects fractional or imprecise token and step counts", async () => {
   }
 });
 
-test("remounts into a replacement composer after an in-flight stats response", async () => {
+test("keeps the bar persistently mounted across a replacement composer after an in-flight stats response", async () => {
   let resolve;
   const env = createEnvironment({ request: () => new Promise(done => { resolve = done; }) });
   try {
     await flushTimers(30);
     const originalBar = env.bar();
+    assert.equal(originalBar.parentElement, env.document.body);
+    let bodyAppends = 0;
+    const appendChild = env.document.body.appendChild.bind(env.document.body);
+    env.document.body.appendChild = (child) => {
+      if (child === originalBar) bodyAppends += 1;
+      return appendChild(child);
+    };
     env.scope.remove();
     const replacement = env.document.createElement("div");
+    replacement.getBoundingClientRect = () => ({ bottom: 780, height: 80, left: 240, right: 940, top: 700, width: 700 });
     const anchor = env.document.createElement("div");
     anchor.setAttribute("data-above-composer-conversation-id", "conversation-1");
     replacement.append(anchor, env.document.createElement("textarea"));
     env.document.body.appendChild(replacement);
-    // 不发 MutationObserver 通知，确保完成异步读取时主动重新定位。
+    // 不发 MutationObserver 通知，确保完成异步读取时主动重新定位且无需重插节点。
     resolve({ status: "ok", stats: STATS });
     await flushTimers(30);
     assert.equal(env.bar(), originalBar);
-    assert.equal(env.bar().parentElement, replacement);
+    assert.equal(env.bar().parentElement, env.document.body);
+    assert.equal(bodyAppends, 0, "stats bar must remain fixed without re-inserting into the DOM");
+    assert.equal(env.bar().style.getPropertyValue("left"), "240px");
+    assert.equal(env.bar().style.getPropertyValue("width"), "700px");
     assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   } finally {
     env.dispose();
@@ -629,7 +640,7 @@ test("mounts cached stats when the composer appears after the initial response",
     env.scope.append(env.anchor, env.textarea);
     env.emitAnchorMutation();
     await flushTimers(160);
-    assert.equal(env.bar().parentElement, env.scope);
+    assert.equal(env.bar().parentElement, env.document.body);
     assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
     assert.equal(env.calls.length, 1, "mounting must not refetch the same session");
   } finally {
@@ -643,7 +654,8 @@ test("mounts the stats bar under the composer and renders speed/cache/total", as
 
   const bar = env.bar();
   assert.ok(bar, "stats bar should exist");
-  assert.equal(bar.parentElement, env.scope);
+  assert.equal(bar.parentElement, env.document.body);
+  assert.equal(env.scope.contains(bar), false);
   assert.equal(bar.hidden, false);
   assert.equal(metric(bar, "speed"), "188 Token/s");
   assert.equal(metric(bar, "activity"), "本轮 2 步");
@@ -742,12 +754,12 @@ test("remounts the bar after Codex rebuilds the composer DOM", async () => {
   assert.ok(bar);
   bar.remove();
   env.emitMutation([
-    { type: "childList", target: env.scope, removedNodes: [bar], addedNodes: [] },
+    { type: "childList", target: env.document.body, removedNodes: [bar], addedNodes: [] },
   ]);
   await flushTimers(200);
   const remounted = env.bar();
   assert.ok(remounted, "bar should be re-created after removal");
-  assert.equal(remounted.parentElement, env.scope);
+  assert.equal(remounted.parentElement, env.document.body);
   assert.equal(remounted.hidden, false);
 });
 
@@ -802,7 +814,7 @@ test("does not double-install on repeated injection", async () => {
   // 同一上下文再次执行整个脚本：installed 标记应阻止重复挂载。
   env.rerun();
   await flushTimers(30);
-  const count = env.scope.children.filter(
+  const count = env.document.body.children.filter(
     (child) => child.id === "codey-conversation-stats",
   ).length;
   assert.equal(count, 1);

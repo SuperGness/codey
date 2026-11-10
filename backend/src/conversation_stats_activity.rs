@@ -115,6 +115,13 @@ pub(super) struct Activity {
     pub(super) usage_snapshot: Option<ConversationStatsSnapshot>,
 }
 
+fn line_may_contain_activity_record(line: &[u8]) -> bool {
+    memchr::memmem::find(line, b"event_msg").is_some()
+        || memchr::memmem::find(line, b"session_meta").is_some()
+        || memchr::memmem::find(line, b"token_usage_record").is_some()
+        || memchr::memmem::find(line, b"\\u").is_some()
+}
+
 impl Activity {
     pub fn read_append(&mut self, path: &Path, session_id: &str) -> std::io::Result<()> {
         let mut file = std::fs::File::open(path)?;
@@ -124,7 +131,7 @@ impl Activity {
             self.last_read_start = self.offset;
             self.last_read_bytes = 0;
         }
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(64 * 1024, file);
         let mut line = Vec::new();
         loop {
             // 单行保留上限 8 MiB，超大工具输出按块跳过。未写完的末行下次再读。
@@ -136,7 +143,10 @@ impl Activity {
                 let buf = reader.fill_buf()?;
                 if buf.is_empty() {
                     // 完整 JSON 可以暂时没有换行；不推进偏移，追加后仍重新校验。
-                    if !oversized && let Ok(record) = serde_json::from_slice::<Value>(&line) {
+                    if !oversized
+                        && line_may_contain_activity_record(&line)
+                        && let Ok(record) = serde_json::from_slice::<Value>(&line)
+                    {
                         self.record(&record, session_id);
                     }
                     return Ok(());
@@ -160,7 +170,10 @@ impl Activity {
                 }
             }
             self.offset = start + consumed;
-            if !oversized && let Ok(record) = serde_json::from_slice::<Value>(&line) {
+            if !oversized
+                && line_may_contain_activity_record(&line)
+                && let Ok(record) = serde_json::from_slice::<Value>(&line)
+            {
                 self.record(&record, session_id);
             }
         }
