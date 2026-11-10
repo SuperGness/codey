@@ -149,8 +149,8 @@
   gap: 4px;
   padding: 2px 7px;
   border-radius: 5px;
-  background: rgba(0, 122, 255, 0.05);
-  border: 1px solid rgba(0, 122, 255, 0.12);
+  background: color-mix(in srgb, var(--codey-blue) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--codey-blue) 12%, transparent);
   color: var(--codey-blue, #0066cc);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;

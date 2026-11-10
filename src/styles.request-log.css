@@ -12,6 +12,8 @@
   justify-content: space-between;
   gap: 12px;
   flex-shrink: 0;
+  min-height: 26px;
+  padding: 0 2px;
 }
 
 /* 筛选与概览直接落在画布上，不再叠加边框卡片，减少层层嵌套的盒感。 */
@@ -22,7 +24,6 @@
 .request-log-search { display: flex; gap: 6px; align-items: center; flex: 1 1 280px; min-width: 240px; max-width: 480px; }
 
 .request-log-overview { flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
-.request-log-overview-heading { min-height: 26px; padding: 0 2px; }
 
 /* 统一的白色卡片语言：画布上的唯一层级。 */
 .request-log-results, .request-log-metric, .request-log-analytics {
@@ -764,7 +765,7 @@
   background: var(--codey-blue, #007aff);
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 122, 255, 0.25);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--codey-blue) 25%, transparent);
 }
 .request-log-pagination .pagination__link:not([data-active="true"]):hover:not(:disabled):not([aria-disabled="true"]) {
   background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);

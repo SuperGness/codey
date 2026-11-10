@@ -1,118 +1,131 @@
+/*
+ * 视觉语言：信息流式的纯白画布。区块之间只用细分隔线，不叠卡片阴影；
+ * 粗黑标题、胶囊按钮和整行悬停底色承担层级，蓝色只留给主操作与当前状态。
+ */
 :root,
 :host {
   color-scheme: light;
   font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-    "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", Arial, sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
 
-  /* Text colors */
-  --codey-text: #1d1d1f;
-  --codey-text-soft: #3a3a3c;
-  --codey-muted: #6e6e73;
-  --codey-subtle: #8e8e93;
+  --codey-text: #0f1419;
+  --codey-text-soft: #2f3640;
+  --codey-muted: #536471;
+  --codey-subtle: #8b98a5;
 
-  /* Surfaces & Backgrounds */
   --codey-surface: #ffffff;
-  --codey-surface-muted: #fafafc;
-  --codey-surface-sunken: #f2f2f5;
+  --codey-surface-muted: #f7f9f9;
+  --codey-surface-sunken: #eff3f4;
   --codey-surface-elevated: #ffffff;
   --codey-surface-rgb: 255, 255, 255;
-  --codey-ink-rgb: 0, 0, 0;
+  --codey-ink-rgb: 15, 20, 25;
 
-  /* Borders & Dividers */
-  --codey-border: rgba(0, 0, 0, 0.08);
-  --codey-border-subtle: rgba(0, 0, 0, 0.05);
-  --codey-border-strong: rgba(0, 0, 0, 0.15);
+  --codey-border: #e6eaed;
+  --codey-border-subtle: #eff3f4;
+  --codey-border-strong: #cfd9de;
+  --codey-hover: rgba(15, 20, 25, 0.035);
+  --codey-press: rgba(15, 20, 25, 0.07);
 
-  /* Semantic Accents */
-  --codey-blue: #007aff;
-  --codey-blue-hover: #0066d6;
-  --codey-blue-soft: #eaf3ff;
-  --codey-blue-border: #bfdbfe;
+  --codey-blue: #1d8cf0;
+  --codey-blue-hover: #1a7fd8;
+  --codey-blue-soft: rgba(29, 140, 240, 0.1);
+  --codey-blue-border: rgba(29, 140, 240, 0.32);
 
-  --codey-green: #34c759;
-  --codey-green-hover: #2db34f;
-  --codey-green-soft: #eafaf1;
-  --codey-green-border: #bbf7d0;
+  --codey-signal: #1d8cf0;
+  --codey-signal-soft: rgba(29, 140, 240, 0.1);
 
-  --codey-red: #ff3b30;
-  --codey-red-hover: #e02d23;
-  --codey-red-soft: #ffeded;
-  --codey-red-border: #fecaca;
+  --codey-green: #00a36c;
+  --codey-green-hover: #008f5e;
+  --codey-green-soft: rgba(0, 163, 108, 0.1);
+  --codey-green-border: rgba(0, 163, 108, 0.3);
 
-  --codey-amber: #ff9500;
-  --codey-amber-hover: #e08300;
-  --codey-amber-soft: #fff8eb;
-  --codey-amber-border: #fed7aa;
+  --codey-red: #f4212e;
+  --codey-red-hover: #dc1e29;
+  --codey-red-soft: rgba(244, 33, 46, 0.1);
+  --codey-red-border: rgba(244, 33, 46, 0.3);
 
-  --codey-purple: #af52de;
-  --codey-purple-soft: #fbf2ff;
-  --codey-purple-border: #e9d5ff;
+  --codey-amber: #e08600;
+  --codey-amber-hover: #c77700;
+  --codey-amber-soft: rgba(255, 173, 31, 0.14);
+  --codey-amber-border: rgba(224, 134, 0, 0.32);
 
-  /* Legacy Mac Tokens mapped */
+  --codey-purple: #7856ff;
+  --codey-purple-soft: rgba(120, 86, 255, 0.1);
+  --codey-purple-border: rgba(120, 86, 255, 0.3);
+
   --mac-blue: var(--codey-blue);
   --mac-gray-bg: var(--codey-surface-sunken);
   --mac-text-primary: var(--codey-text);
   --mac-text-secondary: var(--codey-muted);
   --mac-text-tertiary: var(--codey-subtle);
 
-  /* 分层表面：侧栏 < 画布 < 卡片 */
-  --codey-sidebar: #f1f1f4;
-  --codey-canvas: #f8f8fa;
+  /* 侧栏、画布与卡片同为白底，仅靠细线分区；面板用极浅灰托底。 */
+  --codey-sidebar: #ffffff;
+  --codey-canvas: #ffffff;
   --codey-card: #ffffff;
-  --codey-card-shadow: 0 0 0 1px rgba(15, 15, 30, 0.06), 0 1px 2px rgba(15, 15, 30, 0.04);
+  --codey-panel: #f7f9f9;
+  --codey-card-shadow: none;
+  --codey-popover-shadow: 0 0 15px rgba(101, 119, 134, 0.2), 0 0 3px 1px rgba(101, 119, 134, 0.15);
 
   --codey-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-/* 深色模式：高对比度微光与层次感 */
+/* 深色模式：纯黑画布与冷灰细线。 */
 [data-theme="dark"] {
   color-scheme: dark;
-  --codey-text: #f5f5f7;
-  --codey-text-soft: #d5d5da;
-  --codey-muted: #a1a1aa;
-  --codey-subtle: #71717a;
+  --codey-text: #e7e9ea;
+  --codey-text-soft: #c9cdd1;
+  --codey-muted: #8b949c;
+  --codey-subtle: #6b737b;
 
-  --codey-surface: #232327;
-  --codey-surface-muted: #2a2a2f;
-  --codey-surface-sunken: #18181b;
-  --codey-surface-elevated: #2c2c32;
-  --codey-surface-rgb: 35, 35, 39;
+  --codey-surface: #000000;
+  --codey-surface-muted: #16181c;
+  --codey-surface-sunken: #202327;
+  --codey-surface-elevated: #16181c;
+  --codey-surface-rgb: 0, 0, 0;
 
-  --codey-sidebar: #161618;
-  --codey-canvas: #1b1b1e;
-  --codey-card: #232327;
-  --codey-card-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --codey-ink-rgb: 255, 255, 255;
+  --codey-sidebar: #000000;
+  --codey-canvas: #000000;
+  --codey-card: #000000;
+  --codey-panel: #16181c;
+  --codey-card-shadow: none;
+  --codey-popover-shadow: 0 0 15px rgba(255, 255, 255, 0.12), 0 0 3px 1px rgba(255, 255, 255, 0.1);
+  --codey-ink-rgb: 231, 233, 234;
 
-  --codey-border: rgba(255, 255, 255, 0.1);
-  --codey-border-subtle: rgba(255, 255, 255, 0.06);
-  --codey-border-strong: rgba(255, 255, 255, 0.18);
+  --codey-border: #2f3336;
+  --codey-border-subtle: #202327;
+  --codey-border-strong: #3e4347;
+  --codey-hover: rgba(231, 233, 234, 0.035);
+  --codey-press: rgba(231, 233, 234, 0.08);
 
-  --codey-blue: #3b82f6;
-  --codey-blue-hover: #60a5fa;
-  --codey-blue-soft: rgba(59, 130, 246, 0.14);
-  --codey-blue-border: rgba(59, 130, 246, 0.28);
+  --codey-blue: #2b95f2;
+  --codey-blue-hover: #4aa5f5;
+  --codey-blue-soft: rgba(43, 149, 242, 0.14);
+  --codey-blue-border: rgba(43, 149, 242, 0.4);
 
-  --codey-green: #22c55e;
-  --codey-green-hover: #4ade80;
-  --codey-green-soft: rgba(34, 197, 94, 0.14);
-  --codey-green-border: rgba(34, 197, 94, 0.28);
+  --codey-signal: #2b95f2;
+  --codey-signal-soft: rgba(43, 149, 242, 0.14);
 
-  --codey-red: #ef4444;
-  --codey-red-hover: #f87171;
-  --codey-red-soft: rgba(239, 68, 68, 0.14);
-  --codey-red-border: rgba(239, 68, 68, 0.28);
+  --codey-green: #00ba7c;
+  --codey-green-hover: #1fd096;
+  --codey-green-soft: rgba(0, 186, 124, 0.14);
+  --codey-green-border: rgba(0, 186, 124, 0.36);
 
-  --codey-amber: #f59e0b;
-  --codey-amber-hover: #fbbf24;
-  --codey-amber-soft: rgba(245, 158, 11, 0.14);
-  --codey-amber-border: rgba(245, 158, 11, 0.28);
+  --codey-red: #f4212e;
+  --codey-red-hover: #f84a54;
+  --codey-red-soft: rgba(244, 33, 46, 0.15);
+  --codey-red-border: rgba(244, 33, 46, 0.4);
 
-  --codey-purple: #a855f7;
-  --codey-purple-soft: rgba(168, 85, 247, 0.14);
-  --codey-purple-border: rgba(168, 85, 247, 0.28);
+  --codey-amber: #ffad1f;
+  --codey-amber-hover: #ffbd4a;
+  --codey-amber-soft: rgba(255, 173, 31, 0.14);
+  --codey-amber-border: rgba(255, 173, 31, 0.36);
+
+  --codey-purple: #9a7dff;
+  --codey-purple-soft: rgba(154, 125, 255, 0.15);
+  --codey-purple-border: rgba(154, 125, 255, 0.38);
 
   --mac-blue: var(--codey-blue);
   --mac-gray-bg: var(--codey-surface-sunken);
@@ -159,47 +172,69 @@ body {
 }
 
 @layer components {
+  /* 胶囊按钮：主操作为墨色实心，次操作为描边，幽灵按钮只在悬停时出现底色。 */
   .button {
-    height: 32px;
+    height: 34px;
     gap: 6px;
-    border-radius: 8px;
-    padding-inline: 12px;
-    font-size: 12.5px;
-    letter-spacing: -0.005em;
+    border-radius: 999px;
+    padding-inline: 16px;
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: 0;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 80ms ease;
   }
 
   .button--sm {
-    height: 28px;
-    border-radius: 7px;
-    padding-inline: 10px;
-    font-size: 12px;
+    height: 30px;
+    border-radius: 999px;
+    padding-inline: 13px;
+    font-size: 12.5px;
   }
 
   .button--lg {
-    height: 36px;
-    font-size: 13px;
+    height: 42px;
+    border-radius: 999px;
+    padding-inline: 22px;
+    font-size: 15px;
   }
 
   .button--icon-only {
-    width: 32px;
+    width: 34px;
     padding: 0;
   }
 
   .button--icon-only.button--sm {
-    width: 28px;
+    width: 30px;
   }
 
-  .button--outline {
-    border-color: var(--codey-border-strong);
-    background: var(--codey-card);
+  .button--primary {
+    --button-bg: var(--codey-text);
+    --button-bg-hover: color-mix(in srgb, var(--codey-text) 86%, var(--codey-surface));
+    --button-bg-pressed: color-mix(in srgb, var(--codey-text) 78%, var(--codey-surface));
+    --button-fg: var(--codey-surface);
   }
 
-  /* 次级按钮在灰色画布上用白底卡片样式，避免灰底按钮与背景融在一起。 */
-  .button--secondary,
+  .button--outline,
+  .button--secondary {
+    --button-bg: transparent;
+    --button-bg-hover: var(--codey-hover);
+    --button-bg-pressed: var(--codey-press);
+    --button-fg: var(--codey-text);
+    border: 1px solid var(--codey-border-strong);
+    box-shadow: none;
+  }
+
   .button--tertiary {
-    --button-bg: var(--codey-card);
-    --button-bg-hover: color-mix(in srgb, var(--codey-card) 92%, var(--codey-text));
-    box-shadow: var(--codey-card-shadow);
+    --button-bg: var(--codey-surface-sunken);
+    --button-bg-hover: color-mix(in srgb, var(--codey-surface-sunken) 82%, var(--codey-text));
+    --button-bg-pressed: var(--button-bg-hover);
+    --button-fg: var(--codey-text);
+    box-shadow: none;
+  }
+
+  .button--ghost {
+    --button-bg-hover: var(--codey-press);
+    --button-bg-pressed: var(--codey-press);
   }
 
   .button--secondary:disabled,
@@ -207,14 +242,14 @@ body {
   .button--tertiary:disabled,
   .button--tertiary[aria-disabled="true"] {
     box-shadow: none;
-    --button-bg: rgba(var(--codey-ink-rgb), 0.04);
   }
 
   .chip {
-    border-radius: 6px;
-    font-size: 11px;
+    border-radius: 999px;
+    font-size: 11.5px;
     line-height: 18px;
-    font-weight: 550;
+    font-weight: 600;
+    letter-spacing: 0;
   }
 }
 
@@ -224,17 +259,27 @@ button,
 }
 
 .app-shell {
-  --foreground: var(--codey-text, #1d1d1f);
-  --ring: var(--codey-blue, #007aff);
+  --foreground: var(--codey-text, #141413);
+  --ring: var(--codey-blue, #1d39c4);
   position: relative;
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  background: linear-gradient(180deg, var(--codey-surface-muted, #fafafc) 0%, var(--codey-surface-sunken, #f2f2f5) 100%);
+  background: var(--codey-canvas);
   color: var(--foreground);
   isolation: isolate;
+}
+
+.settings-modal-shell {
+  border: 1px solid var(--codey-border);
+  background: var(--codey-canvas);
+  box-shadow: 0 20px 60px -10px rgba(15, 20, 25, 0.28), 0 0 0 1px rgba(15, 20, 25, 0.04);
+}
+
+[data-theme="dark"] .settings-modal-shell {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 24px 70px -8px rgba(0, 0, 0, 0.8);
 }
 
 .sr-only {
@@ -255,11 +300,12 @@ button,
   top: 10px;
   left: 16px;
   border: 1px solid var(--ring);
-  border-radius: 10px;
-  background: var(--codey-surface, #ffffff);
-  padding: 8px 14px;
-  color: var(--codey-text, #1d1d1f);
+  border-radius: 6px;
+  background: var(--codey-surface, #fcfbf9);
+  padding: 7px 13px;
+  color: var(--codey-text, #141413);
   font-size: 12px;
+  font-weight: 600;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-140%);
@@ -278,15 +324,13 @@ button,
 
 .macos-titlebar {
   display: flex;
-  height: 38px;
-  flex: 0 0 38px;
+  height: 36px;
+  flex: 0 0 36px;
   align-items: center;
   justify-content: space-between;
   padding: 0 16px;
-  background: var(--codey-surface-muted, rgba(246, 246, 248, 0.85));
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  background: var(--codey-sidebar);
+  border-bottom: 1px solid var(--codey-border);
   user-select: none;
   z-index: 40;
 }
@@ -302,14 +346,16 @@ button,
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-family: var(--codey-font-mono);
+  font-size: 11px;
   font-weight: 600;
-  color: var(--codey-text, #1d1d1f);
-  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  color: var(--codey-muted);
+  letter-spacing: 0.06em;
 }
 
 .app-title-text {
-  color: var(--codey-text, #1d1d1f);
+  color: var(--codey-text-soft);
 }
 
 .settings-modal-header {
@@ -330,7 +376,7 @@ button,
 
 .feedback-qr-popover {
   position: absolute;
-  z-index: 40;
+  z-index: 60;
   bottom: calc(100% + 10px);
   left: 50%;
   display: grid;
@@ -338,11 +384,11 @@ button,
   justify-items: center;
   gap: 7px;
   padding: 10px;
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.1);
+  border: 1px solid var(--codey-border-strong);
   border-radius: 12px;
   background: var(--codey-surface, #ffffff);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
-  color: var(--codey-text-soft, #4b4b50);
+  box-shadow: var(--codey-popover-shadow);
+  color: var(--codey-text-soft);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -359,8 +405,8 @@ button,
   left: 50%;
   width: 9px;
   height: 9px;
-  border-right: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.1);
-  border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.1);
+  border-right: 1px solid var(--codey-border-strong);
+  border-bottom: 1px solid var(--codey-border-strong);
   background: var(--codey-surface, #ffffff);
   content: "";
   transform: translateX(-50%) rotate(45deg);
@@ -370,7 +416,7 @@ button,
   display: block;
   width: 156px;
   height: 156px;
-  border-radius: 7px;
+  border-radius: 8px;
   object-fit: cover;
 }
 
@@ -382,7 +428,7 @@ button,
 }
 
 /* ==========================================================================
-   Main Scroll & Page Container
+   Main Scroll & Feed Column
    ========================================================================== */
 
 .page-scroll {
@@ -390,26 +436,53 @@ button,
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-color: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.18) transparent;
+  scrollbar-color: rgba(var(--codey-ink-rgb, 15, 20, 25), 0.18) transparent;
   scrollbar-width: thin;
   scrollbar-gutter: stable;
 }
 
+/* 内容列贴住侧栏左对齐，区块之间用通栏细线分隔。 */
+/* 分隔线通栏，内容在左侧 1000px 内排布，宽窗口下右侧留白。 */
 .page {
-  width: min(100%, 860px);
-  margin: 0 auto;
-  padding: 0 36px 48px;
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0 0 40px;
 }
+
+.page > section,
+.page > .secondary-section,
+.overview-config > section {
+  margin: 0;
+  padding: 22px var(--page-gutter-end) 26px var(--page-gutter);
+  border-bottom: 1px solid var(--codey-border);
+}
+
+.page > section:last-child,
+.overview-config > section:last-child {
+  border-bottom: 0;
+}
+
+/* 基础功能页配置区：标题在上，配置项按两列分组排列；功能策略排在启动代理之前。 */
+.overview-config {
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-config > section[aria-labelledby="runtime-title"] { order: 1; }
+.overview-config > .launch-proxy-section { order: 2; }
+.overview-config > .notification-section { order: 3; }
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-columns: 252px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  background: var(--codey-canvas);
 }
 
-/* ---------- Sidebar ---------- */
+/* ---------- 左侧导航 ---------- */
 
 .settings-sidebar {
   display: flex;
@@ -417,14 +490,14 @@ button,
   flex-direction: column;
   overflow: hidden;
   overscroll-behavior: contain;
-  border-right: 1px solid var(--codey-border-subtle);
+  border-right: 1px solid var(--codey-border);
   background: var(--codey-sidebar);
-  padding: 0 12px 12px;
+  padding: 10px 14px 14px;
 }
 
 .settings-sidebar-header {
   flex: none;
-  padding: 18px 6px 18px;
+  padding: 8px 6px 14px;
 }
 
 .sidebar-brand {
@@ -436,43 +509,43 @@ button,
 }
 
 .sidebar-brand > .codey-brand-mark {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   flex: none;
+  border-radius: 50%;
 }
 
 .sidebar-brand-text {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 0;
   white-space: nowrap;
 }
 
 .sidebar-brand-text h1 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 20px;
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 22px;
   letter-spacing: -0.02em;
 }
 
 .sidebar-brand-text span {
   color: var(--codey-muted);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 14px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
 }
 
 .settings-sidebar-menu {
   flex: 1;
   min-height: 0;
-  /* 抵消侧栏内边距，避免选中项左侧指示条被滚动容器裁掉。 */
-  margin-inline: -12px;
-  padding-inline: 12px;
+  margin-inline: -6px;
+  padding-inline: 6px;
   overflow-y: auto;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 .settings-nav-group {
@@ -482,37 +555,37 @@ button,
 }
 
 .settings-nav-group + .settings-nav-group {
-  margin-top: 22px;
+  margin-top: 14px;
 }
 
 .settings-nav-group-title {
-  padding: 0 10px 6px;
+  padding: 6px 16px 6px;
   color: var(--codey-subtle);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
   user-select: none;
 }
 
 .settings-nav-item {
   position: relative;
   display: flex;
-  min-height: 34px;
+  width: 100%;
+  min-height: 46px;
   flex-shrink: 0;
   align-items: center;
-  gap: 10px;
+  gap: 16px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 999px;
   background: transparent;
-  padding: 7px 10px;
-  color: var(--codey-text-soft);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.3;
+  padding: 0 22px 0 14px;
+  color: var(--codey-text);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.2;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition: background-color 150ms ease;
 }
 
 .settings-nav-item span {
@@ -522,34 +595,29 @@ button,
 }
 
 .settings-nav-item svg {
+  width: 23px;
+  height: 23px;
   flex-shrink: 0;
-  color: var(--codey-subtle);
-  transition: color 120ms ease;
+  color: currentColor;
+  stroke-width: 1.7;
 }
 
 .settings-nav-item:hover {
-  background: rgba(var(--codey-ink-rgb), 0.05);
-  color: var(--codey-text);
-}
-
-.settings-nav-item:hover svg {
-  color: var(--codey-text-soft);
+  background: var(--codey-press);
 }
 
 .settings-nav-item[aria-current="page"] {
-  background: var(--codey-card);
-  color: var(--codey-text);
-  font-weight: 600;
-  box-shadow: var(--codey-card-shadow);
+  background: var(--codey-surface-sunken);
+  font-weight: 800;
 }
 
 .settings-nav-item[aria-current="page"] svg {
-  color: var(--codey-blue);
+  stroke-width: 2.3;
 }
 
 .settings-nav-item:focus-visible {
   outline: 2px solid var(--codey-blue);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
 .settings-sidebar-footer {
@@ -557,17 +625,21 @@ button,
   flex: none;
   flex-direction: column;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 10px;
 }
 
+/* Codex 运行状态：仿账户条的整行胶囊。 */
 .codex-status-card {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 6px 8px 12px;
-  border-radius: 10px;
-  background: var(--codey-card);
-  box-shadow: var(--codey-card-shadow);
+  padding: 8px 6px 8px 14px;
+  border-radius: 999px;
+  transition: background-color 150ms ease;
+}
+
+.codex-status-card:hover {
+  background: var(--codey-hover);
 }
 
 .codex-status-dot {
@@ -581,7 +653,6 @@ button,
 
 .codex-status-card.is-running .codex-status-dot {
   background: var(--codey-green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--codey-green) 22%, transparent);
 }
 
 .codex-status-card.is-pending .codex-status-dot {
@@ -602,36 +673,42 @@ button,
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  line-height: 1.25;
+  line-height: 1.3;
 }
 
 .codex-status-text strong {
   color: var(--codey-text);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .codex-status-text span {
+  overflow: hidden;
   color: var(--codey-muted);
-  font-size: 11px;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .codex-status-action {
   flex: none;
-  height: 26px !important;
-  padding-inline: 8px !important;
-  color: var(--codey-text-soft) !important;
-  font-size: 11.5px !important;
+  height: 28px !important;
+  padding-inline: 11px !important;
+  border: 1px solid var(--codey-border-strong) !important;
+  border-radius: 999px !important;
+  color: var(--codey-text) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
 }
 
 .codex-status-action.is-warning {
-  color: color-mix(in srgb, var(--codey-amber) 55%, var(--codey-text)) !important;
+  border-color: var(--codey-amber-border) !important;
+  color: var(--codey-amber) !important;
   background-color: var(--codey-amber-soft);
-  box-shadow: inset 0 0 0 1px var(--codey-amber-border);
 }
 
 .codex-status-action.is-warning:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--codey-amber-soft) 88%, var(--codey-amber));
+  background-color: color-mix(in srgb, var(--codey-amber-soft) 80%, var(--codey-amber));
 }
 
 .sidebar-save {
@@ -644,10 +721,10 @@ button,
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding-inline: 4px;
+  padding-inline: 16px;
   color: var(--codey-amber);
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .sidebar-dirty-hint > span {
@@ -657,9 +734,29 @@ button,
   background: currentColor;
 }
 
+/* 保存按钮是全局唯一的蓝色主操作。 */
 .sidebar-save-button {
   width: 100% !important;
-  height: 34px !important;
+  height: 46px !important;
+  border-radius: 999px !important;
+  font-size: 15.5px !important;
+  font-weight: 800 !important;
+  border: 0 !important;
+}
+
+.sidebar-save-button.button--primary:not(:disabled) {
+  background: var(--codey-blue) !important;
+  color: #ffffff !important;
+}
+
+.sidebar-save-button.button--primary:hover:not(:disabled) {
+  background: var(--codey-blue-hover) !important;
+}
+
+.sidebar-save-button:disabled {
+  background: var(--codey-blue) !important;
+  color: #ffffff !important;
+  opacity: 0.5;
 }
 
 .sidebar-footer-bar {
@@ -667,8 +764,7 @@ button,
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--codey-border-subtle);
+  padding: 2px 4px 0;
 }
 
 .sidebar-footer-left {
@@ -682,35 +778,38 @@ button,
   display: flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 2px;
+  gap: 0;
 }
 
 .sidebar-footer-version {
   display: inline-flex;
   align-items: center;
-  padding: 0 6px;
+  padding: 0 6px 0 8px;
   color: var(--codey-muted);
   font-family: var(--codey-font-mono);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
+  line-height: 1.2;
   user-select: none;
 }
 
 .sidebar-footer-icon-btn {
   color: var(--codey-muted) !important;
+  border-radius: 999px !important;
   transition: color 0.15s ease, background-color 0.15s ease !important;
 }
 
 .sidebar-footer-icon-btn:hover {
-  color: var(--codey-text) !important;
-  background-color: rgba(var(--codey-ink-rgb), 0.06) !important;
+  color: var(--codey-blue) !important;
+  background-color: var(--codey-blue-soft) !important;
 }
 
-/* ---------- Content ---------- */
+/* ---------- 右侧内容区 ---------- */
 
 .settings-content {
+  --page-gutter: 28px;
+  --page-gutter-end: max(var(--page-gutter), calc(100cqi - 1000px + var(--page-gutter)));
   position: relative;
   display: flex;
   min-width: 0;
@@ -744,28 +843,35 @@ button,
   flex: none;
   overflow: hidden;
   scrollbar-gutter: stable;
+  border-bottom: 1px solid var(--codey-border);
+  background: var(--codey-canvas);
 }
 
 .settings-page-header-host .settings-page-header {
   position: static;
-  width: min(100%, 860px);
-  margin: 0 auto;
+  width: 100%;
+  margin: 0;
+  padding: 14px var(--page-gutter-end) 14px var(--page-gutter);
+  border-bottom: 0;
+  box-shadow: none;
+  background: transparent;
 }
 
-.settings-page-scroll .page {
-  padding-top: 20px;
+.app-shell.embedded .settings-page-header-host .settings-page-header {
+  padding-right: max(64px, var(--page-gutter-end));
 }
 
 .settings-close-button {
   position: absolute !important;
-  top: 14px;
-  right: 14px;
+  top: 15px;
+  right: 16px;
   z-index: 50;
-  color: var(--codey-muted) !important;
+  border-radius: 999px !important;
+  color: var(--codey-text) !important;
 }
 
 .settings-close-button:hover {
-  color: var(--codey-text) !important;
+  background: var(--codey-press) !important;
 }
 
 .usage-analysis-topbar {
@@ -774,15 +880,15 @@ button,
   align-items: center;
   justify-content: flex-start;
   gap: 12px;
-  padding: 13px 24px;
-  border-bottom: 1px solid var(--codey-border-subtle);
-  background: var(--codey-sidebar);
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--codey-border);
+  background: var(--codey-canvas);
 }
 
-.usage-analysis-topbar .usage-back { flex: none; width: 34px; height: 34px; color: var(--codey-muted); }
+.usage-analysis-topbar .usage-back { flex: none; width: 34px; height: 34px; color: var(--codey-text); }
 .usage-analysis-heading { min-width: 0; }
-.usage-analysis-heading h1 { margin: 0; font-size: 19px; line-height: 1.4; font-weight: 650; letter-spacing: -.025em; outline: none; }
-.usage-analysis-heading p { margin: 2px 0 0; font-size: 12px; color: var(--codey-muted); }
+.usage-analysis-heading h1 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 800; letter-spacing: -0.02em; outline: none; }
+.usage-analysis-heading p { margin: 1px 0 0; font-size: 13px; color: var(--codey-muted); }
 
 .app-shell.embedded .usage-analysis-topbar {
   padding-right: 64px;
@@ -797,157 +903,13 @@ button,
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px 20px;
-  margin: 0 -36px 20px;
-  padding: 24px 36px 18px;
+  margin: 0 -28px 16px;
+  padding: 14px 28px;
   background: var(--codey-canvas);
-  box-shadow: 0 1px 0 var(--codey-border-subtle);
 }
 
 .app-shell.embedded .settings-page-header {
-  padding-right: 64px;
-}
-
-.settings-page-header-main {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  flex: 1 1 200px;
-}
-
-.settings-page-icon-pill {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 11px;
-  background: var(--codey-card);
-  box-shadow: var(--codey-card-shadow);
-  color: var(--codey-blue);
-  flex-shrink: 0;
-}
-
-.settings-page-icon-pill svg {
-  width: 20px;
-  height: 20px;
-}
-
-.settings-page-heading {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-  gap: 3px;
-}
-
-.settings-page-title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.settings-page-heading h2 {
-  margin: 0;
-  color: var(--codey-text);
-  font-size: 20px;
-  font-weight: 650;
-  line-height: 1.2;
-  letter-spacing: -0.025em;
-  overflow-wrap: anywhere;
-}
-
-.settings-page-description,
-.settings-page-heading p {
-  margin: 0;
-  color: var(--codey-muted);
-  font-size: 12.5px;
-  line-height: 1.45;
-}
-
-.settings-page-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-height: 32px;
-  flex-shrink: 0;
-}
-
-.settings-section-heading {
-  margin: 0;
-  color: var(--codey-text);
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.5;
-  letter-spacing: -0.01em;
-}
-
-/* ---------- Cards ---------- */
-
-.codey-card {
-  border: 0;
-  border-radius: 12px;
-  background: var(--codey-card);
-  box-shadow: var(--codey-card-shadow);
-  overflow: hidden;
-}
-
-.codey-segmented-control {
-  display: inline-flex;
-  align-items: center;
-  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.05);
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
-  border-radius: 9px;
-  padding: 3px;
-  gap: 2px;
-}
-
-[data-theme="dark"] .codey-segmented-control {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-.codey-segmented-item {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--codey-muted, #6e6e73);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 140ms cubic-bezier(0.16, 1, 0.3, 1);
-  white-space: nowrap;
-}
-
-.codey-segmented-item:hover:not(:disabled) {
-  color: var(--codey-text, #1d1d1f);
-}
-
-.codey-segmented-item.active {
-  background: var(--codey-surface, #ffffff);
-  color: var(--codey-text, #1d1d1f);
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.02);
-}
-
-[data-theme="dark"] .codey-segmented-item.active {
-  background: #323238;
-  color: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-}
-
-.codey-segmented-item:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  padding-right: 58px;
 }
 
 @media (max-width: 760px) {
@@ -959,11 +921,11 @@ button,
   .settings-sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--codey-border);
-    padding: 0 12px 10px;
+    padding: 0 12px 8px;
   }
 
   .settings-sidebar-header {
-    padding: 12px 52px 10px 4px;
+    padding: 12px 52px 8px 4px;
   }
 
   .settings-sidebar-menu {
@@ -978,20 +940,31 @@ button,
   }
 
   .settings-sidebar-menu .settings-nav-group + .settings-nav-group {
-    margin: 0 0 0 8px;
-    padding: 0 0 0 8px;
-    border-left: 1px solid var(--codey-border-subtle);
+    margin: 0 0 0 4px;
   }
 
   .settings-sidebar-menu .settings-nav-group-title {
     display: none;
   }
 
+  .settings-nav-item {
+    width: auto;
+    min-height: 38px;
+    gap: 8px;
+    padding: 0 14px 0 10px;
+    font-size: 14px;
+  }
+
+  .settings-nav-item svg {
+    width: 19px;
+    height: 19px;
+  }
+
   .settings-sidebar-footer {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    margin-top: 10px;
+    margin-top: 8px;
   }
 
   .codex-status-card {
@@ -1002,6 +975,11 @@ button,
     flex: 1 1 140px;
   }
 
+  .sidebar-save-button {
+    height: 38px !important;
+    font-size: 14px !important;
+  }
+
   .sidebar-dirty-hint {
     display: none;
   }
@@ -1010,19 +988,215 @@ button,
     flex: 1 1 100%;
   }
 
-  .settings-page .page {
-    padding: 14px 16px 28px;
+  .settings-content {
+    --page-gutter: 16px;
+  }
+
+  .page > section,
+  .page > .secondary-section {
+    padding-block: 18px 22px;
   }
 
   .settings-page-header {
     margin-inline: -16px;
-    padding: 16px 16px 12px;
+    padding: 12px 16px;
     margin-bottom: 14px;
   }
 
   .app-shell.embedded .settings-page-header {
     padding-right: 16px;
   }
+
+  .settings-page-header-host .settings-page-header {
+    padding: 12px 16px;
+  }
+
+  .app-shell.embedded .settings-page-header-host .settings-page-header {
+    padding-right: 56px;
+  }
+}
+
+.settings-page-header-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 200px;
+}
+
+/* 页头只保留粗体标题，图标交给左侧导航表达。 */
+.settings-page-icon-pill {
+  display: none;
+}
+
+.settings-page-heading {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  gap: 1px;
+}
+
+.settings-page-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-page-heading h2 {
+  margin: 0;
+  color: var(--codey-text);
+  font-size: 21px;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+.settings-page-description,
+.settings-page-heading p {
+  margin: 0;
+  color: var(--codey-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 34px;
+  flex-shrink: 0;
+}
+
+.settings-section-heading {
+  margin: 0;
+  color: var(--codey-text);
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+}
+
+/* ---------- Cards & Segmented Controls ---------- */
+
+.codey-card {
+  border: 1px solid var(--codey-border);
+  border-radius: 16px;
+  background: var(--codey-card);
+  box-shadow: none;
+  overflow: hidden;
+}
+
+/* 分段控件：下划线标签页，选中项加粗并带蓝色短横。 */
+.codey-segmented-control {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.codey-segmented-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--codey-muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
+  white-space: nowrap;
+}
+
+.codey-segmented-item:hover:not(:disabled) {
+  background: var(--codey-hover);
+  color: var(--codey-text);
+}
+
+.codey-segmented-item.active {
+  color: var(--codey-text);
+  font-weight: 700;
+}
+
+.codey-segmented-item.active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: min(56px, calc(100% - 20px));
+  height: 4px;
+  border-radius: 999px;
+  background: var(--codey-blue);
+  transform: translateX(-50%);
+}
+
+.codey-segmented-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* HeroUI 标签页统一为下划线样式。 */
+.tabs__list-container {
+  border-bottom: 1px solid var(--codey-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.tabs__list {
+  gap: 0;
+  padding: 0;
+}
+
+.tabs__separator {
+  display: none;
+}
+
+.tabs__tab {
+  height: 42px;
+  border-radius: 0;
+  padding-inline: 16px;
+  color: var(--codey-muted);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.tabs__tab:not([data-selected="true"]):not([data-disabled="true"]):hover {
+  background: var(--codey-hover);
+  color: var(--codey-text);
+  opacity: 1;
+}
+
+.tabs__tab[data-selected="true"] {
+  color: var(--codey-text);
+  font-weight: 700;
+}
+
+.tabs__indicator {
+  top: auto;
+  bottom: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--codey-blue);
+  box-shadow: none;
+}
+
+/* 关闭态开关轨道在白底上需要足够对比度。 */
+.switch {
+  --switch-control-bg: var(--codey-border-strong);
 }
 
 .section-title {
@@ -1040,24 +1214,24 @@ button,
 .section-heading {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   min-width: 0;
 }
 
 .section-title h1,
 .section-title h2 {
-  margin: 2px 0 2px;
-  color: var(--codey-text, #1d1d1f);
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  margin: 1px 0;
+  color: var(--codey-text);
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.015em;
 }
 
 .section-title p {
   margin: 0;
-  color: var(--codey-muted, #6e6e73);
-  font-size: 12px;
-  line-height: 1.4;
+  color: var(--codey-muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .toast-region {
@@ -1100,16 +1274,17 @@ button,
 
 .list-box-item[data-selected="true"]:not([data-disabled="true"]),
 .list-box-item[aria-selected="true"]:not([data-disabled="true"]) {
-  background-color: var(--mac-blue, var(--codey-blue, #007aff));
-  color: #ffffff;
+  background-color: var(--codey-blue-soft);
+  color: var(--codey-text);
+  font-weight: 700;
 }
 
 .list-box-item[data-selected="true"]:not([data-disabled="true"]):hover,
 .list-box-item[data-selected="true"]:not([data-disabled="true"])[data-hovered="true"],
 .list-box-item[data-selected="true"]:not([data-disabled="true"]):focus,
 .list-box-item[data-selected="true"]:not([data-disabled="true"])[data-focused="true"] {
-  background-color: var(--codey-blue-hover, #0071eb);
-  color: #ffffff;
+  background-color: color-mix(in srgb, var(--codey-blue-soft) 70%, var(--codey-blue) 12%);
+  color: var(--codey-text);
 }
 
 .list-box-item[data-selected="true"] * {
@@ -1172,7 +1347,9 @@ button,
 .select__trigger[data-focus-visible="true"],
 .textarea:focus,
 .textarea[data-focused="true"] {
-  border-color: var(--field-border-focus, var(--codey-blue, #007aff));
+  border-color: var(--field-border-focus, var(--codey-blue));
+  background-color: var(--codey-surface);
+  box-shadow: 0 0 0 1px var(--field-border-focus, var(--codey-blue));
 }
 
 .input[data-invalid="true"],
@@ -1189,7 +1366,7 @@ button,
 }
 
 .number-field__group {
-  background-color: var(--codey-surface, #ffffff);
+  background-color: var(--field-background);
   grid-template-columns: 28px 1fr 28px;
 }
 
@@ -1267,10 +1444,10 @@ button,
   height: 16px;
   min-width: 16px;
   min-height: 16px;
-  border-radius: 4px;
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.28);
-  background-color: var(--codey-surface, #ffffff);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  border-radius: 5px;
+  border: 1.5px solid var(--codey-subtle);
+  background-color: var(--codey-surface);
+  box-shadow: none;
   transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
 }
 

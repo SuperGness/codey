@@ -109,7 +109,7 @@ function NotificationChannelsCardComponent({
         {config.webhook.channels.length === 0 ? (
           <li className="notification-empty-card codey-card">
             <IconBell size={16} className="text-muted shrink-0" aria-hidden="true" />
-            <span>还没有通知渠道，点击右上角添加渠道配置推送方式。</span>
+            <span>还没有通知渠道，点击「添加渠道」配置推送方式。</span>
           </li>
         ) : (
           config.webhook.channels.map((channel) => {

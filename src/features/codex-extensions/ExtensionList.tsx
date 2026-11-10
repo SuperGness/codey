@@ -53,16 +53,16 @@ export function ExtensionList({
 
   if (!entries.length) {
     return (
-      <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-default px-5 py-12 text-center">
-        <div className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-default/40 text-muted">
-          <KindIcon size={24} stroke={1.5} />
+      <div className="flex min-h-64 flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-5 py-12 text-center">
+        <div className="mb-3 flex size-12 items-center justify-center rounded-full bg-[var(--codey-surface-sunken)] text-foreground">
+          <KindIcon size={22} stroke={1.75} />
         </div>
-        <h4 className="m-0 text-sm font-semibold text-foreground">
+        <h4 className="m-0 text-[17px] font-extrabold text-foreground">
           {filtered
             ? "没有符合条件的结果"
             : `此范围暂无${isMcp ? " MCP 服务" : " Skill"}`}
         </h4>
-        <p className="mb-0 mt-1 max-w-sm text-xs text-muted leading-relaxed">
+        <p className="mb-0 mt-1 max-w-sm text-[13.5px] text-muted leading-relaxed">
           {filtered
             ? "尝试调整关键词、状态或来源条件。"
             : `切换范围或新增${isMcp ? " MCP 服务" : " Skill"}，开始管理资源。`}
@@ -72,7 +72,7 @@ export function ExtensionList({
   }
 
   return (
-    <div className="codey-card divide-y divide-default">
+    <div className="extension-feed">
       {entries.map((entry) => {
         const isBuiltin = "ownership" in entry && entry.ownership === "builtin";
         const isEnabled = entry.enabled;
@@ -81,19 +81,19 @@ export function ExtensionList({
         const isManaged = "ownership" in entry && entry.ownership === "managed";
         const checkResult = checks[entry.id];
         const working = busy && busyResourceId === entry.id;
-        const detailIndent = onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12";
+        const detailIndent = onSelect && canToggle(entry) ? "sm:ml-[80px]" : "sm:ml-[52px]";
 
         return (
           <article
             key={entry.id}
             aria-busy={working}
-            className={`flex min-w-0 flex-col transition-colors hover:bg-default/15 ${selected.includes(entry.id) ? "bg-accent/5" : ""}`}
+            className={`extension-feed-item flex min-w-0 flex-col${selected.includes(entry.id) ? " is-selected" : ""}`}
           >
-            <div className="min-w-0 flex-1 px-4 pt-3.5 pb-2.5">
+            <div className="min-w-0 flex-1 pb-2.5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   {onSelect && canToggle(entry) && (
-                    <div className="mt-2 shrink-0">
+                    <div className="mt-3 shrink-0">
                       <Checkbox
                         aria-label={`选择 ${entry.name}`}
                         checked={selected.includes(entry.id)}
@@ -106,15 +106,19 @@ export function ExtensionList({
                     </div>
                   )}
                   <div
-                    className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${isEnabled && isKnown ? "bg-accent/10 text-accent" : "bg-default/40 text-muted"}`}
+                    className={`flex size-10 shrink-0 items-center justify-center rounded-full ${
+                      isEnabled && isKnown
+                        ? "bg-[var(--codey-text)] text-[var(--codey-surface)]"
+                        : "bg-[var(--codey-surface-sunken)] text-muted"
+                    }`}
                   >
-                    <KindIcon size={20} stroke={1.8} aria-hidden="true" />
+                    <KindIcon size={18} stroke={1.85} aria-hidden="true" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <h4
                         title={entry.name}
-                        className="m-0 max-w-full truncate text-sm font-semibold text-foreground"
+                        className="m-0 max-w-full truncate text-[15px] font-bold text-foreground"
                       >
                         {entry.name}
                       </h4>
@@ -142,12 +146,12 @@ export function ExtensionList({
                       )}
                     </div>
                     {"transport" in entry && (
-                      <p title={`${entry.transport} · ${entry.summary}`} className="mb-0 mt-1 truncate text-xs text-muted">
+                      <p title={`${entry.transport} · ${entry.summary}`} className="mb-0 mt-0.5 truncate text-[13.5px] text-muted">
                         {entry.transport} · {entry.summary}
                       </p>
                     )}
                     {"description" in entry && entry.description && (
-                      <p title={entry.description} className="mb-0 mt-1 truncate text-xs text-muted">
+                      <p title={entry.description} className="mb-0 mt-0.5 truncate text-[13.5px] text-muted">
                         {entry.description}
                       </p>
                     )}
@@ -185,11 +189,11 @@ export function ExtensionList({
                 </div>
               </div>
 
-              <div title={entry.sourcePath} className={`mt-2 truncate font-mono text-[11px] text-muted select-text ${detailIndent}`}>
+              <div title={entry.sourcePath} className={`mt-1.5 truncate font-mono text-[12px] text-muted select-text ${detailIndent}`}>
                 {entry.sourcePath}
               </div>
 
-              <div className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted ${detailIndent}`}>
+              <div className={`mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[12.5px] text-muted ${detailIndent}`}>
                 <span>
                   配置：
                   <span
@@ -327,7 +331,7 @@ export function ExtensionList({
               )}
             </div>
 
-            <div className={`flex flex-wrap items-center justify-between gap-2 px-4 pb-3.5 ${detailIndent}`}>
+            <div className={`flex flex-wrap items-center justify-between gap-2 ${detailIndent}`}>
               <div className="flex flex-wrap items-center gap-2 min-w-0">
                 <Button
                   size="xs"
@@ -439,7 +443,7 @@ export function ExtensionList({
                   <Button
                     size="icon-sm"
                     variant="ghost"
-                    className="text-muted hover:text-danger"
+                    className="text-muted hover:bg-[var(--codey-red-soft)] hover:text-danger"
                     disabled={busy}
                     title={kind === "mcp" ? "移除 MCP 服务" : "卸载 Skill"}
                     aria-label={kind === "mcp" ? `移除 ${entry.name}` : `卸载 ${entry.name}`}

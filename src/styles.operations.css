@@ -3,7 +3,7 @@
    ========================================================================== */
 
 .operations-hub {
-  margin-bottom: 24px;
+  margin-bottom: 0;
 }
 
 .operations-panel {
@@ -19,13 +19,15 @@
   margin-right: 4px;
 }
 
+/* 运行状态：浅灰大圆角面板，三列以竖线分隔。 */
 .operations-status-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-bottom: 10px;
-  border-radius: 12px;
-  background: var(--codey-card);
-  box-shadow: var(--codey-card-shadow);
+  gap: 0;
+  margin-bottom: 0;
+  border: 0;
+  border-radius: 18px;
+  background: var(--codey-panel);
   overflow: hidden;
 }
 
@@ -35,18 +37,21 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
+  justify-content: flex-start;
   gap: 6px;
-  padding: 14px 16px 12px;
+  padding: 16px 18px 14px;
   border: 0;
+  border-radius: 0;
   background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 130ms ease;
+  overflow: hidden;
+  transition: background-color 150ms ease;
 }
 
 .status-strip-item + .status-strip-item {
-  border-left: 1px solid var(--codey-border-subtle);
+  border-left: 1px solid var(--codey-border);
 }
 
 .status-strip-item.tone-success { --tone: var(--codey-green); }
@@ -54,22 +59,11 @@
 .status-strip-item.tone-destructive { --tone: var(--codey-red); }
 
 .status-strip-item:hover {
-  background: color-mix(in srgb, var(--codey-canvas) 60%, var(--codey-card));
+  background: var(--codey-press);
 }
 
 .status-strip-item.is-expanded {
-  background: color-mix(in srgb, var(--codey-blue) 6%, var(--codey-card));
-}
-
-.status-strip-item.is-expanded::after {
-  content: "";
-  position: absolute;
-  right: 16px;
-  bottom: 0;
-  left: 16px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--codey-blue);
+  background: var(--codey-press);
 }
 
 .status-strip-item:focus-visible {
@@ -86,15 +80,16 @@
 
 .status-strip-icon {
   flex: none;
-  color: var(--codey-muted);
+  color: var(--tone);
 }
 
 .status-strip-head strong {
   min-width: 0;
   overflow: hidden;
   color: var(--codey-text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -105,25 +100,28 @@
   align-items: center;
   gap: 5px;
   margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
   color: var(--tone);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
 .status-strip-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent);
 }
 
 .status-strip-description {
   display: -webkit-box;
-  min-height: 34px;
   overflow: hidden;
   color: var(--codey-muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -132,9 +130,9 @@
 .status-strip-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  color: var(--codey-subtle);
-  font-size: 11px;
+  gap: 4px;
+  color: var(--codey-blue);
+  font-size: 13px;
   font-weight: 500;
 }
 
@@ -143,69 +141,56 @@
   color: var(--codey-blue);
 }
 
-@container settings-content (max-width: 620px) {
+@container settings-content (max-width: 640px) {
   .operations-status-cards {
     grid-template-columns: minmax(0, 1fr);
   }
-
   .status-strip-item + .status-strip-item {
-    border-top: 1px solid var(--codey-border-subtle);
     border-left: 0;
-  }
-  .status-strip-description {
-    min-height: 0;
+    border-top: 1px solid var(--codey-border);
   }
 }
 
+.operations-panel .disclosure__body {
+  padding: 0;
+}
+
 .operations-expanded-tray {
-  margin-bottom: 12px;
-  padding: 12px 16px 14px;
-  border-radius: 12px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--codey-border);
+  border-radius: 18px;
   background: var(--codey-card);
-  box-shadow: var(--codey-card-shadow);
-  transition: all 180ms ease;
 }
 
 .operations-expanded-card {
   min-width: 0;
 }
 
-.expanded-tray-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 8px;
-  margin-bottom: 8px;
-  border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
-}
-
-[data-theme="dark"] .expanded-tray-toolbar {
-  border-bottom-color: rgba(255, 255, 255, 0.06);
-}
-
 .expanded-card-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   padding-top: 0;
   border-top: 0;
 }
 
 .expanded-card-metrics {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
 }
 
 .expanded-metric-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 0;
-  border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
-  font-size: 12px;
-  color: var(--codey-text-soft, #3a3a3c);
+  gap: 10px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--codey-panel);
+  font-size: 13px;
+  color: var(--codey-text-soft);
 }
 
 .expanded-metric-icon {
@@ -231,7 +216,7 @@
 
 .expanded-metric-icon.tone-info {
   color: var(--codey-blue, #007aff);
-  background: rgba(0, 122, 255, 0.12);
+  background: color-mix(in srgb, var(--codey-blue) 12%, transparent);
 }
 
 .expanded-metric-text {
@@ -314,7 +299,10 @@
 }
 
 .injection-status-list {
-  border-top: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 8px;
+  border-top: 0;
 }
 
 .injection-status-row {
@@ -323,8 +311,10 @@
   align-items: center;
   gap: 10px;
   min-height: 44px;
-  padding: 7px 4px;
-  border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--codey-panel);
 }
 
 .injection-script-icon {

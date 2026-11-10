@@ -15,8 +15,6 @@
 /* 共享基元（必须最先导入，供后续组件覆盖） */
 @import "@heroui/styles/components/close-button.css" layer(components);
 @import "@heroui/styles/components/description.css" layer(components);
-@import "@heroui/styles/components/error-message.css" layer(components);
-@import "@heroui/styles/components/field-error.css" layer(components);
 @import "@heroui/styles/components/label.css" layer(components);
 
 /* 导航 */
@@ -37,7 +35,6 @@
 @import "@heroui/styles/components/switch.css" layer(components);
 
 /* 数据展示 */
-@import "@heroui/styles/components/badge.css" layer(components);
 @import "@heroui/styles/components/chip.css" layer(components);
 @import "@heroui/styles/components/table.css" layer(components);
 @import "@heroui/styles/components/tag.css" layer(components);
@@ -82,7 +79,6 @@
 @source "../node_modules/@heroui/react/dist/utils";
 @source "../node_modules/@heroui/react/dist/hooks";
 @source "../node_modules/@heroui/react/dist/components/alert";
-@source "../node_modules/@heroui/react/dist/components/badge";
 @source "../node_modules/@heroui/react/dist/components/button";
 @source "../node_modules/@heroui/react/dist/components/checkbox";
 @source "../node_modules/@heroui/react/dist/components/chip";
@@ -94,8 +90,6 @@
 @source "../node_modules/@heroui/react/dist/components/range-calendar";
 @source "../node_modules/@heroui/react/dist/components/disclosure";
 @source "../node_modules/@heroui/react/dist/components/drawer";
-@source "../node_modules/@heroui/react/dist/components/error-message";
-@source "../node_modules/@heroui/react/dist/components/field-error";
 @source "../node_modules/@heroui/react/dist/components/header";
 @source "../node_modules/@heroui/react/dist/components/input";
 @source "../node_modules/@heroui/react/dist/components/input-group";
@@ -119,36 +113,68 @@
 @source "../node_modules/@heroui/react/dist/components/toast";
 @source "../node_modules/@heroui/react/dist/components/tooltip";
 
-/* Codey 品牌色映射到 HeroUI 语义色变量；派生的 hover / soft 变体由 HeroUI 主题自动按 --accent 计算。 */
+/* Codey 色板映射到 HeroUI 语义色变量；派生的 hover / soft 变体由 HeroUI 主题自动按 --accent 计算。 */
 @layer theme {
   :root,
   [data-theme="light"] {
-    --accent: #007aff;
+    --radius: 12px;
+    --accent: #1d8cf0;
     --accent-foreground: #ffffff;
-    --link: #007aff;
-    --danger: #ff3b30;
-    --success: #34c759;
-    --warning: #ff9500;
+    --link: #1d8cf0;
+    --danger: #f4212e;
+    --success: #00a36c;
+    --warning: #e08600;
     --background: #ffffff;
-    --field-radius: 8px;
+    --foreground: #0f1419;
+    --surface: #ffffff;
+    --surface-secondary: #f7f9f9;
+    --surface-tertiary: #eff3f4;
+    --overlay: #ffffff;
+    --default: #eff3f4;
+    --default-foreground: #0f1419;
+    --muted: #536471;
+    --border: #e6eaed;
+    --divider: #eff3f4;
+    --field-background: #eff3f4;
+    --field-foreground: #0f1419;
+    --field-placeholder: #8b98a5;
+    --field-radius: 12px;
     --field-shadow: 0 0 0 0 transparent;
-    --field-border: rgba(0, 0, 0, 0.12);
-    --field-border-hover: rgba(0, 0, 0, 0.24);
-    --field-border-focus: #007aff;
+    --field-border: transparent;
+    --field-border-hover: #cfd9de;
+    --field-border-focus: #1d8cf0;
+    --focus: #1d8cf0;
+    --overlay-shadow: 0 0 15px rgba(101, 119, 134, 0.2), 0 0 3px 1px rgba(101, 119, 134, 0.15);
   }
 
   [data-theme="dark"] {
-    --accent: #0a84ff;
+    --radius: 12px;
+    --accent: #2b95f2;
     --accent-foreground: #ffffff;
-    --link: #66adff;
-    --danger: #ff6961;
-    --success: #4bd26d;
-    --warning: #ffb340;
-    --background: #202024;
-    --field-radius: 8px;
+    --link: #4aa5f5;
+    --danger: #f4212e;
+    --success: #00ba7c;
+    --warning: #ffad1f;
+    --background: #000000;
+    --foreground: #e7e9ea;
+    --surface: #000000;
+    --surface-secondary: #16181c;
+    --surface-tertiary: #202327;
+    --overlay: #000000;
+    --default: #202327;
+    --default-foreground: #e7e9ea;
+    --muted: #8b949c;
+    --border: #2f3336;
+    --divider: #202327;
+    --field-background: #202327;
+    --field-foreground: #e7e9ea;
+    --field-placeholder: #6b737b;
+    --field-radius: 12px;
     --field-shadow: 0 0 0 0 transparent;
-    --field-border: rgba(255, 255, 255, 0.18);
-    --field-border-hover: rgba(255, 255, 255, 0.32);
-    --field-border-focus: #0a84ff;
+    --field-border: transparent;
+    --field-border-hover: #3e4347;
+    --field-border-focus: #2b95f2;
+    --focus: #2b95f2;
+    --overlay-shadow: 0 0 15px rgba(255, 255, 255, 0.1), 0 0 3px 1px rgba(255, 255, 255, 0.08);
   }
 }

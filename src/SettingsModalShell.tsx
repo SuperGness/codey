@@ -65,7 +65,7 @@ export function SettingsModalShell({
     >
       <Modal.Container placement="center" className="p-3 sm:p-3">
         <Modal.Dialog
-          className="settings-modal-shell relative flex h-[min(860px,calc(100dvh-24px))] w-[min(1040px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[14px] p-0 text-sm"
+          className="settings-modal-shell relative flex h-[min(880px,calc(100dvh-24px))] w-[min(1220px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[18px] p-0 text-sm"
           aria-label="Codey 配置"
         >
           <AfterClose onUnmount={afterClose} />

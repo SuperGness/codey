@@ -203,17 +203,19 @@ if (!window.__codeySettingsOverlay) {
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
   shadow.append(rootElement, modalContainer);
-  getOverlayMountTarget().appendChild(host);
   const theme = installOverlayTheme([rootElement, modalContainer]);
 
   let hideTimer: number | undefined;
   let visible = false;
 
+  // 关闭或预加载期间让宿主脱离文档，避免 ShadowRoot 的大样式表常驻主文档的全局样式失效集。
   const hide = () => {
     window.clearTimeout(hideTimer);
     hideTimer = undefined;
+    if (visible) return;
     host.style.display = "none";
     host.setAttribute("aria-hidden", "true");
+    host.remove();
   };
   const reactRoot = ReactDOM.createRoot(rootElement);
   const render = (visible: boolean) => {
