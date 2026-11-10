@@ -18,7 +18,7 @@ const accountCommands = await readFile(
 test("失效账号卡片使用红色背景并显示失效标识", () => {
   assert.match(types, /invalid\?: boolean;/);
   assert.match(types, /invalidReason\?: string;/);
-  assert.match(styles, /\.official-account-item\.is-invalid \{[\s\S]*?background: rgba\(255, 59, 48/);
+  assert.match(styles, /\.official-account-item\.is-invalid \{[\s\S]*?background: color-mix\(in srgb, var\(--codey-red\)/);
   assert.match(panel, /account\.invalid \? " is-invalid" : ""/);
   assert.match(panel, /<Badge variant="destructive" title=\{account\.invalidReason\}>/);
   assert.match(panel, /账号已失效/);

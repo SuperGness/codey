@@ -23,6 +23,61 @@ export class FakeElementCore {
         this.style[name] = rendered;
       },
     };
+    const classSet = () =>
+      new Set(
+        String(this.className || this.getAttribute("class") || "")
+          .split(/\s+/)
+          .filter(Boolean),
+      );
+    const syncClass = (classes) => {
+      const value = [...classes].join(" ");
+      this.className = value;
+      if (value) this.attributes.set("class", value);
+      else this.attributes.delete("class");
+    };
+    this.classList = {
+      add: (...names) => {
+        const classes = classSet();
+        names.filter(Boolean).forEach((name) => classes.add(String(name)));
+        syncClass(classes);
+      },
+      remove: (...names) => {
+        const classes = classSet();
+        names.forEach((name) => classes.delete(String(name)));
+        syncClass(classes);
+      },
+      contains: (name) => classSet().has(String(name)),
+      toggle: (name, force) => {
+        const classes = classSet();
+        const key = String(name);
+        const shouldAdd = force !== undefined ? Boolean(force) : !classes.has(key);
+        if (shouldAdd) classes.add(key);
+        else classes.delete(key);
+        syncClass(classes);
+        return shouldAdd;
+      },
+    };
+  }
+
+  click() {
+    return this.dispatchEvent({ type: "click", target: this });
+  }
+
+  getBoundingClientRect() {
+    return this._boundingClientRect || {
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 100,
+      bottom: 32,
+      width: 100,
+      height: 32,
+    };
+  }
+
+  getClientRects() {
+    return this._clientRects || [this.getBoundingClientRect()];
   }
 
   get nextElementSibling() {

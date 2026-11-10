@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { prepareReleaseVersion, validateReleaseVersion, validateSourceVersions } from "../scripts/prepare-release-version.mjs";
 
 const execute = promisify(execFile);
-const localNames = ["codey", "codey-codex-extensions", "codey-runtime-core", "codey-runtime-data"];
+const localNames = ["codey", "codey-codex-extensions", "codey-runtime-core"];
 const thirdParty = '[[package]]\nname = "third-party"\nversion = "1.2.5"\nsource = "registry+https://example.com"\nchecksum = "abc"\ndependencies = [\n "codey-runtime-core 1.2.5 (registry+https://example.com)",\n]\n\n[[package]]\nname = "codey-runtime-core"\nversion = "1.2.5"\nsource = "registry+https://example.com"\nchecksum = "def"\n';
 
 async function fixture(handler, { cargoVersion = "1.2.5", lockVersion = "1.2.5" } = {}) {
