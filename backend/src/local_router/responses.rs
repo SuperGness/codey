@@ -946,7 +946,9 @@ impl RouterServer {
                 .map(|(name, value)| (name.as_str(), value.as_str())),
         );
         for (name, value) in &request.headers {
-            if !connection_scoped.contains(&name.to_ascii_lowercase())
+            if !connection_scoped
+                .iter()
+                .any(|scoped| name.eq_ignore_ascii_case(scoped))
                 && should_forward_incoming_header(name, route.official_account)
                 && let (Ok(name), Ok(value)) = (
                     HeaderName::from_bytes(name.as_bytes()),

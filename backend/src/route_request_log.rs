@@ -20,14 +20,12 @@ pub(crate) use collector::{
     RouteRequestLogController, RouteRequestLogGuard, RouteRequestLogProbe,
     RouteRequestLogReconfigure, is_output_delta_event, observe_upstream_response_model,
 };
+#[cfg(test)]
+pub(crate) use query::query_route_request_log_stats;
 pub(crate) use query::{
     RouteRequestLogModelAliases, clear_route_request_log_files, last_turn_recorded_stats,
     query_route_request_log_models, query_route_request_log_stats_with_model_aliases,
     query_route_request_logs,
-};
-#[cfg(test)]
-pub(crate) use query::{
-    query_route_request_log_stats, session_recorded_average, session_recorded_timing,
 };
 
 const SCHEMA_VERSION: u8 = 14;
@@ -647,16 +645,6 @@ impl RouteRequestLogStats {
 struct QueuedEntry {
     entry: RouteRequestLogEntry,
     enqueued_at: Instant,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct SessionRecordedTiming {
-    pub requests: u64,
-    pub model_duration_ms: Option<u64>,
-    pub average_ttft_ms: Option<f64>,
-    pub timing_request_count: u64,
-    pub ttft_sample_count: u64,
 }
 
 /// 会话平均速度使用同一批请求的输出量和生成时长，不对单步 TPS 求平均。

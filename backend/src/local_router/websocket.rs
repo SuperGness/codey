@@ -23,53 +23,8 @@ impl BudgetedWebSocketMessage {
     }
 }
 
-/// 返回序列化正文所需字节数的保守下界。字符串转义只会增加输出，
-/// 达到门槛的正文可以安全交给阻塞路径。
-fn json_value_reaches_serialized_threshold(value: &Value, threshold: usize) -> bool {
-    fn add_raw(bytes: &mut usize, added: usize, threshold: usize) -> bool {
-        *bytes = bytes.saturating_add(added);
-        *bytes >= threshold
-    }
-
-    fn add(value: &Value, bytes: &mut usize, threshold: usize) -> bool {
-        let added = match value {
-            Value::Null | Value::Bool(_) => 4,
-            Value::Number(number) => number.to_string().len(),
-            Value::String(text) => text.len().saturating_add(2),
-            Value::Array(items) => {
-                // 括号和逗号始终输出；其他值由递归分支计入。
-                let structural = 2_usize.saturating_add(items.len().saturating_sub(1));
-                return add_raw(bytes, structural, threshold)
-                    || items.iter().any(|item| add(item, bytes, threshold));
-            }
-            Value::Object(object) => {
-                // 字符串值由递归分支计入；这里只累加键、引号、冒号和逗号。
-                let structural = 2_usize
-                    .saturating_add(3_usize.saturating_mul(object.len()))
-                    .saturating_add(object.len().saturating_sub(1));
-                if add_raw(bytes, structural, threshold) {
-                    return true;
-                }
-                for (key, value) in object {
-                    if add_raw(bytes, key.len(), threshold) || add(value, bytes, threshold) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-        };
-        add_raw(bytes, added, threshold)
-    }
-
-    let mut bytes = 0;
-    add(value, &mut bytes, threshold)
-}
-
 fn should_offload_responses_json_parse(body: &[u8]) -> bool {
-    body.len() >= REQUEST_JSON_OFFLOAD_BYTES
-        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-        })
+    body.len() >= REQUEST_JSON_OFFLOAD_BYTES && is_multi_thread_runtime()
 }
 
 fn parse_responses_json_fallback(body: &[u8]) -> serde_json::Result<Value> {
@@ -84,9 +39,7 @@ fn parse_responses_json_fallback(body: &[u8]) -> serde_json::Result<Value> {
 /// 外层任务因中断取消时，同步段退出后正文和预算许可照常返回 HTTP 回退。
 fn serialize_responses_websocket_request(body: &Value) -> serde_json::Result<String> {
     if json_value_reaches_serialized_threshold(body, REQUEST_JSON_OFFLOAD_BYTES)
-        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-        })
+        && is_multi_thread_runtime()
     {
         tokio::task::block_in_place(|| serde_json::to_string(body))
     } else {
@@ -1436,12 +1389,7 @@ pub(crate) fn upstream_websocket_request(
         .into_client_request()
         .context("创建 Responses WebSocket 上游握手请求失败")?;
     for (name, value) in headers {
-        if is_hop_by_hop_header(name.as_str())
-            || name
-                .as_str()
-                .to_ascii_lowercase()
-                .starts_with("sec-websocket-")
-        {
+        if is_hop_by_hop_header(name.as_str()) || name.as_str().starts_with("sec-websocket-") {
             continue;
         }
         request.headers_mut().insert(name.clone(), value.clone());

@@ -826,50 +826,9 @@ pub(crate) fn responses_event_sequence(response: &Value) -> Result<Vec<Value>> {
     Ok(events)
 }
 
-/// 返回序列化响应所需字节数的保守下界，避免为阈值判断复制或完整序列化响应。
-fn response_reaches_serialized_threshold(response: &Value, threshold: usize) -> bool {
-    fn add_raw(bytes: &mut usize, added: usize, threshold: usize) -> bool {
-        *bytes = bytes.saturating_add(added);
-        *bytes >= threshold
-    }
-
-    fn add(value: &Value, bytes: &mut usize, threshold: usize) -> bool {
-        let added = match value {
-            Value::Null | Value::Bool(_) => 4,
-            Value::Number(number) => number.to_string().len(),
-            Value::String(text) => text.len().saturating_add(2),
-            Value::Array(items) => {
-                let structural = 2_usize.saturating_add(items.len().saturating_sub(1));
-                return add_raw(bytes, structural, threshold)
-                    || items.iter().any(|item| add(item, bytes, threshold));
-            }
-            Value::Object(object) => {
-                let structural = 2_usize
-                    .saturating_add(3_usize.saturating_mul(object.len()))
-                    .saturating_add(object.len().saturating_sub(1));
-                if add_raw(bytes, structural, threshold) {
-                    return true;
-                }
-                for (key, value) in object {
-                    if add_raw(bytes, key.len(), threshold) || add(value, bytes, threshold) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-        };
-        add_raw(bytes, added, threshold)
-    }
-
-    let mut bytes = 0;
-    add(response, &mut bytes, threshold)
-}
-
 fn should_offload_responses_event_sequence(response: &Value) -> bool {
-    response_reaches_serialized_threshold(response, REQUEST_JSON_OFFLOAD_BYTES)
-        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-        })
+    json_value_reaches_serialized_threshold(response, REQUEST_JSON_OFFLOAD_BYTES)
+        && is_multi_thread_runtime()
 }
 
 fn run_responses_event_sequence<T>(offload: bool, build: impl FnOnce() -> T) -> T {
@@ -1049,11 +1008,11 @@ mod tests {
 
         assert!(serde_json::to_vec(&small).unwrap().len() < REQUEST_JSON_OFFLOAD_BYTES);
         assert!(serde_json::to_vec(&large).unwrap().len() >= REQUEST_JSON_OFFLOAD_BYTES);
-        assert!(!response_reaches_serialized_threshold(
+        assert!(!json_value_reaches_serialized_threshold(
             &small,
             REQUEST_JSON_OFFLOAD_BYTES
         ));
-        assert!(response_reaches_serialized_threshold(
+        assert!(json_value_reaches_serialized_threshold(
             &large,
             REQUEST_JSON_OFFLOAD_BYTES
         ));

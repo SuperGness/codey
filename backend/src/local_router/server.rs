@@ -1087,11 +1087,12 @@ impl RouterSnapshot {
         let mut raw_models = HashMap::<String, Vec<AliasTarget>>::new();
         let mut default_official_provider = None;
         let mut default_official_rank = None;
+        let mut official_store = None;
         for profile in config.runtime_profiles() {
             let provider_id = profile.provider_id().trim();
             // 凭据平面先于上游地址决定：SIWC 直连时对话走官方公开 API，
             // 账号保存的自定义网关只对 Codex backend-api 平面生效。
-            let official_auth = official_route_auth(profile);
+            let official_auth = official_route_auth(profile, &mut official_store);
             let uses_siwc = official_auth
                 .as_ref()
                 .is_some_and(|auth| auth.siwc_path.is_some());
@@ -1650,15 +1651,20 @@ pub(crate) struct OfficialRouteAuth {
     pub(crate) accepts_incoming_authorization: bool,
 }
 
-fn official_route_auth(profile: &crate::config::ProviderProfile) -> Option<OfficialRouteAuth> {
+fn official_route_auth(
+    profile: &crate::config::ProviderProfile,
+    cached_store: &mut Option<crate::official_accounts::OfficialAccountStore>,
+) -> Option<OfficialRouteAuth> {
     if !profile.official_account {
         return None;
     }
     let account_id = profile.official_account_id.clone()?;
     let codex_home = crate::codex_config::codex_home();
-    let store = crate::official_accounts::OfficialAccountStore::for_config_path(
-        &crate::config::default_config_path(),
-    );
+    let store = cached_store.get_or_insert_with(|| {
+        crate::official_accounts::OfficialAccountStore::for_config_path(
+            &crate::config::default_config_path(),
+        )
+    });
     let path = store.credential_path(codex_home, &account_id);
     let record = store.get(&account_id).ok().flatten();
     // 账号邮箱随路由快照读取，生命周期不接受客户端提供的邮箱。

@@ -109,6 +109,12 @@ pub(crate) fn is_hop_by_hop_header(name: &str) -> bool {
     .any(|blocked| name.eq_ignore_ascii_case(blocked))
 }
 
+pub(crate) fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
 /// 上游响应头除传输层头外原样透传给下游客户端。Codex 依赖其中的
 /// 端到端响应头（如 `x-codex-turn-state` 粘性路由令牌），丢弃它们会改变
 /// 官方客户端行为。content-type 由转发逻辑自行写出；x-codey-* 由本地路由
@@ -116,7 +122,7 @@ pub(crate) fn is_hop_by_hop_header(name: &str) -> bool {
 pub(crate) fn should_forward_upstream_response_header(name: &str) -> bool {
     !(is_hop_by_hop_header(name)
         || name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
-        || name.to_ascii_lowercase().starts_with("x-codey-"))
+        || starts_with_ignore_ascii_case(name, "x-codey-"))
 }
 
 pub(crate) fn is_sse_content_type(value: &str) -> bool {
@@ -339,7 +345,7 @@ pub(crate) fn prepare_upstream_headers(
             || name.eq_ignore_ascii_case(ROUTER_AUTH_HEADER)
             || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
             || name.eq_ignore_ascii_case(TURN_METADATA_HEADER)
-            || name.to_ascii_lowercase().starts_with("sec-websocket-")
+            || starts_with_ignore_ascii_case(name, "sec-websocket-")
         {
             return Err(format!("线路「{route_name}」包含不允许覆盖的请求头 {name}"));
         }

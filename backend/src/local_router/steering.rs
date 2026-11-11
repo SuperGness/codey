@@ -161,7 +161,7 @@ impl SteeringState {
             .get("stream_id")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        // 先计算借用字段的大小并申请预算，避免复制整段会话历史。
+        // 先计算借用字段的大小并申请预算，避免复制整段会话历史或序列化后二次反序列化。
         if let Some(object) = body.as_object() {
             let settings: std::collections::BTreeMap<_, _> = object
                 .iter()
@@ -169,11 +169,14 @@ impl SteeringState {
                     !matches!(key.as_str(), "input" | "previous_response_id" | "type")
                 })
                 .collect();
-            let bytes = serde_json::to_vec(&settings)?;
-            if bytes.len() <= MAX_SETTINGS_BYTES
-                && let Ok(permit) = acquire_request_body_budget(budget, bytes.len())
+            if let Ok(bytes) = bounded_json_bytes(&settings, MAX_SETTINGS_BYTES)
+                && let Ok(permit) = acquire_request_body_budget(budget, bytes)
             {
-                self.settings = Some(serde_json::from_slice(&bytes)?);
+                let copied = settings
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                self.settings = Some(Value::Object(copied));
                 self.settings_permit = permit;
             }
         }
@@ -207,16 +210,22 @@ impl SteeringState {
                 "当前请求无法安全续接补充消息",
             );
         }
-        let bytes = body.to_string().len();
-        if self.pending.len() >= MAX_STEERS
-            || self.pending_bytes.saturating_add(bytes) > MAX_STEER_BYTES
-        {
+        if self.pending.len() >= MAX_STEERS {
             return self.failure(
                 steer,
                 "too_many_pending_steers",
                 "待处理补充消息已达上限，请先等待当前响应或返回工具结果",
             );
         }
+        let Ok(bytes) =
+            bounded_json_bytes(body, MAX_STEER_BYTES.saturating_sub(self.pending_bytes))
+        else {
+            return self.failure(
+                steer,
+                "too_many_pending_steers",
+                "待处理补充消息已达上限，请先等待当前响应或返回工具结果",
+            );
+        };
         let Ok(permit) = acquire_request_body_budget(budget, bytes) else {
             return self.failure(
                 steer,

@@ -150,10 +150,11 @@ pub(crate) fn websocket_forward_headers(request: &WebSocketRequest) -> Vec<(Stri
         .headers()
         .iter()
         .filter(|(name, _)| {
+            // `http::HeaderName::as_str()` 已保证是全小写 ASCII。
             let name = name.as_str();
             !is_hop_by_hop_header(name)
-                && !name.to_ascii_lowercase().starts_with("sec-websocket-")
-                && !connection_scoped.contains(&name.to_ascii_lowercase())
+                && !name.starts_with("sec-websocket-")
+                && !connection_scoped.contains(name)
         })
         .filter_map(|(name, value)| {
             value

@@ -453,6 +453,9 @@ impl UsageCapture {
         }
         container.key = if self.string_overflow {
             ProjectedUsageKey::Other
+        } else if !self.string.contains(&b'\\') {
+            std::str::from_utf8(&self.string).map_err(|_| "usage_projection_failed")?;
+            projected_usage_key(context, &self.string)
         } else {
             let mut encoded = Vec::with_capacity(self.string.len() + 2);
             encoded.push(b'"');
@@ -472,11 +475,26 @@ impl UsageCapture {
                 return Err("usage_projection_failed");
             }
         } else {
-            let value = serde_json::from_slice::<Value>(&self.scalar)
-                .map_err(|_| "usage_projection_failed")?;
-            if let Some((field, priority)) = self.scalar_field
-                && let Some(value) = value.as_u64()
-            {
+            let parsed_u64 = match self.scalar.as_slice() {
+                b"null" | b"true" | b"false" => None,
+                b"0" => Some(0_u64),
+                [b'1'..=b'9', rest @ ..] if rest.iter().all(u8::is_ascii_digit) => {
+                    if let Some(value) = std::str::from_utf8(&self.scalar)
+                        .ok()
+                        .and_then(|digits| digits.parse::<u64>().ok())
+                    {
+                        Some(value)
+                    } else {
+                        serde_json::from_slice::<Value>(&self.scalar)
+                            .map_err(|_| "usage_projection_failed")?
+                            .as_u64()
+                    }
+                }
+                _ => serde_json::from_slice::<Value>(&self.scalar)
+                    .map_err(|_| "usage_projection_failed")?
+                    .as_u64(),
+            };
+            if let (Some((field, priority)), Some(value)) = (self.scalar_field, parsed_u64) {
                 let slot = &mut self.values[field.index()];
                 if slot.is_none_or(|(current_priority, _)| priority <= current_priority) {
                     *slot = Some((priority, value));
