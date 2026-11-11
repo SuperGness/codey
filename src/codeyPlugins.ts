@@ -25,8 +25,15 @@ export type CodeyPluginPreview = {
   manifest: { id: string; name: string; version: string; description?: string;
     capabilities?: string[]; permissions?: string[]; headerNames?: string[] };
 };
+const pluginConfigEncoder = new TextEncoder();
+const PLUGIN_CONFIG_BYTE_LIMIT = 1024 * 1024;
+function exceedsPluginConfigByteLimit(content: string): boolean {
+  if (content.length > PLUGIN_CONFIG_BYTE_LIMIT) return true;
+  if (content.length * 3 <= PLUGIN_CONFIG_BYTE_LIMIT) return false;
+  return /[^\x00-\x7F]/.test(content) && pluginConfigEncoder.encode(content).length > PLUGIN_CONFIG_BYTE_LIMIT;
+}
 export function validatePluginConfigText(content: string): string | undefined {
-  if (new TextEncoder().encode(content).length > 1024 * 1024) return "配置文件不能超过 1 MiB。";
+  if (exceedsPluginConfigByteLimit(content)) return "配置文件不能超过 1 MiB。";
   try {
     const value: unknown = JSON.parse(content);
     if (!value || typeof value !== "object" || Array.isArray(value)) return "配置文件的根节点必须是 JSON 对象。";

@@ -10,6 +10,7 @@ import {
   IconSettings,
   IconTerminal2,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react";
 import { invoke } from "./api";
 import { errorText } from "./appUtils";
@@ -145,7 +146,6 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     pending.current = true;
     setBusy(true);
     setError("");
-    setNotice("");
     try {
       await action();
     } catch (cause) {
@@ -322,6 +322,10 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     );
   }, [result?.plugins, searchQuery, statusFilter]);
 
+  const enabledPluginCount = useMemo(
+    () => (result ? result.plugins.reduce((sum, p) => sum + (p.enabled ? 1 : 0), 0) : 0),
+    [result],
+  );
   const upgrading = preview
     ? result?.plugins.find((plugin) => plugin.id === preview.manifest.id)
     : undefined;
@@ -362,7 +366,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
         step={importStep}
         dragActive={dragActive}
         fileName={importFileName}
-        onRetry={preview ? handleConfirmImport : retrySource.current ? () => {
+        onRetry={!preview && retrySource.current ? () => {
           if (retrySource.current) inspectImport(retrySource.current);
         } : undefined}
         onCancel={cancelImport}
@@ -389,8 +393,8 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
               <div className="extension-status-chips" role="group" aria-label="插件状态筛选">
                 {([
                   ["all", "全部", result.plugins.length],
-                  ["enabled", "已启用", result.plugins.filter((p) => p.enabled).length],
-                  ["disabled", "未启用", result.plugins.filter((p) => !p.enabled).length],
+                  ["enabled", "已启用", enabledPluginCount],
+                  ["disabled", "未启用", result.plugins.length - enabledPluginCount],
                 ] as const).map(([value, label, count]) => (
                   <button
                     key={value}
@@ -409,7 +413,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
               </span>
             </>
           ) : (
-            <span className="text-red-500">插件状态未知，请点击刷新重试</span>
+            <span className="text-[var(--codey-red)]">插件状态未知，请点击刷新重试</span>
           )}
         </div>
 
@@ -420,6 +424,18 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             leftSection={<IconSearch size={14} className="text-muted" />}
+            rightSection={
+              searchQuery ? (
+                <button
+                  type="button"
+                  aria-label="清空插件搜索"
+                  className="inline-flex size-6 cursor-pointer items-center justify-center rounded-full text-muted hover:bg-[var(--codey-press)] hover:text-foreground"
+                  onClick={() => setSearchQuery("")}
+                >
+                  <IconX size={12} aria-hidden="true" />
+                </button>
+              ) : undefined
+            }
             className="h-8 text-xs"
           />
         </div>
@@ -427,7 +443,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
       {/* 提示与错误信息 */}
       {error && (
-        <div role="alert" className="mb-4 flex items-start gap-2 rounded-xl border border-red-200/60 bg-red-50/70 p-3 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+        <div role="alert" className="mb-4 flex items-start gap-2 rounded-xl border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] p-3 text-xs text-[var(--codey-red)]">
           <IconAlertTriangle size={15} className="mt-0.5 shrink-0" />
           <div className="flex-1 break-words">{error}</div>
         </div>
@@ -435,7 +451,40 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
       {/* 插件卡片网格 */}
       {filteredPlugins.length === 0 ? (
-        known && !loading && <div className="flex flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-6 py-16 text-center">
+        loading && !result ? (
+          <div aria-hidden="true" className="space-y-3">
+            {[0, 1].map((row) => (
+              <div
+                key={row}
+                className="flex items-center gap-3.5 rounded-2xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-4"
+              >
+                <div className="size-10 shrink-0 rounded-full bg-default/50" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-3.5 w-1/4 rounded bg-default/50" />
+                  <div className="h-2.5 w-3/5 rounded bg-default/30" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : !known && !loading ? (
+          <div className="flex flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-6 py-14 text-center">
+            <div className="mb-3 flex size-12 items-center justify-center rounded-full bg-[var(--codey-red-soft)] text-[var(--codey-red)]">
+              <IconAlertTriangle size={22} stroke={1.7} aria-hidden="true" />
+            </div>
+            <h4 className="m-0 text-[16px] font-extrabold text-foreground">无法读取插件列表</h4>
+            <p className="mb-3 mt-1 max-w-sm text-[13px] text-muted leading-relaxed">
+              请检查本地服务状态后重试读取插件目录。
+            </p>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={loading || busy}
+              onClick={() => void run(refresh, true)}
+            >
+              重新读取
+            </Button>
+          </div>
+        ) : known && !loading && <div className="flex flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-6 py-16 text-center">
           <div className="mb-3.5 flex size-12 items-center justify-center rounded-full bg-[var(--codey-surface-sunken)] text-foreground">
             <IconPuzzle size={24} stroke={1.5} />
           </div>

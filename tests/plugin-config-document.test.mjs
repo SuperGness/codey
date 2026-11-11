@@ -1,19 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
-const dependencyUrl = new URL("../src/codeyPlugins.ts", import.meta.url);
-const { validatePluginConfigText } = await loadTypeScriptModule(dependencyUrl);
-const dependency = ts.transpileModule(await readFile(dependencyUrl, "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
-}).outputText;
-const source = (await readFile(new URL("../src/pluginConfigDocument.ts", import.meta.url), "utf8"))
-  .replace('"./codeyPlugins"', JSON.stringify(`data:text/javascript;base64,${Buffer.from(dependency).toString("base64")}`));
-const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } }).outputText;
-const { isEditableConfigArray, parsePluginConfigDocument: parse, validatePluginConfigValue: validate, serializePluginConfigDocument: serialize } =
-  await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+const { validatePluginConfigText } = await loadTypeScriptModule(new URL("../src/codeyPlugins.ts", import.meta.url));
+const {
+  isEditableConfigArray,
+  parsePluginConfigDocument: parse,
+  validatePluginConfigValue: validate,
+  serializePluginConfigDocument: serialize,
+} = await loadTypeScriptModule(new URL("../src/pluginConfigDocument.ts", import.meta.url));
 const flatten = document => {
   const result = new Map();
   const visit = entry => { result.set(JSON.stringify(entry.path), entry); entry.children.forEach(visit); };

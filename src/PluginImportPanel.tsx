@@ -204,10 +204,10 @@ export function PluginImportPanel({
           <IconAlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
           <div className="min-w-0 flex-1 space-y-2 break-words">
             <div>{error}</div>
-            {onRetry && !duplicate && (
+            {onRetry && !duplicate && !preview && (
               <Button size="xs" variant="outline" disabled={locked} onClick={onRetry}>
                 <IconRefresh size={13} aria-hidden="true" />
-                {preview ? "重试导入" : "重试检查"}
+                重试检查
               </Button>
             )}
           </div>
