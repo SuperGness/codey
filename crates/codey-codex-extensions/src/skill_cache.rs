@@ -31,12 +31,19 @@ fn removable_files(root: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
         ),
         "目录包含其他独立 Skill，无法安全删除"
     );
+    let mut checked_dirs = std::collections::BTreeSet::from([directory.to_path_buf()]);
+    let Some(root_parent) = directory.parent() else {
+        anyhow::bail!("Skill 缓存目录不可写");
+    };
+    checked_dirs.insert(root_parent.to_path_buf());
+    for path in &files {
+        let Some(parent) = path.parent() else {
+            anyhow::bail!("Skill 缓存目录不可写");
+        };
+        checked_dirs.insert(parent.to_path_buf());
+    }
     ensure!(
-        fsutil::writable(directory)
-            && directory.parent().is_some_and(fsutil::writable)
-            && files
-                .iter()
-                .all(|path| path.parent().is_some_and(fsutil::writable)),
+        checked_dirs.iter().all(|dir| fsutil::writable(dir)),
         "Skill 缓存目录不可写"
     );
     Ok(files)

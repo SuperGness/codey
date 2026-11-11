@@ -1,5 +1,3 @@
-#![allow(clippy::items_after_test_module)]
-
 use crate::fsutil;
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
@@ -90,6 +88,80 @@ fn audit(data: &Path, id: &str, operation: &str, target_count: usize, state: &st
     serde_json::to_writer(&mut f, &record)?;
     f.write_all(b"\n")?;
     f.sync_all()?;
+    Ok(())
+}
+
+pub fn commit(data: &Path, operation: &str, changes: Vec<Change>) -> Result<()> {
+    commit_with_apply(data, operation, changes, fsutil::apply)
+}
+
+// 只在当前调用中保留原始内容；逐文件原子替换不保证进程中断时整批恢复。
+fn commit_with_apply(
+    data: &Path,
+    operation: &str,
+    changes: Vec<Change>,
+    mut apply: impl FnMut(&Path, &Option<Vec<u8>>, Option<u32>) -> Result<()>,
+) -> Result<()> {
+    ensure!(!changes.is_empty(), "没有可提交的修改");
+    for change in &changes {
+        ensure!(
+            [&change.before, &change.after].iter().all(|b| b
+                .as_ref()
+                .is_none_or(|b| b.len() as u64 <= fsutil::MAX_FILE)),
+            "文件超过大小限制，未执行写入"
+        );
+    }
+    let total: usize = changes
+        .iter()
+        .map(|c| c.before.as_ref().map_or(0, Vec::len) + c.after.as_ref().map_or(0, Vec::len))
+        .sum();
+    ensure!(
+        total as u64 <= fsutil::MAX_TOTAL * 2,
+        "操作内容超过总大小限制"
+    );
+    for c in &changes {
+        ensure!(c.matches_before()?, "文件已被其他程序修改，操作未提交");
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    audit(data, &id, operation, changes.len(), "prepared")?;
+    let mut applied = 0;
+    let result = (|| -> Result<()> {
+        for c in &changes {
+            ensure!(c.matches_before()?, "提交期间文件被其他程序修改");
+            applied += 1;
+            apply(&c.path, &c.after, c.after_mode)?;
+        }
+        for c in &changes {
+            ensure!(c.matches_after()?, "提交后文件校验失败");
+        }
+        audit(data, &id, operation, changes.len(), "committed")?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let mut recovered = true;
+        for c in changes[..applied].iter().rev() {
+            if c.matches_after().unwrap_or(false) {
+                if apply(&c.path, &c.before, c.before_mode).is_err()
+                    || !c.matches_before().unwrap_or(false)
+                {
+                    recovered = false;
+                }
+            } else if !c.matches_before().unwrap_or(false) {
+                recovered = false;
+            }
+        }
+        let state = if recovered {
+            "compensated"
+        } else {
+            "recovery-required"
+        };
+        let _ = audit(data, &id, operation, changes.len(), state);
+        return Err(error.context(if recovered {
+            "操作失败，本次已写入的文件已恢复"
+        } else {
+            "操作失败，部分文件无法恢复；为避免覆盖外部修改已停止补偿，请检查当前配置"
+        }));
+    }
     Ok(())
 }
 
@@ -236,78 +308,4 @@ mod tests {
         assert_eq!(fs::read(first).unwrap(), b"changed");
         assert!(!second.exists());
     }
-}
-
-pub fn commit(data: &Path, operation: &str, changes: Vec<Change>) -> Result<()> {
-    commit_with_apply(data, operation, changes, fsutil::apply)
-}
-
-// 只在当前调用中保留原始内容；逐文件原子替换不保证进程中断时整批恢复。
-fn commit_with_apply(
-    data: &Path,
-    operation: &str,
-    changes: Vec<Change>,
-    mut apply: impl FnMut(&Path, &Option<Vec<u8>>, Option<u32>) -> Result<()>,
-) -> Result<()> {
-    ensure!(!changes.is_empty(), "没有可提交的修改");
-    for change in &changes {
-        ensure!(
-            [&change.before, &change.after].iter().all(|b| b
-                .as_ref()
-                .is_none_or(|b| b.len() as u64 <= fsutil::MAX_FILE)),
-            "文件超过大小限制，未执行写入"
-        );
-    }
-    let total: usize = changes
-        .iter()
-        .map(|c| c.before.as_ref().map_or(0, Vec::len) + c.after.as_ref().map_or(0, Vec::len))
-        .sum();
-    ensure!(
-        total as u64 <= fsutil::MAX_TOTAL * 2,
-        "操作内容超过总大小限制"
-    );
-    for c in &changes {
-        ensure!(c.matches_before()?, "文件已被其他程序修改，操作未提交");
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    audit(data, &id, operation, changes.len(), "prepared")?;
-    let mut applied = 0;
-    let result = (|| -> Result<()> {
-        for c in &changes {
-            ensure!(c.matches_before()?, "提交期间文件被其他程序修改");
-            applied += 1;
-            apply(&c.path, &c.after, c.after_mode)?;
-        }
-        for c in &changes {
-            ensure!(c.matches_after()?, "提交后文件校验失败");
-        }
-        audit(data, &id, operation, changes.len(), "committed")?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        let mut recovered = true;
-        for c in changes[..applied].iter().rev() {
-            if c.matches_after().unwrap_or(false) {
-                if apply(&c.path, &c.before, c.before_mode).is_err()
-                    || !c.matches_before().unwrap_or(false)
-                {
-                    recovered = false;
-                }
-            } else if !c.matches_before().unwrap_or(false) {
-                recovered = false;
-            }
-        }
-        let state = if recovered {
-            "compensated"
-        } else {
-            "recovery-required"
-        };
-        let _ = audit(data, &id, operation, changes.len(), state);
-        return Err(error.context(if recovered {
-            "操作失败，本次已写入的文件已恢复"
-        } else {
-            "操作失败，部分文件无法恢复；为避免覆盖外部修改已停止补偿，请检查当前配置"
-        }));
-    }
-    Ok(())
 }

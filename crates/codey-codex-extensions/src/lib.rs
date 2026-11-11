@@ -111,33 +111,40 @@ impl ExtensionService {
             .transpose()
             .context("托管 Skill 记录损坏，拒绝修改")?
             .unwrap_or_default();
+        let user_config_path = self.codex_home.join("config.toml");
+        let parsed_user_doc;
         let user_doc = if matches!(scope, Scope::User) {
-            doc.clone()
+            &doc
         } else {
-            mcp::parse(cache.read(&self.codex_home.join("config.toml"))?)?
+            parsed_user_doc = mcp::parse(cache.read(&user_config_path)?)?;
+            &parsed_user_doc
         };
-        let (disabled, named) = skill_config::disabled(&user_doc)?;
-        let unknown_paths = skill_config::unknown_paths(&user_doc)?;
+        let skill_cfg = skill_config::summary(user_doc)?;
         let mut warnings = vec!["当前会话和 Codey 启动参数可能覆盖这里的配置。".to_owned()];
-        let mut roots = match scope {
-            Scope::User => vec![
-                (self.user_home.join(".agents/skills"), "user"),
-                (self.codex_home.join("skills"), "user"),
-            ],
-            Scope::Project { project_path } => vec![
-                (project_path.join(".agents/skills"), "project"),
-                (project_path.join(".codex/skills"), "project"),
-            ],
+        let scope_kind = if matches!(scope, Scope::User) {
+            "user"
+        } else {
+            "project"
         };
+        let mut roots = self.skill_roots(scope);
         roots.dedup();
+        let skill_config_writable = fsutil::writable(&user_config_path);
         let mut entries = Vec::new();
         let mut seen = BTreeSet::new();
-        for (root, kind) in roots {
-            for mut entry in
-                skills::entries(&root, kind, &registry, &disabled, &mut warnings, &mut cache)
-            {
-                if named.contains(entry["name"].as_str().unwrap_or_default())
-                    || unknown_paths
+        for root in roots {
+            for mut entry in skills::entries(
+                &root,
+                scope_kind,
+                &registry,
+                &skill_cfg.disabled,
+                &mut warnings,
+                &mut cache,
+            ) {
+                if skill_cfg
+                    .named
+                    .contains(entry["name"].as_str().unwrap_or_default())
+                    || skill_cfg
+                        .unknown_paths
                         .contains(&PathBuf::from(entry["manifestPath"].as_str().unwrap()))
                 {
                     entry["readOnly"] = json!(true);
@@ -148,7 +155,7 @@ impl ExtensionService {
                         entry[key] = json!(false);
                     }
                 }
-                if !fsutil::writable(&self.codex_home.join("config.toml")) {
+                if !skill_config_writable {
                     entry["canToggle"] = json!(false);
                 }
                 if seen.insert(entry["id"].as_str().unwrap().to_owned()) {
@@ -161,7 +168,7 @@ impl ExtensionService {
             config_path.to_string_lossy().into_owned(),
             cache.read(&config_path)?.map(fsutil::digest),
         )];
-        for path in [self.codex_home.join("config.toml"), self.registry_path()] {
+        for path in [user_config_path.clone(), self.registry_path()] {
             fingerprints.push((
                 path.to_string_lossy().into_owned(),
                 cache.read(&path)?.map(fsutil::digest),
@@ -238,14 +245,12 @@ impl ExtensionService {
         cache.ensure_complete()?;
         let revision = fsutil::digest(&serde_json::to_vec(&fingerprints)?);
         let mut mcps = mcp::list(&doc, &config_path.to_string_lossy())?;
+        let mcp_updated_at = json!(fsutil::updated_at(&config_path));
+        let mcp_writable = fsutil::writable(&config_path);
         for entry in &mut mcps {
-            entry["scope"] = json!(if matches!(scope, Scope::User) {
-                "user"
-            } else {
-                "project"
-            });
-            entry["updatedAt"] = json!(fsutil::updated_at(&config_path));
-            if !fsutil::writable(&config_path) {
+            entry["scope"] = json!(scope_kind);
+            entry["updatedAt"] = mcp_updated_at.clone();
+            if !mcp_writable {
                 entry["readOnly"] = json!(true);
                 entry["reason"] = json!("配置文件或所在目录不可写");
                 for key in ["canEdit", "canToggle", "canRemove"] {
@@ -254,7 +259,7 @@ impl ExtensionService {
             }
         }
         Ok(
-            json!({"scope":scope,"configPath":config_path,"skillConfigPath":self.codex_home.join("config.toml"),"revision":revision,"mcps":mcps,"skills":entries,"warnings":warnings,"applyNotice":"MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。当前 Codey 启动覆盖可能优先生效。"}),
+            json!({"scope":scope,"configPath":config_path,"skillConfigPath":user_config_path,"revision":revision,"mcps":mcps,"skills":entries,"warnings":warnings,"applyNotice":"MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。当前 Codey 启动覆盖可能优先生效。"}),
         )
     }
 
@@ -535,107 +540,105 @@ impl ExtensionService {
                 }
                 changes.push(Change::new(config, Some(doc.to_string().into_bytes()))?);
             }
-            "uninstall_skill"
-                if self.entry(&inventory, Self::required(&request, "id")?)?["ownership"]
-                    == "external" =>
-            {
-                let entry = self.entry(&inventory, Self::required(&request, "id")?)?;
-                ensure!(
-                    entry["canRemove"] == true,
-                    "Skill 当前不允许删除，请检查目录或冲突规则"
-                );
-                let path = PathBuf::from(entry["sourcePath"].as_str().unwrap());
-                for target in skills::external_removal_files(&path)? {
-                    ensure!(fsutil::writable(&target), "Skill 文件或所在目录不可写");
-                    changes.push(Change::new(target, None)?);
-                }
-            }
             "save_skill" | "uninstall_skill" => {
                 let entry = self.entry(&inventory, Self::required(&request, "id")?)?;
-                ensure!(
-                    entry["ownership"] == "managed",
-                    "仅允许编辑或卸载 Codey 托管 Skill"
-                );
-                ensure!(
-                    entry["readOnly"] == false,
-                    "Skill 当前为只读，请先处理冲突规则"
-                );
-                let path = PathBuf::from(entry["sourcePath"].as_str().unwrap());
-                ensure!(
-                    fsutil::writable(&path.join("SKILL.md")),
-                    "Skill 文件或所在目录不可写"
-                );
-                let mut registry = self.registry()?;
-                let managed = registry.get_mut(&path).context("托管记录不存在")?;
-                // 卸载只处理本模块登记过的文件，所以目录里多出的内容（符号链接、
-                // 超限文件等无法枚举的项）不该把用户锁在界面上：枚举失败时退回登记
-                // 清单，额外内容保持原样。编辑仍要求目录可完整校验，避免覆盖看不见
-                // 的外部修改。
-                let uninstalling = action == "uninstall_skill";
-                let actual = match fsutil::walk(&path) {
-                    Ok(actual) => actual,
-                    Err(_) if uninstalling => managed.files.keys().cloned().collect(),
-                    Err(error) => return Err(error),
-                };
-                ensure!(
-                    uninstalling || actual.len() == managed.files.len(),
-                    "Skill 文件集合已被外部修改，请保留原文件并重新导入"
-                );
-                for p in actual {
-                    // 覆盖写入的目标内容由请求决定，但权限必须保持与登记一致。
-                    let skip_content = action == "save_skill" && p == path.join("SKILL.md");
-                    if !skip_content {
-                        match fsutil::read(&p) {
-                            Ok(bytes) => ensure!(
-                                managed.files.get(&p) == bytes.map(|b| fsutil::digest(&b)).as_ref(),
-                                "Skill 文件已被外部修改，拒绝覆盖或删除"
-                            ),
-                            // 登记项被替换成链接或不可读内容时，删除它本身不会跟随链接，
-                            // 是用户清除该 Skill 的出口；编辑必须拒绝。
-                            Err(_) if uninstalling => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    if let Some(expected) = managed.modes.get(&p) {
-                        match fsutil::file_mode(&p) {
-                            Ok(mode) => ensure!(
-                                mode == Some(*expected),
-                                "Skill 文件权限已被外部修改，拒绝覆盖或删除"
-                            ),
-                            Err(_) if uninstalling => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
-                if action == "save_skill" {
-                    let content = Self::required(&request, "content")?.as_bytes().to_vec();
-                    let (name, _) = skills::metadata(&content)?;
+                if action == "uninstall_skill" && entry["ownership"] == "external" {
                     ensure!(
-                        content.len() as u64 <= fsutil::MAX_FILE,
-                        "Skill 文件超过大小限制"
+                        entry["canRemove"] == true,
+                        "Skill 当前不允许删除，请检查目录或冲突规则"
                     );
-                    let target = path.join("SKILL.md");
-                    self.ensure_name_available(&scope, &name, &target)?;
-                    // 身份和启停规则按路径保留；改名不能引入已有名称规则，
-                    // 否则保存后将无法确认启用状态，且失去继续编辑的入口。
-                    ensure!(
-                        !self.disabled_skills()?.1.contains(&name),
-                        "存在同名 Skill 规则，无法保证保存后的启用状态；请先处理冲突规则"
-                    );
-                    managed
-                        .files
-                        .insert(target.clone(), fsutil::digest(&content));
-                    changes.push(Change::new(target, Some(content))?);
+                    let path = PathBuf::from(entry["sourcePath"].as_str().unwrap());
+                    for target in skills::external_removal_files(&path)? {
+                        ensure!(fsutil::writable(&target), "Skill 文件或所在目录不可写");
+                        changes.push(Change::new(target, None)?);
+                    }
                 } else {
-                    for target in managed.files.keys() {
-                        changes.push(Change::new(target.clone(), None)?);
+                    ensure!(
+                        entry["ownership"] == "managed",
+                        "仅允许编辑或卸载 Codey 托管 Skill"
+                    );
+                    ensure!(
+                        entry["readOnly"] == false,
+                        "Skill 当前为只读，请先处理冲突规则"
+                    );
+                    let path = PathBuf::from(entry["sourcePath"].as_str().unwrap());
+                    ensure!(
+                        fsutil::writable(&path.join("SKILL.md")),
+                        "Skill 文件或所在目录不可写"
+                    );
+                    let mut registry = self.registry()?;
+                    let managed = registry.get_mut(&path).context("托管记录不存在")?;
+                    // 卸载只处理本模块登记过的文件，所以目录里多出的内容（符号链接、
+                    // 超限文件等无法枚举的项）不该把用户锁在界面上：枚举失败时退回登记
+                    // 清单，额外内容保持原样。编辑仍要求目录可完整校验，避免覆盖看不见
+                    // 的外部修改。
+                    let uninstalling = action == "uninstall_skill";
+                    let actual = match fsutil::walk(&path) {
+                        Ok(actual) => actual,
+                        Err(_) if uninstalling => managed.files.keys().cloned().collect(),
+                        Err(error) => return Err(error),
+                    };
+                    ensure!(
+                        uninstalling || actual.len() == managed.files.len(),
+                        "Skill 文件集合已被外部修改，请保留原文件并重新导入"
+                    );
+                    for p in actual {
+                        // 覆盖写入的目标内容由请求决定，但权限必须保持与登记一致。
+                        let skip_content = action == "save_skill" && p == path.join("SKILL.md");
+                        if !skip_content {
+                            match fsutil::read(&p) {
+                                Ok(bytes) => ensure!(
+                                    managed.files.get(&p)
+                                        == bytes.map(|b| fsutil::digest(&b)).as_ref(),
+                                    "Skill 文件已被外部修改，拒绝覆盖或删除"
+                                ),
+                                // 登记项被替换成链接或不可读内容时，删除它本身不会跟随链接，
+                                // 是用户清除该 Skill 的出口；编辑必须拒绝。
+                                Err(_) if uninstalling => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        if let Some(expected) = managed.modes.get(&p) {
+                            match fsutil::file_mode(&p) {
+                                Ok(mode) => ensure!(
+                                    mode == Some(*expected),
+                                    "Skill 文件权限已被外部修改，拒绝覆盖或删除"
+                                ),
+                                Err(_) if uninstalling => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
                     }
-                    registry.remove(&path);
+                    if action == "save_skill" {
+                        let content = Self::required(&request, "content")?.as_bytes().to_vec();
+                        let (name, _) = skills::metadata(&content)?;
+                        ensure!(
+                            content.len() as u64 <= fsutil::MAX_FILE,
+                            "Skill 文件超过大小限制"
+                        );
+                        let target = path.join("SKILL.md");
+                        self.ensure_name_available(&scope, &name, &target)?;
+                        // 身份和启停规则按路径保留；改名不能引入已有名称规则，
+                        // 否则保存后将无法确认启用状态，且失去继续编辑的入口。
+                        ensure!(
+                            !self.disabled_skills()?.1.contains(&name),
+                            "存在同名 Skill 规则，无法保证保存后的启用状态；请先处理冲突规则"
+                        );
+                        managed
+                            .files
+                            .insert(target.clone(), fsutil::digest(&content));
+                        changes.push(Change::new(target, Some(content))?);
+                    } else {
+                        for target in managed.files.keys() {
+                            changes.push(Change::new(target.clone(), None)?);
+                        }
+                        registry.remove(&path);
+                    }
+                    changes.push(Change::new(
+                        self.registry_path(),
+                        Some(serde_json::to_vec(&registry)?),
+                    )?);
                 }
-                changes.push(Change::new(
-                    self.registry_path(),
-                    Some(serde_json::to_vec(&registry)?),
-                )?);
             }
             "install_skill" | "create_skill" => {
                 let (source, files) = if action == "create_skill" {
@@ -779,16 +782,7 @@ impl ExtensionService {
     }
 
     fn clean_empty_skill_dirs(&self, scope: &Scope, removed: &[PathBuf]) {
-        let roots = match scope {
-            Scope::User => vec![
-                self.codex_home.join("skills"),
-                self.user_home.join(".agents/skills"),
-            ],
-            Scope::Project { project_path } => vec![
-                project_path.join(".agents/skills"),
-                project_path.join(".codex/skills"),
-            ],
-        };
+        let roots = self.skill_roots(scope);
         for file in removed {
             let Some(root) = roots.iter().find(|root| file.starts_with(root)) else {
                 continue;
