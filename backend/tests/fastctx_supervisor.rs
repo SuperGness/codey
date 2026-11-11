@@ -452,7 +452,10 @@ fn supervisor_reaps_silent_worker_that_ignores_client_eof() {
     let temp = tempfile::tempdir().unwrap();
     let (mut child, mut stdin, responses_rx) = spawn_supervisor_with_test_worker_env(
         &temp,
-        &[("CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVIOR", "idle")],
+        &[
+            ("CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVIOR", "idle"),
+            ("CODEY_FASTCTX_CLIENT_EOF_GRACE_MS", "250"),
+        ],
     );
     initialize_test_worker_session(&mut stdin, &responses_rx);
     let worker_pid = wait_for_test_worker_start(temp.path(), 1)[0];
@@ -461,7 +464,7 @@ fn supervisor_reaps_silent_worker_that_ignores_client_eof() {
     drop(stdin);
     let status = wait_for_eof_shutdown(&mut child, worker_pid, disconnected_at);
     assert!(!status.success(), "EOF deadline must report a failure");
-    assert!(disconnected_at.elapsed() >= Duration::from_secs(5));
+    assert!(disconnected_at.elapsed() >= Duration::from_millis(250));
 }
 
 #[test]
@@ -469,7 +472,10 @@ fn supervisor_eof_deadline_is_not_extended_by_continuous_output() {
     let temp = tempfile::tempdir().unwrap();
     let (mut child, mut stdin, responses_rx) = spawn_supervisor_with_test_worker_env(
         &temp,
-        &[("CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVIOR", "stream")],
+        &[
+            ("CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVIOR", "stream"),
+            ("CODEY_FASTCTX_CLIENT_EOF_GRACE_MS", "250"),
+        ],
     );
     initialize_test_worker_session(&mut stdin, &responses_rx);
     let worker_pid = wait_for_test_worker_start(temp.path(), 1)[0];
@@ -478,7 +484,7 @@ fn supervisor_eof_deadline_is_not_extended_by_continuous_output() {
     drop(stdin);
     let status = wait_for_eof_shutdown(&mut child, worker_pid, disconnected_at);
     assert!(!status.success(), "EOF deadline must report a failure");
-    assert!(disconnected_at.elapsed() >= Duration::from_secs(5));
+    assert!(disconnected_at.elapsed() >= Duration::from_millis(250));
     assert!(
         responses_rx.try_iter().filter_map(Result::ok).count() > 1,
         "worker output was not forwarded during the EOF grace period"
@@ -490,7 +496,10 @@ fn supervisor_eof_deadline_applies_when_client_stops_reading_stdout() {
     let temp = tempfile::tempdir().unwrap();
     let mut child = spawn_test_supervisor_process(
         &temp,
-        &[("CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVIOR", "stream")],
+        &[
+            ("CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVIOR", "stream"),
+            ("CODEY_FASTCTX_CLIENT_EOF_GRACE_MS", "250"),
+        ],
     );
     let mut stdin = child.stdin.take().unwrap();
     // 读完初始化后仍持有管道，但不再读取，使 stdout 写入确实受背压阻塞。
@@ -508,7 +517,7 @@ fn supervisor_eof_deadline_applies_when_client_stops_reading_stdout() {
     drop(stdin);
     let status = wait_for_eof_shutdown(&mut child, worker_pid, disconnected_at);
     assert!(!status.success(), "EOF deadline must report a failure");
-    assert!(disconnected_at.elapsed() >= Duration::from_secs(5));
+    assert!(disconnected_at.elapsed() >= Duration::from_millis(250));
     drop(stdout);
 }
 

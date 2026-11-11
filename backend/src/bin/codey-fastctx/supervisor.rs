@@ -15,6 +15,7 @@ pub const RECOVERABLE_WORKER_EXIT_CODE: i32 = 75;
 const RECOVERY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_EOF_GRACE_PERIOD: Duration = Duration::from_secs(5);
+const CLIENT_EOF_GRACE_PERIOD_ENV: &str = "CODEY_FASTCTX_CLIENT_EOF_GRACE_MS";
 const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RECOVERIES_IN_WINDOW: usize = 3;
 /// Codex 为每个已加载的线程各起一组 FastCtx MCP，线程空闲后仍常驻。worker 只是
@@ -52,8 +53,18 @@ fn announces_shell_tools(line: &[u8]) -> bool {
             .any(|window| window == SHELL_TOOL_MARKER)
 }
 
+fn client_eof_grace_period() -> Duration {
+    std::env::var(CLIENT_EOF_GRACE_PERIOD_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(CLIENT_EOF_GRACE_PERIOD)
+}
+
 pub async fn run(worker_argument: &str) -> Result<()> {
     let limits = ProtocolLimits::from_environment();
+    let eof_grace_period = client_eof_grace_period();
     let worker_config = WorkerConfig {
         argument: worker_argument,
         limits,
@@ -72,10 +83,10 @@ pub async fn run(worker_argument: &str) -> Result<()> {
     // 仅在整体退出时取消监督 future，取消的写操作不会被重试或继续使用。
     let outcome = tokio::select! {
         biased;
-        () = wait_for_client_eof_deadline(eof_rx) => {
+        () = wait_for_client_eof_deadline(eof_rx, eof_grace_period) => {
             Err(anyhow::anyhow!(
-                "MCP stdin 关闭后 FastCtx worker 未在 {} 秒宽限期内完成退出及输出转发",
-                CLIENT_EOF_GRACE_PERIOD.as_secs()
+                "MCP stdin 关闭后 FastCtx worker 未在 {:.3} 秒宽限期内完成退出及输出转发",
+                eof_grace_period.as_secs_f64()
             ))
         }
         outcome = supervise(worker_config, &mut worker, &mut client_rx, tokio::io::stdout()) => outcome,
@@ -88,9 +99,12 @@ pub async fn run(worker_argument: &str) -> Result<()> {
     combine_supervision_and_finalization(outcome, finalized)
 }
 
-async fn wait_for_client_eof_deadline(eof_rx: oneshot::Receiver<tokio::time::Instant>) {
+async fn wait_for_client_eof_deadline(
+    eof_rx: oneshot::Receiver<tokio::time::Instant>,
+    grace_period: Duration,
+) {
     match eof_rx.await {
-        Ok(observed_at) => tokio::time::sleep_until(observed_at + CLIENT_EOF_GRACE_PERIOD).await,
+        Ok(observed_at) => tokio::time::sleep_until(observed_at + grace_period).await,
         // 输入错误仍由监督流程报告，不能把 reader 退出误判为正常 EOF。
         Err(_) => std::future::pending::<()>().await,
     }
