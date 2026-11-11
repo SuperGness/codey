@@ -36,16 +36,19 @@ pub(crate) fn prepare_cached_catalog_in_context(
     remote_compaction_models: &[String],
     context: &CatalogContext<'_>,
 ) -> Result<bool> {
-    if !read_catalog_value(&home.join(relative_path()))
-        .is_some_and(|value| snapshot_matches_runtime_source(&value, context.source()))
-    {
+    let Some(value) = read_catalog_value(&home.join(relative_path())) else {
+        return Ok(false);
+    };
+    if !snapshot_matches_runtime_source(&value, context.source()) {
         return Ok(false);
     }
-    if !is_available(home) {
+    let mut models = catalog_models_from_value(&value);
+    if !runtime_compatible_models(&models) {
         return Ok(false);
     }
+    let runtime_source = value.get("codey_runtime_source").cloned();
+    drop(value);
 
-    let mut models = read_runtime_catalog_models(home)?;
     let original_models = models.clone();
     apply_remote_compaction_models(&mut models, remote_compaction_models);
     let allowed_model_keys = native_web_search_models
@@ -65,9 +68,11 @@ pub(crate) fn prepare_cached_catalog_in_context(
         normalize_third_party_compaction_identity(model);
         changed |= *model != previous;
     }
-    if changed {
-        write_catalog(home, &models)?;
+    if !changed {
+        return Ok(true);
     }
+
+    write_catalog_with_source(home, &models, runtime_source)?;
 
     let written_models = read_runtime_catalog_models(home)?;
     let mut safely_gated_models = written_models.clone();

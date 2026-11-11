@@ -363,7 +363,7 @@ pub(super) fn write_catalog(home: &Path, models: &[Value]) -> Result<Vec<u8>> {
     write_catalog_with_source(home, models, source)
 }
 
-fn write_catalog_with_source(
+pub(super) fn write_catalog_with_source(
     home: &Path,
     models: &[Value],
     source: Option<Value>,
