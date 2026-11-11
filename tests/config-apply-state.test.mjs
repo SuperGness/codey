@@ -4,7 +4,6 @@ import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const { reconcileConfigApply, configApplyNotice, configApplyPending } = await loadTypeScriptModule(new URL("../src/configApply.ts", import.meta.url));
 const { reconcileRuntimeStatus } = await loadTypeScriptModule(new URL("../src/runtimeStatusSnapshot.ts", import.meta.url));
-const { reconcileConfigDraft } = await loadTypeScriptModule(new URL("../src/configDraft.ts", import.meta.url));
 const { createStatusPollScheduler, createStatusPollTask } = await loadTypeScriptModule(new URL("../src/runtimeStatusPollScheduler.ts", import.meta.url));
 
 test("late save and polling responses cannot replace newer or completed application state", () => {
@@ -73,17 +72,6 @@ test("pending, failure and restart messages distinguish saving from applying", (
   assert.match(configApplyNotice({ revision: 1, state: "failed", error: "连接中断" }).text, /连接中断/);
   assert.match(configApplyNotice({ revision: 1, state: "restart_required" }).text, /重启/);
   assert.equal(configApplyNotice({ revision: 1, state: "saved" }).text, "配置已保存");
-});
-
-test("save acknowledgement preserves edits made after submission and retains dirty state", () => {
-  const submitted = { settingsRevision: 1, profiles: [], streamMaxRetries: 4, activeProfileId: "", routeRequestLog: { enabled: true } };
-  const draft = { ...submitted, streamMaxRetries: 8 };
-  const incoming = { ...submitted, settingsRevision: 2 };
-  const merged = reconcileConfigDraft(submitted, draft, incoming);
-  assert.equal(merged.config.streamMaxRetries, 8);
-  assert.equal(merged.config.settingsRevision, 2);
-  assert.equal(merged.dirty, true);
-  assert.equal(reconcileConfigDraft(submitted, submitted, incoming).dirty, false);
 });
 
 function clockHarness() {

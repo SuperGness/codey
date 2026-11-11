@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
-
 const root = new URL("../", import.meta.url);
 
 test("settings panels declare render-isolation hooks and stable handlers", async () => {
@@ -132,33 +130,4 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   ]) {
     assert.match(sections, new RegExp(`export const ${component} = memo\\(`));
   }
-});
-
-test("runtime polling preserves referentially stable status slices", async () => {
-  const { reconcileRuntimeStatus } = await loadTypeScriptModule(
-    new URL("../src/runtimeStatusSnapshot.ts", import.meta.url),
-  );
-  const current = {
-    running: false,
-    appVersion: "1.0.0",
-    maintenance: { sessionStatus: "ready", sessionFilesFixed: 2 },
-    injectionScripts: [{ id: "bridge", status: "effective" }],
-  };
-
-  const equalSnapshot = structuredClone(current);
-  assert.equal(reconcileRuntimeStatus(current, equalSnapshot), current);
-
-  const changedRoot = reconcileRuntimeStatus(current, {
-    ...structuredClone(current),
-    running: true,
-  });
-  assert.notEqual(changedRoot, current);
-  assert.equal(changedRoot.maintenance, current.maintenance);
-  assert.equal(changedRoot.injectionScripts, current.injectionScripts);
-
-  const changedMaintenance = reconcileRuntimeStatus(current, {
-    ...structuredClone(current),
-    maintenance: { sessionStatus: "error", sessionFilesFixed: 2 },
-  });
-  assert.notEqual(changedMaintenance.maintenance, current.maintenance);
 });

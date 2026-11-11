@@ -60,7 +60,6 @@ type OperationsRuntimeStatus = Pick<
   | "clientPlatform"
   | "restartRequired"
   | "restartInProgress"
-  | "codexAppPath"
   | "maintenance"
   | "injectionScripts"
   | "fastContextToolsActive"
@@ -72,7 +71,6 @@ type OperationsRuntimeStatus = Pick<
 >;
 
 type OperationsPanelProps = {
-  codexAppPath: string;
   fastContextToolsStatus: FastContextToolsStatus;
   status: OperationsRuntimeStatus;
   busy: string | null;
@@ -458,7 +456,7 @@ function OperationsPanelComponent({
               >
                 <div className="expanded-card-body">
                   {expandedStatusCard.showInjectionScripts && configRepairNotice && (
-                    <p role="status" className={`mb-3 whitespace-pre-line break-words text-sm ${configRepairNotice.tone === "error" ? "text-danger" : "text-[var(--codey-text-secondary)]"}`}>
+                    <p role="status" className={`mb-3 whitespace-pre-line break-words text-sm ${configRepairNotice.tone === "error" ? "text-danger" : "text-[var(--codey-muted)]"}`}>
                       {configRepairNotice.text}
                     </p>
                   )}

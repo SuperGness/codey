@@ -115,6 +115,18 @@
   min-width: 0;
 }
 
+@container settings-content (max-width: 560px) {
+  .launch-proxy-card .feature-card-body.launch-proxy-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .launch-proxy-label {
+    justify-content: space-between;
+  }
+}
+
 
 
 .section-heading-row {
@@ -557,6 +569,17 @@
   border: 0;
 }
 
+.subagent-policy-callout.is-warning {
+  border: 1px solid var(--codey-amber-border);
+  background: var(--codey-amber-soft);
+}
+
+.subagent-policy-callout.is-warning .subagent-callout-icon,
+.subagent-policy-callout.is-warning .subagent-callout-text {
+  color: var(--codey-amber);
+  font-weight: 550;
+}
+
 .subagent-callout-icon {
   flex-shrink: 0;
   margin-top: 1px;
@@ -845,9 +868,9 @@
 }
 
 .notification-fields span {
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--codey-muted, #6e6e73);
+  color: var(--codey-muted);
 }
 
 .notification-dialog-fields {
@@ -1121,10 +1144,10 @@
 
 .prompt-field-label {
   color: var(--codey-text);
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 13.5px;
+  font-weight: 650;
   line-height: 1.4;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.005em;
 }
 
 .prompt-field-label-row {
@@ -1823,8 +1846,8 @@
   flex-direction: column;
   gap: 14px;
   margin-bottom: 18px;
-  padding: 14px 16px;
-  border: 2px dashed transparent;
+  padding: 15px 16px;
+  border: 1.5px dashed var(--codey-border-strong);
   border-radius: 18px;
   background: var(--codey-panel);
   transition: border-color 150ms ease, background-color 150ms ease;
@@ -1832,12 +1855,12 @@
 
 .plugin-import-panel.is-engaged {
   padding: 16px 18px 18px;
-  border: 1px solid var(--codey-border);
+  border: 1.5px solid var(--codey-border);
   background: var(--codey-card);
 }
 
 .plugin-import-panel.is-drag-active {
-  border: 2px dashed var(--codey-blue);
+  border: 1.5px dashed var(--codey-blue);
   background: var(--codey-blue-soft);
 }
 
@@ -1855,6 +1878,13 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
+  background: var(--codey-blue-soft);
+  color: var(--codey-blue);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.plugin-import-panel.is-drag-active .plugin-import-icon,
+.plugin-import-panel[aria-busy="true"] .plugin-import-icon {
   background: var(--codey-blue);
   color: #ffffff;
 }
@@ -1938,8 +1968,21 @@
 }
 
 @container settings-content (max-width: 560px) {
+  .plugin-import-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .plugin-import-title,
+  .plugin-import-hint {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+
   .plugin-import-path {
     padding-left: 0;
+    flex-wrap: wrap;
   }
 }
 
@@ -1991,9 +2034,12 @@
   padding: 14px 18px;
 }
 
-.overview-config .notification-empty-card {
+.overview-config .notification-channel-list > li.notification-empty-card {
   grid-column: 1 / -1;
+  justify-content: center;
+  padding: 26px 20px;
   border-radius: 0;
+  background: var(--codey-panel);
 }
 
 .overview-config .launch-proxy-card {

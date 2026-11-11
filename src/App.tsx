@@ -210,7 +210,6 @@ export function App({
       clientPlatform: status.clientPlatform,
       restartRequired: status.restartRequired,
       restartInProgress: status.restartInProgress,
-      codexAppPath: status.codexAppPath,
       maintenance: status.maintenance,
       injectionScripts: status.injectionScripts,
       fastContextToolsActive: status.fastContextToolsActive,
@@ -226,7 +225,6 @@ export function App({
       status.clientPlatform,
       status.restartRequired,
       status.restartInProgress,
-      status.codexAppPath,
       status.maintenance,
       status.injectionScripts,
       status.fastContextToolsActive,
@@ -1297,32 +1295,34 @@ export function App({
   });
   if (!config || !provider) {
     const loadingContent = (
-      <main className="app-shell loading-shell">
-        <div className="loading-mark">
-          <GitBranch size={17} />
+      <main className={`app-shell loading-shell${loadFailed ? " is-error" : ""}`}>
+        <div className="loading-card">
+          <div className="loading-mark">
+            <GitBranch size={18} />
+          </div>
+          <div className="loading-body">
+            <strong>{loadFailed ? "Codey 加载失败" : "正在载入 Codey"}</strong>
+            <p>
+              <NoticeLoadingText controller={noticeController} />
+            </p>
+            {loadFailed && (
+              <div className="flex flex-wrap gap-2 mt-3.5">
+                <Button variant="outline" size="sm" disabled={isBusy} onClick={askRepairCodexConfig}>
+                  {busy === "repair-codex-config" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
+                  {busy === "repair-codex-config" ? "检查修复中…" : "修复 Codex 配置"}
+                </Button>
+                <Button variant="secondary" size="sm" disabled={isBusy} onClick={() => void runOperation("reload-config", load)}>
+                  重新检查
+                </Button>
+              </div>
+            )}
+          </div>
+          {!loadFailed && <LoaderCircle
+            className="animate-spin loading-animate-spin"
+            size={18}
+            aria-hidden="true"
+          />}
         </div>
-        <div>
-          <strong>{loadFailed ? "Codey 加载失败" : "正在载入 Codey"}</strong>
-          <p>
-            <NoticeLoadingText controller={noticeController} />
-          </p>
-          {loadFailed && (
-            <div className="flex flex-wrap gap-2 mt-3">
-              <Button variant="outline" size="sm" disabled={isBusy} onClick={askRepairCodexConfig}>
-                {busy === "repair-codex-config" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
-                {busy === "repair-codex-config" ? "检查修复中…" : "修复 Codex 配置"}
-              </Button>
-              <Button variant="secondary" size="sm" disabled={isBusy} onClick={() => void runOperation("reload-config", load)}>
-                重新检查
-              </Button>
-            </div>
-          )}
-        </div>
-        {!loadFailed && <LoaderCircle
-          className="animate-spin loading-animate-spin"
-          size={16}
-          aria-hidden="true"
-        />}
         <ConfirmationDialogHost
           container={popupContainer}
           controller={confirmationController}
@@ -1607,10 +1607,18 @@ export function App({
       )}
 
       {status.configApply && (status.configApply.state === "failed" || configApplyError) && (
-        <div role="alert"
-          className="flex flex-wrap items-center gap-2 border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 px-5 py-2 text-xs">
-          <span>{configApplyError || configApplyNotice(status.configApply).text}</span>
-          {configApplyError && <Button size="sm" variant="outline" onClick={() => void retryConfigApply()}>重新查询状态</Button>}
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-5 py-2.5 text-xs font-medium text-[var(--codey-red)]"
+        >
+          <span className="min-w-0 flex-1 leading-relaxed">
+            {configApplyError || configApplyNotice(status.configApply).text}
+          </span>
+          {configApplyError && (
+            <Button size="xs" variant="outline" onClick={() => void retryConfigApply()}>
+              重新查询状态
+            </Button>
+          )}
         </div>
       )}
 
@@ -1638,7 +1646,6 @@ export function App({
                 description="查看 Codex 运行状态，管理客户端功能与通知。"
               />
               <OperationsPanel
-                codexAppPath={config.codexAppPath}
                 fastContextToolsStatus={fastContextToolsStatus}
                 status={operationsStatus}
                 busy={busy}

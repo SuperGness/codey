@@ -274,6 +274,7 @@ function ModelSectionComponent({
   const [routeDraft, setRouteDraft] = useState<Profile | null>(null);
   const [routeValidationAttempted, setRouteValidationAttempted] = useState(false);
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
+  const [syncingRouteId, setSyncingRouteId] = useState<string | null>(null);
   const [routeHeadersText, setRouteHeadersText] = useState("{}");
   const [headerDialogProfile, setHeaderDialogProfile] = useState<Profile | null>(null);
   const [headerError, setHeaderError] = useState("");
@@ -305,6 +306,10 @@ function ModelSectionComponent({
   }, []);
 
   useEffect(() => () => { routeImportGeneration.current += 1; }, []);
+
+  useEffect(() => {
+    if (busy !== "fetch-route-models") setSyncingRouteId(null);
+  }, [busy]);
 
   useEffect(() => {
     if (!routeConfigReadOnly) return;
@@ -857,8 +862,7 @@ function ModelSectionComponent({
                 <span className="route-header-divider" aria-hidden="true" />
                 <div className="route-header-btn-group">
                   <Button
-                    color="primary"
-                    variant="filled"
+                    variant="outline"
                     size="sm"
                     onClick={(event) => {
                       if (event.currentTarget instanceof HTMLElement) onOpenUsageAnalysis(event.currentTarget);
@@ -868,8 +872,7 @@ function ModelSectionComponent({
                     <span>用量分析</span>
                   </Button>
                   <Button
-                    color="primary"
-                    variant="filled"
+                    variant="outline"
                     size="sm"
                     onClick={() => void invoke("open_route_request_logs")}
                   >
@@ -891,7 +894,7 @@ function ModelSectionComponent({
               const count = tab.id === "routes"
                 ? visibleProfiles.length
                 : tab.id === "accounts"
-                  ? officialAccounts?.length
+                  ? (officialAccounts === null ? "·" : officialAccounts.length)
                   : undefined;
               return (
                 <button
@@ -968,6 +971,13 @@ function ModelSectionComponent({
                 </Button>
               )}
             </div>
+
+            {dirty && !routeConfigReadOnly && (
+              <div className="route-dirty-lock-banner" role="status">
+                <IconInfoCircle size={15} className="shrink-0" aria-hidden="true" />
+                <span>当前有未保存的全局设置更改，保存后即可新增、排序或修改线路。</span>
+              </div>
+            )}
 
             <div id="provider-model-groups" className="provider-model-groups" role="region" aria-label="供应商与模型列表" tabIndex={0}>
               {visibleProfiles.length === 0 && (
@@ -1085,11 +1095,14 @@ function ModelSectionComponent({
                             variant="outline"
                             size="xs"
                             disabled={!canSyncCurrentProvider || isBusy}
-                            onClick={syncModels}
+                            onClick={() => {
+                              setSyncingRouteId(profile.id);
+                              syncModels();
+                            }}
                             aria-label={`同步 ${profile.name} 模型`}
                             title={`同步 ${profile.name} 模型`}
                           >
-                            <RefreshCw size={12} className={busy === "fetch-route-models" && (routeConfigReadOnly || profile.id === config.activeProfileId) ? "animate-spin" : ""} aria-hidden="true" />
+                            <RefreshCw size={12} className={busy === "fetch-route-models" && (routeConfigReadOnly || syncingRouteId === profile.id) ? "animate-spin" : ""} aria-hidden="true" />
                             <span>同步</span>
                           </Button>
                         )}
@@ -1152,8 +1165,9 @@ function ModelSectionComponent({
                       </div>
                     </div>
 
+                    {!disabled && group && (
                     <div className="provider-card-body">
-                      {group && (group.models.length > 0 ? (
+                      {group.models.length > 0 ? (
                         <div className="provider-model-tags">
                           {group.models.map((model) => {
                             const isDefault = !routeConfigReadOnly && modelIdsEqual(group.defaultModel, model);
@@ -1255,14 +1269,18 @@ function ModelSectionComponent({
                             variant="secondary"
                             size="xs"
                             disabled={!canSyncCurrentProvider || isBusy}
-                            onClick={syncModels}
+                            onClick={() => {
+                              setSyncingRouteId(profile.id);
+                              syncModels();
+                            }}
                           >
                             <Plus size={12} aria-hidden="true" />
                             <span>{routeConfigReadOnly ? "同步模型" : isOfficial ? "配置官方模型" : "同步或手动添加"}</span>
                           </Button>
                         </div>
-                      ))}
+                      )}
                     </div>
+                    )}
                   </section>
                 );
               })}
@@ -1286,8 +1304,8 @@ function ModelSectionComponent({
               <div className="route-setting-title">
                 <IconSparkles size={14} className="route-auxiliary-icon" aria-hidden="true" />
                 <strong>杂事模型</strong>
-                <Tooltip content={miscModelTooltip} position="top">
-                  <span className="route-auxiliary-help-trigger" aria-label="杂事模型说明">
+                <Tooltip content={miscModelTooltip} position="top" asChild>
+                  <span className="route-auxiliary-help-trigger" tabIndex={0} aria-label="杂事模型说明">
                     <IconInfoCircle size={13} className="route-auxiliary-help" aria-hidden="true" />
                   </span>
                 </Tooltip>
@@ -1335,8 +1353,8 @@ function ModelSectionComponent({
               <div className="route-setting-title">
                 <RefreshCw size={14} className="route-auxiliary-icon" aria-hidden="true" />
                 <strong>会话重试</strong>
-                <Tooltip content="每轮请求的流式错误重试次数；切换传输方式时可能另行计数，不等于总请求上限。保存并重启 Codex 后生效" position="top">
-                  <span className="route-auxiliary-help-trigger" aria-label="会话重试说明">
+                <Tooltip content="每轮请求的流式错误重试次数；切换传输方式时可能另行计数，不等于总请求上限。保存并重启 Codex 后生效" position="top" asChild>
+                  <span className="route-auxiliary-help-trigger" tabIndex={0} aria-label="会话重试说明">
                     <IconInfoCircle size={13} className="route-auxiliary-help" aria-hidden="true" />
                   </span>
                 </Tooltip>
@@ -1587,16 +1605,17 @@ function ModelSectionComponent({
                     <label className="route-field">
                       <span className="route-option-title-group">
                         <span>上游代理（可选）</span>
-                        <Tooltip content={UPSTREAM_PROXY_TOOLTIP_CONTENT}>
+                        <Tooltip content={UPSTREAM_PROXY_TOOLTIP_CONTENT} asChild>
                           <span
                             className="route-option-info-trigger"
+                            tabIndex={0}
                             aria-label="上游代理格式与提示"
                             onClick={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
                             }}
                           >
-                            <IconHelpCircle size={13} />
+                            <IconHelpCircle size={13} aria-hidden="true" />
                           </span>
                         </Tooltip>
                       </span>
@@ -1849,9 +1868,9 @@ function ModelSectionComponent({
                               <IconArchive size={14} />
                             </span>
                             <strong className="route-option-title">原生远程压缩</strong>
-                            <Tooltip content="仅在上游明确支持时开启，并选择服务商支持的压缩接口；未声明原生支持的线路由网关按等价方式压缩。">
-                              <span className="route-option-info-trigger" aria-label="原生远程压缩详细说明">
-                                <IconInfoCircle size={13} />
+                            <Tooltip content="仅在上游明确支持时开启，并选择服务商支持的压缩接口；未声明原生支持的线路由网关按等价方式压缩。" asChild>
+                              <span className="route-option-info-trigger" tabIndex={0} aria-label="原生远程压缩详细说明">
+                                <IconInfoCircle size={13} aria-hidden="true" />
                               </span>
                             </Tooltip>
                           </div>
@@ -1914,9 +1933,9 @@ function ModelSectionComponent({
                                 <IconBolt size={14} />
                               </span>
                               <strong className="route-option-title">WebSocket</strong>
-                              <Tooltip content="优先尝试复用长连接；使用代理或连接失败时转为流式 HTTP。能力变更需重启 Codex，实际速度取决于上游和网络。">
-                                <span className="route-option-info-trigger" aria-label="WebSocket 详细说明">
-                                  <IconInfoCircle size={13} />
+                              <Tooltip content="优先尝试复用长连接；使用代理或连接失败时转为流式 HTTP。能力变更需重启 Codex，实际速度取决于上游和网络。" asChild>
+                                <span className="route-option-info-trigger" tabIndex={0} aria-label="WebSocket 详细说明">
+                                  <IconInfoCircle size={13} aria-hidden="true" />
                                 </span>
                               </Tooltip>
                             </div>
@@ -1944,9 +1963,9 @@ function ModelSectionComponent({
                                 <IconWorld size={14} />
                               </span>
                               <strong className="route-option-title">原生网页搜索</strong>
-                              <Tooltip content="仅在上游和所选模型都明确支持时开启。">
-                                <span className="route-option-info-trigger" aria-label="原生网页搜索详细说明">
-                                  <IconInfoCircle size={13} />
+                              <Tooltip content="仅在上游和所选模型都明确支持时开启。" asChild>
+                                <span className="route-option-info-trigger" tabIndex={0} aria-label="原生网页搜索详细说明">
+                                  <IconInfoCircle size={13} aria-hidden="true" />
                                 </span>
                               </Tooltip>
                             </div>
@@ -2043,16 +2062,17 @@ function ModelSectionComponent({
                 <label className="route-field">
                   <span className="route-option-title-group">
                     <span>上游代理（可选）</span>
-                    <Tooltip content={UPSTREAM_PROXY_TOOLTIP_CONTENT}>
+                    <Tooltip content={UPSTREAM_PROXY_TOOLTIP_CONTENT} asChild>
                       <span
                         className="route-option-info-trigger"
+                        tabIndex={0}
                         aria-label="上游代理格式与提示"
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
                         }}
                       >
-                        <IconHelpCircle size={13} />
+                        <IconHelpCircle size={13} aria-hidden="true" />
                       </span>
                     </Tooltip>
                   </span>
@@ -2121,21 +2141,23 @@ function ModelSectionComponent({
       </Dialog>
       <Dialog open={headerDialogProfile !== null} onOpenChange={(open) => { if (!open && !isBusy) setHeaderDialogProfile(null); }}>
         {headerDialogProfile && (
-          <DialogContent className="route-editor-dialog">
+          <DialogContent className="route-editor-dialog" container={popupContainer ?? undefined}>
             <DialogHeader>
               <DialogTitle>编辑上游请求头</DialogTitle>
               <DialogDescription>{headerDialogProfile.name} 的 Codey → 上游请求头，使用 JSON 对象表示；null 或空字符串删除普通请求头，认证和协议必需请求头受保护。</DialogDescription>
             </DialogHeader>
-            <label className="route-field">
+            <label className="route-field mt-3">
               <span>请求头（JSON）</span>
-              <textarea
+              <TextArea
                 aria-label="请求头（JSON）"
                 aria-invalid={Boolean(headerError)}
                 aria-describedby={headerError ? "request-headers-error" : undefined}
+                error={Boolean(headerError)}
                 value={routeHeadersText}
                 disabled={isBusy}
                 rows={10}
-                className="min-h-48 rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 bg-[var(--codey-surface,#fff)] p-2 font-mono text-xs"
+                spellCheck={false}
+                className="min-h-48 resize-y font-mono text-xs leading-relaxed"
                 onChange={(event) => { setRouteHeadersText(event.target.value); setHeaderError(""); }}
                 placeholder={'{"X-Custom-Header": "value"}'}
               />

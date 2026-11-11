@@ -21,6 +21,18 @@ const SETTINGS_PAGES = [
 ] as const;
 
 const SETTINGS_GROUPS = ["核心配置", "扩展生态"] as const;
+const SETTINGS_GROUP_ENTRIES = SETTINGS_GROUPS.map(
+  (group) => [group, SETTINGS_PAGES.filter((page) => page.group === group)] as const,
+);
+const MENU_PAGES = SETTINGS_GROUP_ENTRIES.flatMap(([, pages]) => pages);
+const MENU_NAVIGATION_KEYS = new Set([
+  "ArrowDown",
+  "ArrowUp",
+  "ArrowRight",
+  "ArrowLeft",
+  "Home",
+  "End",
+]);
 
 type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"];
 type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
@@ -68,15 +80,40 @@ export function SettingsLayout({ active: layoutActive = true, brand, sections, s
     setActivePage(page);
   }
 
+  function handleMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (!MENU_NAVIGATION_KEYS.has(event.key)) return;
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>("button.settings-nav-item"),
+    );
+    const currentIndex = items.indexOf(event.target as HTMLButtonElement);
+    if (currentIndex === -1 || items.length === 0) return;
+    event.preventDefault();
+    let nextIndex = currentIndex;
+    if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = items.length - 1;
+    } else {
+      const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+      nextIndex = (currentIndex + step + items.length) % items.length;
+    }
+    const nextButton = items[nextIndex];
+    const nextPage = MENU_PAGES[nextIndex];
+    if (nextButton && nextPage) {
+      selectPage(nextPage.id);
+      nextButton.focus();
+    }
+  }
+
   return (
     <div className="settings-layout" hidden={hidden}>
       <nav className="settings-sidebar" aria-label="配置功能菜单">
         {brand && <div className="settings-sidebar-header">{brand}</div>}
-        <div className="settings-sidebar-menu">
-          {SETTINGS_GROUPS.map((group) => (
+        <div className="settings-sidebar-menu" onKeyDown={handleMenuKeyDown}>
+          {SETTINGS_GROUP_ENTRIES.map(([group, pages]) => (
             <div key={group} className="settings-nav-group">
               <div className="settings-nav-group-title">{group}</div>
-              {SETTINGS_PAGES.filter((page) => page.group === group).map((page) => {
+              {pages.map((page) => {
                 const Icon = page.icon;
                 return (
                   <button
@@ -88,7 +125,7 @@ export function SettingsLayout({ active: layoutActive = true, brand, sections, s
                     aria-controls={`${id}-page-${page.id}`}
                     onClick={() => selectPage(page.id)}
                   >
-                    <Icon size={16} stroke={1.75} aria-hidden="true" />
+                    <Icon size={18} stroke={1.85} aria-hidden="true" />
                     <span>{page.title}</span>
                   </button>
                 );

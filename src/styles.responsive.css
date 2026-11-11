@@ -16,6 +16,17 @@
   }
 }
 
+@media (max-width: 760px) {
+  .route-tabs {
+    margin-top: -18px;
+  }
+
+  .route-item-drag-handle {
+    margin-left: -14px;
+    margin-right: -10px;
+  }
+}
+
 @media (max-width: 680px) {
   .prompt-optimization-toolbar {
     align-items: stretch;
@@ -33,26 +44,14 @@
     grid-template-columns: 1fr;
   }
 
-  .catalog-aggregate-heading,
-  .provider-model-empty {
-    align-items: stretch;
+  .catalog-aggregate-heading {
+    align-items: flex-start;
     flex-direction: column;
   }
 
-  .route-catalog-pane {
-    padding: 12px;
-  }
-
   .route-auxiliary-bar {
-    padding: 10px 12px;
+    padding: 10px 14px;
     gap: 10px;
-  }
-
-  .provider-model-tags,
-  .route-manager-current .provider-model-tags,
-  .provider-model-group .provider-model-empty,
-  .route-manager-current .provider-model-group .provider-model-empty {
-    padding-left: 10px;
   }
 
   .section-title:has(+ .notification-channel-list),

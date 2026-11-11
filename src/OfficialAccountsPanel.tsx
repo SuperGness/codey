@@ -672,6 +672,16 @@ function OfficialAccountsPanelComponent({
 
   const disabled = isBusy || pending !== null;
   useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  useEffect(() => {
+    if (!siwcCopied) return;
+    const timer = window.setTimeout(() => setSiwcCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [siwcCopied]);
+  useEffect(() => {
     if (!active || disabled || !switchTipTarget) {
       setSwitchTipOpen(null);
       return;
@@ -719,7 +729,10 @@ function OfficialAccountsPanelComponent({
         </div>
       </div>
 
-      {loadError && <small className="official-accounts-error">{loadError}</small>}
+      {loadError && <small className="official-accounts-error" role="alert">{loadError}</small>}
+      {accounts === null && !loadError && (
+        <small className="official-accounts-empty" role="status">正在读取官方账号…</small>
+      )}
       {accounts && accounts.length === 0 && !loadError && (
         <small className="official-accounts-empty">尚未添加官方账号。添加后每个账号都会成为一条官方线路，设为默认只决定 Codex 的登录身份和页头额度来源。</small>
       )}
@@ -772,6 +785,7 @@ function OfficialAccountsPanelComponent({
                   ? {
                       role: "button",
                       tabIndex: 0,
+                      "aria-label": `将 ${label} 设为默认官方账号`,
                       onPointerOverCapture: (event: React.PointerEvent) => {
                         if (event.pointerType === "touch") return;
                         const target = event.target as HTMLElement;
@@ -855,7 +869,7 @@ function OfficialAccountsPanelComponent({
                           </Badge>
                         )}
                         {!account.invalid && (
-                          <Tooltip content={siwcTip}>
+                          <Tooltip content={siwcTip} asChild>
                             <button
                               type="button"
                               className={`official-account-siwc-chip is-${siwcStatus}`}
@@ -891,10 +905,21 @@ function OfficialAccountsPanelComponent({
                         disabled={disabled}
                         onClick={(event) => {
                           event.stopPropagation();
-                          void handleRemove(account);
+                          void startLogin();
                         }}
                       >
                         重新添加
+                      </button>
+                      <button
+                        type="button"
+                        className="official-account-usage-action"
+                        disabled={disabled}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleRemove(account);
+                        }}
+                      >
+                        移除账号
                       </button>
                     </small>
                   ) : (
@@ -973,7 +998,7 @@ function OfficialAccountsPanelComponent({
           <div className="official-login-body">
             <code className="official-login-url" title={login?.authUrl}>{login?.authUrl}</code>
             {loginError
-              ? <small className="official-accounts-error">{loginError}</small>
+              ? <small className="official-accounts-error" role="alert">{loginError}</small>
               : <small className="official-login-waiting">等待浏览器完成登录…（10 分钟内有效）</small>}
           </div>
           <DialogFooter>
@@ -1002,7 +1027,7 @@ function OfficialAccountsPanelComponent({
           <div className="official-login-body">
             <code className="official-login-url" title={siwcLogin?.authUrl}>{siwcLogin?.authUrl}</code>
             {siwcError
-              ? <small className="official-accounts-error">{siwcError}</small>
+              ? <small className="official-accounts-error" role="alert">{siwcError}</small>
               : <small className="official-login-waiting">等待浏览器完成授权…（10 分钟内有效）</small>}
           </div>
           <DialogFooter>
@@ -1066,6 +1091,8 @@ function OfficialAccountsPanelComponent({
             </div>
             <TextArea
               aria-label="Refresh Token 或 OAuth JSON"
+              aria-invalid={Boolean(manualError)}
+              error={Boolean(manualError)}
               autoFocus
               autoComplete="off"
               className="min-h-[148px] resize-y font-mono text-xs leading-relaxed"
@@ -1085,7 +1112,7 @@ function OfficialAccountsPanelComponent({
                 已载入 {manualFileName}，请检查内容后添加
               </small>
             ) : null}
-            {manualError ? <small className="official-accounts-error">{manualError}</small> : null}
+            {manualError ? <small className="official-accounts-error" role="alert">{manualError}</small> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" size="sm" disabled={pending === "manual"} onClick={closeManual}>取消</Button>

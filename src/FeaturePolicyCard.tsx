@@ -87,6 +87,12 @@ const SUBAGENT_TASK_TYPES = [
   icon: typeof IconWorldSearch;
   description: string;
 }>;
+const analysisTasks = SUBAGENT_TASK_TYPES.filter(
+  (task) => task.kind === "analysis",
+);
+const implementationTasks = SUBAGENT_TASK_TYPES.filter(
+  (task) => task.kind === "implementation",
+);
 
 export type SubagentPolicyCardProps = {
   active?: boolean;
@@ -114,12 +120,6 @@ export function SubagentPolicyCardComponent({
   const enabledRoleCount = SUBAGENT_TASK_TYPES.filter(
     ({ id }) => config.subagentRoles[id]?.enabled !== false,
   ).length;
-  const analysisTasks = SUBAGENT_TASK_TYPES.filter(
-    (task) => task.kind === "analysis",
-  );
-  const implementationTasks = SUBAGENT_TASK_TYPES.filter(
-    (task) => task.kind === "implementation",
-  );
   const enabledAnalysisCount = analysisTasks.filter(
     ({ id }) => config.subagentRoles[id]?.enabled !== false,
   ).length;
@@ -200,7 +200,7 @@ export function SubagentPolicyCardComponent({
         </div>
 
         <div className="subagent-control-group subagent-control-group--model">
-          <label className="subagent-control-label">指定模型</label>
+          <span className="subagent-control-label" aria-hidden="true">指定模型</span>
           <div className="subagent-control-field">
             <ModelCombobox
               aria-label={`${task.name}模型`}
@@ -238,7 +238,7 @@ export function SubagentPolicyCardComponent({
         </div>
 
         <div className="subagent-control-group subagent-control-group--effort">
-          <label className="subagent-control-label">思考深度</label>
+          <span className="subagent-control-label" aria-hidden="true">思考深度</span>
           <div className="subagent-control-field">
             <Select
               className="w-full min-w-0"
@@ -364,7 +364,7 @@ export function SubagentPolicyCardComponent({
                 </div>
               </div>
 
-              <div className="subagent-policy-callout">
+              <div className={`subagent-policy-callout${subagentModelOptions.length === 0 ? " is-warning" : ""}`}>
                 <IconInfoCircle
                   size={16}
                   className="subagent-callout-icon"
@@ -386,6 +386,15 @@ export function SubagentPolicyCardComponent({
                 <strong>子代理优化已关闭</strong>
                 <p>开启后仅在宽范围、可并行或需要专门证据时选择性委派，并提供五类专用角色与汇合门禁。</p>
               </div>
+              <Button
+                variant="default"
+                size="sm"
+                className="mt-1"
+                disabled={isBusy}
+                onClick={() => onSubagentOptimizationChange(true)}
+              >
+                开启子代理优化
+              </Button>
             </div>
           )}
         </div>
@@ -508,13 +517,14 @@ function FeaturePolicyCardComponent({
               <IconNetwork size={14} />
             </span>
             <h3 id="launch-proxy-title" className="settings-section-heading">Codex 启动代理</h3>
-            <Tooltip content={LAUNCH_PROXY_TOOLTIP_CONTENT} position="top">
-              <span
-                className="inline-flex shrink-0 cursor-help items-center text-[var(--codey-muted,#6e6e73)] transition-colors hover:text-[var(--codey-text,#1d1d1f)]"
+            <Tooltip content={LAUNCH_PROXY_TOOLTIP_CONTENT} position="top" asChild>
+              <button
+                type="button"
+                className="subagent-role-help"
                 aria-label="Codex 启动代理格式与说明"
               >
-                <IconHelpCircle size={14} aria-hidden="true" />
-              </span>
+                <IconHelpCircle size={15} aria-hidden="true" />
+              </button>
             </Tooltip>
           </div>
           <p>客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。</p>
@@ -548,7 +558,7 @@ function FeaturePolicyCardComponent({
                 launchProxy ? (
                   <button
                     type="button"
-                    className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted,#8e8e93)] hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-[var(--codey-text,#1d1d1f)] transition-colors"
+                    className="flex size-6 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted)] hover:bg-[var(--codey-press)] hover:text-[var(--codey-text)] transition-colors"
                     onClick={() =>
                       onConfigChange({
                         ...config,
@@ -558,7 +568,7 @@ function FeaturePolicyCardComponent({
                     aria-label="清空代理设置"
                     title="清空代理设置"
                   >
-                    <IconX size={12} aria-hidden="true" />
+                    <IconX size={13} aria-hidden="true" />
                   </button>
                 ) : undefined
               }

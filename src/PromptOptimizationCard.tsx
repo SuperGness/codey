@@ -123,13 +123,6 @@ function PromptOptimizationCardComponent({
   };
 
   const handleApiKeyChange = (value: string) => {
-    if (value === "") {
-      updateOptimization({
-        apiKey: "",
-        clearApiKey: false,
-      });
-      return;
-    }
     updateOptimization({
       apiKey: value,
       clearApiKey: false,
@@ -274,7 +267,7 @@ function PromptOptimizationCardComponent({
 
                   <div className="prompt-optimization-toolbar-actions">
                     <Button
-                      variant="light"
+                      variant="outline"
                       size="sm"
                       className="prompt-test-btn"
                       loading={testing}
@@ -465,9 +458,9 @@ function PromptOptimizationCardComponent({
                             />
                           </div>
                           <Button
-                            className="h-[32px]! min-w-[76px] shrink-0 max-[680px]:w-full!"
-                            variant="light"
-                            size="xs"
+                            className="h-9! min-w-[84px] shrink-0 max-[680px]:w-full!"
+                            variant="outline"
+                            size="sm"
                             loading={fetchingModels}
                             disabled={
                               isBusy ||
@@ -529,6 +522,15 @@ function PromptOptimizationCardComponent({
                 <strong>提示词优化已关闭</strong>
                 <p>开启后，在 Codex 输入框旁可通过快捷按钮一键将自然语言重写为高质量提示词。</p>
               </div>
+              <Button
+                variant="default"
+                size="sm"
+                className="mt-1"
+                disabled={isBusy}
+                onClick={() => updateOptimization({ enabled: true })}
+              >
+                开启提示词优化
+              </Button>
             </div>
           )}
         </div>

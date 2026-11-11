@@ -11,8 +11,10 @@ export function sortRoutesByEnabled(profiles: readonly Profile[]) {
   );
 }
 
+const routeComponentEncoder = new TextEncoder();
+
 function encodeRouteComponent(value: string) {
-  const bytes = new TextEncoder().encode(value.trim());
+  const bytes = routeComponentEncoder.encode(value.trim());
   return Array.from(bytes, (byte) => {
     const char = String.fromCharCode(byte);
     return /[A-Za-z0-9._-]/.test(char)

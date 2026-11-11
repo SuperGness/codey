@@ -103,6 +103,53 @@ function createReactStub() {
   return { react, reset: () => { cursor = 0; states = []; }, restart: () => { cursor = 0; } };
 }
 
+const resolvedFileCache = new Map();
+const compiledFactoryCache = new Map();
+
+function resolveModuleFile(specifier, fromUrl) {
+  const cacheKey = `${fromUrl}\0${specifier}`;
+  const cached = resolvedFileCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const base = new URL(specifier, fromUrl).href;
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}/index.ts`,
+    `${base}/index.tsx`,
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (statSync(fileURLToPath(candidate)).isFile()) {
+        resolvedFileCache.set(cacheKey, candidate);
+        return candidate;
+      }
+    } catch {
+      /* 继续尝试下一个候选路径 */
+    }
+  }
+  throw new Error(`无法解析依赖：${specifier}（来自 ${fromUrl}）`);
+}
+
+function getCompiledModuleFactory(key) {
+  let factory = compiledFactoryCache.get(key);
+  if (!factory) {
+    const compiled = ts.transpileModule(readFileSync(fileURLToPath(key), "utf8"), {
+      fileName: key,
+      compilerOptions: {
+        esModuleInterop: true,
+        // 只有 .tsx 走 JSX 解析：否则 .ts 里的泛型箭头函数（async <T>）会被当成 JSX。
+        jsx: key.endsWith(".tsx") ? ts.JsxEmit.ReactJSX : ts.JsxEmit.Preserve,
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText;
+    factory = new Function("require", "exports", "module", compiled);
+    compiledFactoryCache.set(key, factory);
+  }
+  return factory;
+}
+
 /**
  * 递归编译组件的相对依赖（TS/TSX → CommonJS）：纯函数模块用真实实现，
  * 只有 stubs 里显式声明的模块（UI 组件库、图标、IPC 等）才替换成桩。
@@ -129,25 +176,6 @@ export function createModuleGraph(entryUrl, { stubs = {}, autoStub = false } = {
     return value;
   };
 
-  const resolveFile = (specifier, fromUrl) => {
-    const base = new URL(specifier, fromUrl).href;
-    const candidates = [
-      base,
-      `${base}.ts`,
-      `${base}.tsx`,
-      `${base}/index.ts`,
-      `${base}/index.tsx`,
-    ];
-    for (const candidate of candidates) {
-      try {
-        if (statSync(fileURLToPath(candidate)).isFile()) return candidate;
-      } catch {
-        /* 继续尝试下一个候选路径 */
-      }
-    }
-    throw new Error(`无法解析依赖：${specifier}（来自 ${fromUrl}）`);
-  };
-
   const load = (url) => {
     const key = url.replace(/[?#].*$/, "");
     if (instances.has(key)) return instances.get(key);
@@ -155,22 +183,12 @@ export function createModuleGraph(entryUrl, { stubs = {}, autoStub = false } = {
     const exports = {};
     // 先登记实例，循环依赖拿到的是同一个 exports 对象。
     instances.set(key, exports);
-    const compiled = ts.transpileModule(readFileSync(fileURLToPath(key), "utf8"), {
-      fileName: key,
-      compilerOptions: {
-        esModuleInterop: true,
-        // 只有 .tsx 走 JSX 解析：否则 .ts 里的泛型箭头函数（async <T>）会被当成 JSX。
-        jsx: key.endsWith(".tsx") ? ts.JsxEmit.ReactJSX : ts.JsxEmit.Preserve,
-        module: ts.ModuleKind.CommonJS,
-        target: ts.ScriptTarget.ES2022,
-      },
-    }).outputText;
     const require = (specifier) =>
       Object.prototype.hasOwnProperty.call(stubs, specifier) ||
       !specifier.startsWith(".")
         ? resolveBare(specifier)
-        : load(resolveFile(specifier, key));
-    new Function("require", "exports", "module", compiled)(require, exports, {
+        : load(resolveModuleFile(specifier, key));
+    getCompiledModuleFactory(key)(require, exports, {
       exports,
     });
     return exports;

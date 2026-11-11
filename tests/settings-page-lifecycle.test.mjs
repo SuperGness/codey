@@ -177,3 +177,43 @@ test("inactive layouts stop page work without unmounting their children", () => 
   assert.equal(harness.page("models").instance, models.instance);
   assert.deepEqual(harness.unmounts, []);
 });
+
+test("sidebar keyboard navigation follows grouped menu order", () => {
+  const harness = layoutHarness();
+  const menu = () => harness.find("div").find(node => node.props.className === "settings-sidebar-menu");
+  let focused = null;
+  const items = harness.find("button").map(node => ({ id: node.props.id, focus() { focused = node.props.id; } }));
+  const press = (fromIndex, key) => {
+    let prevented = false;
+    menu().props.onKeyDown({
+      key,
+      target: items[fromIndex],
+      currentTarget: { querySelectorAll: () => items },
+      preventDefault() { prevented = true; },
+    });
+    assert.equal(prevented, true);
+    harness.render();
+  };
+
+  const isActive = (id) =>
+    harness.find("section").find(node => node.props.id === `settings-page-${id}`).props.hidden === false;
+
+  press(3, "ArrowDown");
+  assert.equal(focused, "settings-menu-plugins");
+  assert.equal(isActive("plugins"), true);
+  assert.ok(harness.page("plugins"));
+
+  press(0, "ArrowUp");
+  assert.equal(focused, "settings-menu-skills");
+  assert.equal(isActive("skills"), true);
+  assert.equal(harness.page("skills").active, true);
+
+  press(6, "Home");
+  assert.equal(focused, "settings-menu-overview");
+  assert.equal(isActive("overview"), true);
+
+  press(0, "End");
+  assert.equal(focused, "settings-menu-skills");
+  assert.equal(isActive("skills"), true);
+  assert.equal(harness.page("skills").active, true);
+});

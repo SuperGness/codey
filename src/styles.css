@@ -281,6 +281,74 @@ button,
   isolation: isolate;
 }
 
+.loading-shell {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.loading-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(440px, 100%);
+  padding: 20px 22px;
+  border: 1px solid var(--codey-border);
+  border-radius: 18px;
+  background: var(--codey-card);
+  box-shadow: var(--codey-card-shadow, none);
+  animation: codey-panel-enter 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.loading-shell.is-error .loading-card {
+  border-color: var(--codey-red-border);
+}
+
+.loading-mark {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--codey-blue-soft);
+  color: var(--codey-blue);
+}
+
+.loading-shell.is-error .loading-mark {
+  background: var(--codey-red-soft);
+  color: var(--codey-red);
+}
+
+.loading-body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.loading-body strong {
+  color: var(--codey-text);
+  font-size: 15.5px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.loading-body p {
+  margin: 0;
+  color: var(--codey-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.loading-animate-spin {
+  margin-top: 2px;
+  flex-shrink: 0;
+  color: var(--codey-blue);
+}
+
 @keyframes codey-modal-enter {
   from {
     opacity: 0;
@@ -386,7 +454,9 @@ button,
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 140px;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 140px;
 }
 
 .macos-titlebar-title {
@@ -399,6 +469,7 @@ button,
   text-transform: uppercase;
   color: var(--codey-muted);
   letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 .app-title-text {
@@ -414,7 +485,9 @@ button,
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  width: 140px;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 140px;
 }
 
 .config-header-feedback {
@@ -510,15 +583,11 @@ button,
   border-bottom: 0;
 }
 
-/* 基础功能页配置区：标题在上，配置项按两列分组排列；功能策略排在启动代理之前。 */
+/* 基础功能页配置区：标题在上，配置项按两列分组排列；保持与 DOM 焦点顺序一致。 */
 .overview-config {
   display: flex;
   flex-direction: column;
 }
-
-.overview-config > section[aria-labelledby="runtime-title"] { order: 1; }
-.overview-config > .launch-proxy-section { order: 2; }
-.overview-config > .notification-section { order: 3; }
 
 .settings-layout {
   display: grid;
@@ -606,10 +675,11 @@ button,
 }
 
 .settings-nav-group-title {
-  padding: 6px 16px 6px;
+  padding: 6px 14px 5px;
   color: var(--codey-subtle);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
   user-select: none;
 }
 
@@ -617,18 +687,18 @@ button,
   position: relative;
   display: flex;
   width: 100%;
-  min-height: 46px;
+  min-height: 41px;
   flex-shrink: 0;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   border: 0;
   border-radius: 999px;
   background: transparent;
-  padding: 0 22px 0 14px;
-  color: var(--codey-text);
-  font-size: 16px;
-  font-weight: 400;
-  line-height: 1.2;
+  padding: 0 16px 0 13px;
+  color: var(--codey-text-soft);
+  font-size: 14.5px;
+  font-weight: 500;
+  line-height: 1.25;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
@@ -646,20 +716,22 @@ button,
 }
 
 .settings-nav-item svg {
-  width: 23px;
-  height: 23px;
+  width: 19px;
+  height: 19px;
   flex-shrink: 0;
-  color: currentColor;
-  stroke-width: 1.7;
+  color: var(--codey-muted);
+  stroke-width: 1.8;
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), color 160ms ease;
 }
 
 .settings-nav-item:hover {
-  background: var(--codey-press);
+  background: var(--codey-hover);
+  color: var(--codey-text);
 }
 
 .settings-nav-item:hover svg {
-  transform: translateX(1.5px);
+  color: var(--codey-text);
+  transform: translateX(1px);
 }
 
 .settings-nav-item:active {
@@ -667,17 +739,18 @@ button,
 }
 
 .settings-nav-item[aria-current="page"] {
-  background: var(--codey-surface-sunken);
-  font-weight: 800;
+  background: var(--codey-blue-soft);
+  color: var(--codey-text);
+  font-weight: 700;
 }
 
 [data-theme="dark"] .settings-nav-item[aria-current="page"] {
-  background: var(--codey-surface-elevated);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  background: var(--codey-blue-soft);
+  box-shadow: inset 0 0 0 1px var(--codey-blue-border);
 }
 
 .settings-nav-item[aria-current="page"] svg {
-  stroke-width: 2.3;
+  stroke-width: 2.15;
   color: var(--codey-blue);
 }
 
@@ -692,6 +765,8 @@ button,
   flex-direction: column;
   gap: 10px;
   margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--codey-border-subtle);
 }
 
 /* Codex 运行状态：仿账户条的整行胶囊。 */
@@ -699,13 +774,16 @@ button,
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 6px 8px 14px;
+  padding: 7px 6px 7px 13px;
+  border: 1px solid var(--codey-border);
   border-radius: 999px;
-  transition: background-color 150ms ease;
+  background: var(--codey-panel);
+  transition: background-color 150ms ease, border-color 150ms ease;
 }
 
 .codex-status-card:hover {
   background: var(--codey-hover);
+  border-color: var(--codey-border-strong);
 }
 
 .codex-status-dot {
@@ -805,10 +883,10 @@ button,
 /* 保存按钮是全局唯一的蓝色主操作。 */
 .sidebar-save-button {
   width: 100% !important;
-  height: 46px !important;
+  height: 42px !important;
   border-radius: 999px !important;
-  font-size: 15.5px !important;
-  font-weight: 800 !important;
+  font-size: 14.5px !important;
+  font-weight: 750 !important;
   border: 0 !important;
   transition:
     background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -1058,7 +1136,7 @@ button,
   }
 
   .sidebar-save {
-    flex: 1 1 140px;
+    flex: 1 1 160px;
   }
 
   .sidebar-save-button {
@@ -1067,7 +1145,8 @@ button,
   }
 
   .sidebar-dirty-hint {
-    display: none;
+    padding-inline: 6px;
+    font-size: 11.5px;
   }
 
   .sidebar-footer-bar {
@@ -1155,7 +1234,14 @@ button,
   flex-wrap: wrap;
   gap: 8px;
   min-height: 34px;
-  flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 760px) {
+  .settings-page-actions {
+    justify-content: flex-start;
+  }
 }
 
 .settings-section-heading {
@@ -1179,76 +1265,6 @@ button,
     border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
     background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-/* 分段控件：下划线标签页，选中项加粗并带蓝色短横。 */
-.codey-segmented-control {
-  display: inline-flex;
-  align-items: stretch;
-  gap: 4px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.codey-segmented-item {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 40px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--codey-muted);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 150ms ease, color 150ms ease;
-  white-space: nowrap;
-}
-
-.codey-segmented-item:hover:not(:disabled) {
-  background: var(--codey-hover);
-  color: var(--codey-text);
-}
-
-.codey-segmented-item.active {
-  color: var(--codey-text);
-  font-weight: 700;
-}
-
-@keyframes codey-tab-underline-enter {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) scaleX(0.55);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(-50%) scaleX(1);
-  }
-}
-
-.codey-segmented-item.active::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: 0;
-  width: min(56px, calc(100% - 20px));
-  height: 4px;
-  border-radius: 999px;
-  background: var(--codey-blue);
-  transform: translateX(-50%);
-  animation: codey-tab-underline-enter 180ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.codey-segmented-item:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* HeroUI 标签页统一为下划线样式。 */
@@ -1619,8 +1635,7 @@ button,
   .settings-modal-shell,
   .settings-page:not([hidden]),
   .sidebar-dirty-hint,
-  .sidebar-dirty-hint > span,
-  .codey-segmented-item.active::after {
+  .sidebar-dirty-hint > span {
     animation: none !important;
   }
 

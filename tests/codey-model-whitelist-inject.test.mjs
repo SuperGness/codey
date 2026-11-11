@@ -459,15 +459,23 @@ test("non-Codey providers still require migration before route changes", async (
   runtime.patch.dispose();
 });
 
+let patchRunnersPromise = null;
+function getPatchRunners() {
+  patchRunnersPromise ??= Promise.all([
+    readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/model-whitelist-inject.js", import.meta.url), "utf8"),
+  ]).then((sources) =>
+    sources.map((code) => Function("window", "document", "globalThis", "console", code)),
+  );
+  return patchRunnersPromise;
+}
+
 async function loadPatch(
   catalogResponse,
   clients,
   { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null, portableBridge = null, sessionModelBridge = null, beforeInstall = null } = {},
 ) {
-  const [bridgeSource, source] = await Promise.all([
-    readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
-    readFile(new URL("../public/model-whitelist-inject.js", import.meta.url), "utf8"),
-  ]);
+  const [runBridgeScript, runModelWhitelistScript] = await getPatchRunners();
   let nextTimer = 0;
   const timers = new Map();
   const timerDelays = new Map();
@@ -587,7 +595,7 @@ async function loadPatch(
   if (cachedRequestClient) window.__codeyAppServerRequestClients = new Map([["local", cachedRequestClient]]);
   if (bridgeReady) window.__codexSessionDeleteBridge = bridge;
   beforeInstall?.({ window, document });
-  Function("window", "document", "globalThis", "console", bridgeSource)(
+  runBridgeScript(
     window,
     document,
     window,
@@ -603,7 +611,7 @@ async function loadPatch(
       set: (children) => { trackedBodyChildren = children; },
     });
   }
-  Function("window", "document", "globalThis", "console", source)(
+  runModelWhitelistScript(
     window,
     document,
     window,
@@ -626,7 +634,7 @@ async function loadPatch(
   return {
     patch,
     async reload() {
-      Function("window", "document", "globalThis", "console", source)(
+      runModelWhitelistScript(
         window, document, window, { warn() {} },
       );
       const nextPatch = window.__codeyModelWhitelistPatch;

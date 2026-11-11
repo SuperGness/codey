@@ -149,7 +149,7 @@ function SystemSettingsDialogComponent({
       >
         <DialogHeader>
           <div className="flex items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[var(--codey-blue-soft)] text-[var(--codey-accent,#0071e3)]">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[var(--codey-blue-soft)] text-[var(--codey-blue)]">
               <IconSettings size={18} aria-hidden="true" />
             </div>
             <div className="min-w-0 flex-1">

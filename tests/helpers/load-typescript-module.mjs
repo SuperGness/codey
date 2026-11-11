@@ -1,28 +1,36 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import ts from "typescript";
 
+const compiledModuleCache = new Map();
+const resolvedRelativeCache = new Map();
+
 export async function loadTypeScriptModule(url) {
-  const modules = new Map();
-  return import(await compileModule(url, modules, new Set()));
+  return import(await compileModule(url, new Set()));
 }
 
-async function compileModule(url, modules, ancestors) {
+async function compileModule(url, ancestors) {
   const key = url.href;
   if (ancestors.has(key)) throw new Error(`测试模块存在循环导入：${key}`);
-  if (modules.has(key)) return modules.get(key);
-  const pending = compileSource(url, modules, new Set([...ancestors, key]));
-  modules.set(key, pending);
+  if (compiledModuleCache.has(key)) return compiledModuleCache.get(key);
+  const pending = compileSource(url, new Set([...ancestors, key])).catch((error) => {
+    compiledModuleCache.delete(key);
+    throw error;
+  });
+  compiledModuleCache.set(key, pending);
   return pending;
 }
 
 async function resolveRelativeModule(specifier, parent) {
+  const cacheKey = `${parent.href}\0${specifier}`;
+  if (resolvedRelativeCache.has(cacheKey)) return resolvedRelativeCache.get(cacheKey);
   const base = new URL(specifier, parent);
   const candidates = /\.[cm]?[jt]sx?$/.test(base.pathname)
     ? [base]
     : [base, ...[".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.tsx"].map(suffix => new URL(base.href + suffix))];
   for (const candidate of candidates) {
     try {
-      await readFile(candidate);
+      await access(candidate);
+      resolvedRelativeCache.set(cacheKey, candidate);
       return candidate;
     } catch (error) {
       if (error.code !== "ENOENT" && error.code !== "EISDIR") throw error;
@@ -31,7 +39,7 @@ async function resolveRelativeModule(specifier, parent) {
   throw new Error(`无法解析测试模块导入：${specifier}（${parent.href}）`);
 }
 
-async function compileSource(url, modules, ancestors) {
+async function compileSource(url, ancestors) {
   const source = await readFile(url, "utf8");
   let compiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -46,7 +54,7 @@ async function compileSource(url, modules, ancestors) {
     const specifier = statement.moduleSpecifier;
     if (!specifier || !ts.isStringLiteral(specifier) || !specifier.text.startsWith(".")) continue;
     const dependency = await resolveRelativeModule(specifier.text, url);
-    const moduleUrl = await compileModule(dependency, modules, ancestors);
+    const moduleUrl = await compileModule(dependency, ancestors);
     replacements.push({ start: specifier.getStart(parsed), end: specifier.end, text: JSON.stringify(moduleUrl) });
   }
   for (const replacement of replacements.reverse()) {

@@ -80,7 +80,11 @@ test("third-party model sync can fall back to manual model support configuration
     dialogSource,
     /visibleModelOptions\(\s*filteredOfficialModels,\s*visibleOfficialCount,?\s*\)/,
   );
-  assert.match(dialogSource, /placeholder="搜索模型，或输入模型 ID 添加"/);
+  assert.match(
+    dialogSource,
+    /placeholder=\{officialOnly \? "搜索模型" : "搜索模型，或输入模型 ID 添加"\}/,
+  );
+  assert.match(dialogSource, /未找到匹配的官方模型/);
   assert.match(dialogSource, /当前线路支持 auto-review/);
   assert.match(dialogSource, /<Switch/);
   assert.match(dialogSource, /manualThirdPartyModelKeys\.has/);

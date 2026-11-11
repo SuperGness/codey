@@ -34,7 +34,9 @@
 .route-header-controls {
   display: inline-flex;
   align-items: center;
-  gap: 14px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px 14px;
 }
 
 .route-header-switch-item {
@@ -61,7 +63,18 @@
 .route-header-btn-group {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+@container settings-content (max-width: 640px) {
+  .route-header-controls {
+    justify-content: flex-start;
+  }
+
+  .route-header-divider {
+    display: none;
+  }
 }
 
 .settings-page .route-manager {
@@ -118,6 +131,21 @@
   line-height: 1.4;
 }
 
+.route-dirty-lock-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--codey-amber-border);
+  background: var(--codey-amber-soft);
+  color: var(--codey-amber);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
 /* 线路列表：通栏信息流行，圆形头像 + 粗体名称，模型芯片缩进在名称下方。 */
 .settings-page .provider-model-groups {
   display: flex;
@@ -137,8 +165,8 @@
 .provider-model-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px var(--page-gutter-end, 28px) 16px calc(var(--page-gutter, 28px) - 16px);
+  gap: 10px;
+  padding: 15px var(--page-gutter-end, 28px) 16px var(--page-gutter, 28px);
   overflow: hidden;
   border: 0;
   border-radius: 0;
@@ -156,9 +184,8 @@
   background: var(--codey-hover);
 }
 
-.provider-model-group.is-disabled .provider-heading-main,
-.provider-model-group.is-disabled .provider-card-body {
-  opacity: 0.5;
+.provider-model-group.is-disabled .provider-heading-main {
+  opacity: 0.52;
 }
 
 .provider-model-group.is-drop-target {
@@ -171,7 +198,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px 16px;
   min-width: 0;
 }
 
@@ -190,13 +217,18 @@
   flex-shrink: 0;
   width: 16px;
   height: 32px;
+  margin-left: -20px;
   margin-right: -8px;
   border-radius: 999px;
-  opacity: 0;
+  opacity: 0.25;
   transition: color 120ms ease, background 120ms ease, opacity 120ms ease;
 }
 
-.provider-model-group:hover .route-item-drag-handle,
+.route-item-drag-handle:disabled {
+  opacity: 0;
+}
+
+.provider-model-group:hover .route-item-drag-handle:not(:disabled),
 .route-item-drag-handle:focus-visible {
   opacity: 1;
 }
@@ -326,11 +358,26 @@
   width: 100%;
   border-top: none;
   padding-top: 0;
-  padding-left: 60px;
+  padding-left: 52px;
 }
 
 [data-theme="dark"] .provider-card-body {
   border-top-color: transparent;
+}
+
+@container settings-content (max-width: 560px) {
+  .provider-card-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .provider-card-toolbar {
+    margin-left: auto;
+  }
+
+  .provider-card-body {
+    padding-left: 0;
+  }
 }
 
 /* ==========================================================================
@@ -355,7 +402,7 @@
   align-items: center;
   min-width: 0;
   max-width: 100%;
-  gap: 2px;
+  gap: 1px;
   border-radius: 999px;
   transition: background 120ms ease, box-shadow 120ms ease;
 }
@@ -370,18 +417,21 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 0;
+  width: 14px;
   height: 27px;
   overflow: hidden;
   border-radius: 4px;
-  opacity: 0;
-  transition: color 120ms ease, background 120ms ease, opacity 120ms ease, width 120ms ease;
+  opacity: 0.32;
+  transition: color 120ms ease, background 120ms ease, opacity 120ms ease;
 }
 
-.model-tag-item:hover .model-tag-drag-handle,
+.model-tag-drag-handle:disabled {
+  opacity: 0.14;
+}
+
+.model-tag-item:hover .model-tag-drag-handle:not(:disabled),
 .model-tag-item.is-drop-target .model-tag-drag-handle,
 .model-tag-drag-handle:focus-visible {
-  width: 14px;
   opacity: 1;
 }
 
@@ -511,13 +561,13 @@
 
 .provider-model-groups > .provider-model-empty {
   display: flex;
-  min-height: 56px;
+  min-height: 64px;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  padding: 24px 16px;
+  padding: 26px 16px;
   color: var(--mac-text-secondary);
-  font-size: 12px;
+  font-size: 13px;
   background: transparent;
   margin: 0;
 }
@@ -526,16 +576,17 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 0 0 0 60px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 2px 0 0;
   color: var(--mac-text-secondary);
-  font-size: 11.5px;
+  font-size: 12.5px;
   background: transparent;
   margin: 0;
 }
 
 .route-manager-current .provider-model-group .provider-model-empty {
-  padding-left: 38px;
+  padding-left: 0;
 }
 
 .provider-empty-content {
@@ -578,36 +629,36 @@
 
 .route-status-switch {
   flex-shrink: 0;
-  --switch-control-bg: var(--danger, #ff3b30);
-  --switch-control-bg-hover: color-mix(in oklab, var(--danger, #ff3b30), black 8%);
-  --switch-control-bg-pressed: color-mix(in oklab, var(--danger, #ff3b30), black 15%);
-  --switch-control-bg-checked: var(--success, #34c759);
-  --switch-control-bg-checked-hover: color-mix(in oklab, var(--success, #34c759), black 8%);
+  --switch-control-bg: var(--codey-border-strong);
+  --switch-control-bg-hover: color-mix(in srgb, var(--codey-border-strong) 80%, var(--codey-text));
+  --switch-control-bg-pressed: color-mix(in srgb, var(--codey-border-strong) 70%, var(--codey-text));
+  --switch-control-bg-checked: var(--codey-green, #248a3d);
+  --switch-control-bg-checked-hover: color-mix(in srgb, var(--codey-green, #248a3d) 88%, black);
 }
 
 .route-status-switch .switch__control {
-  background-color: var(--switch-control-bg, #ff3b30);
+  background-color: var(--switch-control-bg);
 }
 
 .route-status-switch[data-selected="true"] .switch__control,
 .route-status-switch[aria-checked="true"] .switch__control {
-  background-color: var(--switch-control-bg-checked, #34c759);
+  background-color: var(--switch-control-bg-checked);
 }
 
 .route-status-switch:hover:not([data-selected="true"]) .switch__control {
-  background-color: var(--switch-control-bg-hover, #e0342a);
+  background-color: var(--switch-control-bg-hover);
 }
 
 .route-status-switch[data-selected="true"]:hover .switch__control {
-  background-color: var(--switch-control-bg-checked-hover, #2db84d);
+  background-color: var(--switch-control-bg-checked-hover);
 }
 
 .route-status-switch:active:not([data-selected="true"]) .switch__control {
-  background-color: var(--switch-control-bg-pressed, #c72e25);
+  background-color: var(--switch-control-bg-pressed);
 }
 
 .route-status-switch[data-selected="true"]:active .switch__control {
-  background-color: var(--switch-control-bg-checked-hover, #2db84d);
+  background-color: var(--switch-control-bg-checked-hover);
 }
 
 .route-editor-form {
@@ -764,8 +815,18 @@
   transition: color 0.15s ease;
 }
 
-.route-option-info-trigger:hover {
+.route-option-info-trigger:hover,
+.route-option-info-trigger:focus-visible {
   color: var(--mac-text-secondary);
+}
+
+.route-option-info-trigger:focus-visible,
+.route-auxiliary-help-trigger:focus-visible,
+.official-account-siwc-chip:focus-visible,
+.official-account-usage-action:focus-visible {
+  outline: 2px solid var(--codey-blue);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .route-option-item .route-field-hint {
@@ -1049,7 +1110,8 @@
   transition: color 0.15s ease;
 }
 
-.route-auxiliary-help-trigger:hover .route-auxiliary-help {
+.route-auxiliary-help-trigger:hover .route-auxiliary-help,
+.route-auxiliary-help-trigger:focus-visible .route-auxiliary-help {
   color: var(--mac-text-primary);
 }
 
@@ -1123,6 +1185,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -1147,6 +1210,7 @@
 .official-accounts-title-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1155,6 +1219,18 @@
   font-weight: 800;
   color: var(--mac-text-primary);
   letter-spacing: -0.015em;
+  white-space: nowrap;
+}
+
+@container settings-content (max-width: 640px) {
+  .official-accounts-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .official-accounts-actions {
+    justify-content: flex-start;
+  }
 }
 
 .official-accounts-subtitle {
@@ -1904,6 +1980,19 @@
 .route-tab[aria-selected="true"] .route-tab-count {
   background: var(--codey-blue);
   color: #ffffff;
+}
+
+@container settings-content (max-width: 520px) {
+  .route-tab {
+    height: 46px;
+    padding: 0 8px;
+    gap: 5px;
+    font-size: 13.5px;
+  }
+
+  .route-tab[aria-selected="true"]::after {
+    width: 48px;
+  }
 }
 
 .settings-page .route-tabs ~ .route-manager .route-catalog-pane {
