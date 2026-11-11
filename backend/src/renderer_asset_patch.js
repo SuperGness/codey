@@ -29,6 +29,7 @@
   const maxRendererPatchFingerprints = 64;
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
+  let activeRendererPatchSource = null;
   // 指纹只作同一源码的失败门禁去重键，不需要加密强度；原主进程版用
   // sha256，页面里用同步的双路 32 位 FNV-1a 即可。
   const rendererPatchFingerprint = (source) => {
@@ -46,7 +47,7 @@
       return null;
     }
   };
-  const rendererPatchFailuresForFingerprint = (fingerprint) => {
+  const rendererPatchFailuresForFingerprint = (fingerprint, create = true) => {
     if (fingerprint == null) return null;
     const existing = rendererPatchFailuresByFingerprint.get(fingerprint);
     if (existing) {
@@ -55,6 +56,7 @@
       rendererPatchFailuresByFingerprint.set(fingerprint, existing);
       return existing;
     }
+    if (!create) return null;
     const failures = new Set();
     rendererPatchFailuresByFingerprint.set(fingerprint, failures);
     while (rendererPatchFailuresByFingerprint.size > maxRendererPatchFingerprints) {
@@ -98,6 +100,12 @@
     return excerpts;
   };
   const recordIncompatibleRendererGate = (source, name, matchCount) => {
+    if (activeRendererPatchFailures == null && activeRendererPatchSource != null) {
+      activeRendererPatchFailures = rendererPatchFailuresForFingerprint(
+        rendererPatchFingerprint(activeRendererPatchSource),
+        true,
+      );
+    }
     activeRendererPatchFailures?.add(name);
     const message =
       `Codey skipped an incompatible Codex renderer patch: ${name} gate matched ${matchCount} times`;
@@ -350,8 +358,20 @@
   const activeRendererPatchAnchors = disablePet
     ? rendererPatchAnchors
     : rendererPatchAnchors.filter((anchor) => !petOnlyPatchAnchors.has(anchor));
+  const hostedTurnCall = "(globalThis.__codeyModelWhitelistPatch?.hostedTurnCall??((t,m,...a)=>t[m](...a)))";
+  const hostedFollowUpSend = /\b([$A-Z_a-z][$\w]*)\.sendFollowUpMessage\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:)/g;
+  const hostedFollowUpSendAnchor = /\.sendFollowUpMessage\([$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:/;
+  const hostedTurnStart = /\b([$A-Z_a-z][$\w]*)\.startTurn\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,context:\{\.\.\.[$A-Z_a-z][$\w]*\.context,onRequestDispatched:)/g;
+  const hostedTurnStartAnchor = /\.startTurn\([$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,context:\{\.\.\.[$A-Z_a-z][$\w]*\.context,onRequestDispatched:/;
   const patchCodexRendererAsset = (source) => {
     if (!activeRendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
+    const previousRendererPatchFailures = activeRendererPatchFailures;
+    const previousRendererPatchSource = activeRendererPatchSource;
+    activeRendererPatchSource = source;
+    activeRendererPatchFailures = rendererPatchFailuresByFingerprint.size > 0
+      ? rendererPatchFailuresForFingerprint(rendererPatchFingerprint(source), false)
+      : null;
+    try {
     let patched = source;
     if (source.includes("isNewThreadDraft:")
       && source.includes("modelSettingsPersistAsDefault:")
@@ -512,6 +532,13 @@
     }
     if (
       disablePet
+      && source.includes("settings.")
+      && (
+        source.includes("codex-avatar")
+        || source.includes("codex-pet-assets")
+        || source.includes("avatar-mascot-button")
+        || source.includes("use-avatar-options")
+      )
       && /settings\.(?:(?:appearance|personalization)\.)?(?:pets|mini)(?:[."`]|$)/.test(source)
       && petRendererResourceImport.test(source)
     ) {
@@ -530,8 +557,9 @@
     }
     if (
       disablePet
-      && /[`"]electron-avatar-overlay-restore-ready[`"]/.test(source)
       && source.includes("shouldPrewarmAvatarOverlay:")
+      && source.includes("electron-avatar-overlay-restore-ready")
+      && /[`"]electron-avatar-overlay-restore-ready[`"]/.test(source)
     ) {
       // Once the app is ready and realtime voice is available, Codex asks main
       // to prewarm the hidden avatar overlay window, which keeps a full renderer
@@ -593,12 +621,10 @@
     }
     // 宿主托管时输入框发送经 RPC 存根直达宿主，页面请求客户端上的跨线路交接
     // 不再经过。把两个发送入口改为先交给模型请求校验，缺少校验时原样调用。
-    const hostedTurnCall = "(globalThis.__codeyModelWhitelistPatch?.hostedTurnCall??((t,m,...a)=>t[m](...a)))";
-    const hostedFollowUpSend = /\b([$A-Z_a-z][$\w]*)\.sendFollowUpMessage\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:)/g;
     // 以字面量开头的预检让大包快速跳过；只有命中的小模块才运行带接收者的匹配。
-    const hostedSendAnchor = (method, rest) => new RegExp(`\\.${method}\\([$A-Z_a-z][$\\w]*,\\{\\.\\.\\.[$A-Z_a-z][$\\w]*,${rest}`);
     if (!source.includes("__codeyModelWhitelistPatch?.hostedTurnCall")
-      && hostedSendAnchor("sendFollowUpMessage", "useUserMessageAdmission:").test(source)) {
+      && source.includes(".sendFollowUpMessage(")
+      && hostedFollowUpSendAnchor.test(source)) {
       patched = replaceUniqueRendererGate(
         patched,
         hostedFollowUpSend,
@@ -606,9 +632,9 @@
         "hosted follow-up portable handoff",
       );
     }
-    const hostedTurnStart = /\b([$A-Z_a-z][$\w]*)\.startTurn\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,context:\{\.\.\.[$A-Z_a-z][$\w]*\.context,onRequestDispatched:)/g;
     if (!source.includes("__codeyModelWhitelistPatch?.hostedTurnCall")
-      && hostedSendAnchor("startTurn", "context:\\{\\.\\.\\.[$A-Z_a-z][$\\w]*\\.context,onRequestDispatched:").test(source)) {
+      && source.includes(".startTurn(")
+      && hostedTurnStartAnchor.test(source)) {
       patched = replaceUniqueRendererGate(
         patched,
         hostedTurnStart,
@@ -668,7 +694,8 @@
         "service tier access",
       );
     }
-    if (/=\{serviceTierAccess:[$A-Z_a-z][$\w]*,isLoading:/.test(source)) {
+    if (source.includes("={serviceTierAccess:")
+      && /=\{serviceTierAccess:[$A-Z_a-z][$\w]*,isLoading:/.test(source)) {
       // API key logins and pending requirements yield a null access object,
       // which hides the speed control and settings entirely. Keep a fixed
       // grant so visibility follows the model's own service tiers.
@@ -679,7 +706,8 @@
         "service tier access state",
       );
     }
-    if (/case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
+    if (source.includes("electron-app-state-snapshot-request")
+      && /case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
       // Main asks the focused window for a full app-state snapshot every 30 s,
       // then adds process sampling, a debug log and a Sentry breadcrumb. Skip
       // only the heartbeat reason; other diagnostic triggers still reply, and
@@ -721,6 +749,10 @@
       patched += "\n;globalThis.__codeyModelRequestSourceGateInstalled=true;\n";
     }
     return patched;
+    } finally {
+      activeRendererPatchFailures = previousRendererPatchFailures;
+      activeRendererPatchSource = previousRendererPatchSource;
+    }
   };
   // Codex 样式表中的 :has([data-state=open]) 等规则会让 data-state 进入 Blink
   // RuleFeatureSet 的 :has() 失效集，悬停侧栏行切换提示气泡 data-state 时触发
@@ -734,12 +766,8 @@
   const patchCodexRendererCssAsset = (source) => {
     if (
       source.includes(openStateCssPatchedMarker) ||
-      (
-        !source.includes(":has([data-state=open])") &&
-        !source.includes(":has(:is(button[data-state=open]))") &&
-        !source.includes(":has([aria-expanded=true],[data-state=open])") &&
-        !source.includes("data-state")
-      )
+      !source.includes("data-state") ||
+      !source.includes(":has(")
     ) {
       return source;
     }
@@ -803,9 +831,6 @@
       }
       if (!isCodexRendererAssetUrl(requestUrl)) return null;
       let patched;
-      const fingerprint = rendererPatchFingerprint(source);
-      const previousRendererPatchFailures = activeRendererPatchFailures;
-      activeRendererPatchFailures = rendererPatchFailuresForFingerprint(fingerprint);
       try {
         patched = isCodexRendererCssAssetUrl(requestUrl)
           ? patchCodexRendererCssAsset(source)
@@ -822,8 +847,6 @@
           console.error("Codey skipped an incompatible Codex renderer patch", error);
         } catch {}
         return null;
-      } finally {
-        activeRendererPatchFailures = previousRendererPatchFailures;
       }
       return patched === source ? null : patched;
     } catch (error) {
