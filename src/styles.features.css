@@ -244,13 +244,16 @@
 }
 
 /* 子代理：分组标题 + 通栏角色行，整体铺满内容列。 */
+.page > .secondary-section.subagent-section:has(.subagent-group-card) {
+  padding: 0;
+}
+
 .subagent-policy-body {
   display: flex;
   flex-direction: column;
   gap: 0;
   min-width: 0;
   align-items: stretch;
-  margin: -22px calc(var(--page-gutter-end, 28px) * -1) -26px calc(var(--page-gutter, 28px) * -1);
 }
 
 .subagent-group-card {
@@ -262,10 +265,10 @@
 .subagent-stat-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 9px;
+  gap: 5px;
+  padding: 1.5px 8px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -294,6 +297,7 @@
 /* 分组与统一四列横向对齐矩阵 */
 .subagent-group-card,
 .subagent-group-card.codey-card {
+  --subagent-cols: 38px minmax(124px, 148px) minmax(200px, 1fr) 132px;
   display: flex;
   flex-direction: column;
   overflow: visible;
@@ -308,8 +312,8 @@
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px 14px;
-  padding: 22px var(--page-gutter-end, 28px) 12px var(--page-gutter, 28px);
+  gap: 4px 12px;
+  padding: 12px var(--page-gutter-end, 28px) 4px var(--page-gutter, 28px);
   border-bottom: 0;
   background: transparent;
 }
@@ -317,36 +321,32 @@
 .subagent-group-title-wrap {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
 }
 
 .subagent-group-title {
-  font-size: 19px;
-  font-weight: 800;
+  font-size: 15.5px;
+  font-weight: 750;
   color: var(--codey-text);
-  letter-spacing: -0.015em;
+  letter-spacing: -0.01em;
 }
 
 .subagent-group-desc {
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--codey-muted);
 }
 
 .subagent-table-head {
   display: grid;
-  grid-template-columns: minmax(170px, 1.15fr) minmax(220px, 1.65fr) 144px 52px;
+  grid-template-columns: var(--subagent-cols);
   align-items: center;
-  column-gap: 16px;
-  padding: 8px var(--page-gutter-end, 28px) 8px var(--page-gutter, 28px);
+  column-gap: 10px;
+  padding: 4px var(--page-gutter-end, 28px) 5px var(--page-gutter, 28px);
   border-bottom: 1px solid var(--codey-border);
   background: transparent;
   color: var(--codey-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
-}
-
-.subagent-table-head > span:last-child {
-  text-align: right;
 }
 
 .subagent-group-items {
@@ -357,16 +357,20 @@
 
 .subagent-role-item {
   display: grid;
-  grid-template-columns: minmax(170px, 1.15fr) minmax(220px, 1.65fr) 144px 52px;
+  grid-template-columns: var(--subagent-cols);
   align-items: center;
-  column-gap: 16px;
-  padding: 14px var(--page-gutter-end, 28px) 14px var(--page-gutter, 28px);
+  column-gap: 10px;
+  padding: 8px var(--page-gutter-end, 28px) 8px var(--page-gutter, 28px);
   background: transparent;
   transition: background-color 150ms ease;
 }
 
 .subagent-group-card--default > .subagent-role-item {
-  padding-block: 18px;
+  padding-block: 10px;
+}
+
+.subagent-group-card--default > .subagent-role-item > .subagent-role-identity {
+  grid-column: 1 / 3;
 }
 
 .subagent-group-items > .subagent-role-item + .subagent-role-item {
@@ -377,30 +381,15 @@
   background: var(--codey-hover);
 }
 
-.subagent-group-card--default > .subagent-role-item .subagent-role-switch-wrap::after {
-  content: "默认";
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 24px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--codey-surface-sunken);
-  color: var(--codey-muted);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.subagent-role-item.subagent-role-disabled {
-  opacity: 0.62;
+.subagent-role-item.subagent-role-disabled .subagent-role-identity,
+.subagent-role-item.subagent-role-disabled .subagent-control-group {
+  opacity: 0.58;
 }
 
 .subagent-role-identity {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -409,8 +398,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 30px;
+  height: 30px;
   border: 0;
   border-radius: 50%;
   background: var(--codey-text);
@@ -421,7 +410,7 @@
 
 .subagent-role-disabled .subagent-role-icon-box {
   filter: grayscale(100%);
-  opacity: 0.6;
+  opacity: 0.65;
 }
 
 .subagent-role-icon-box--codey_explorer {
@@ -449,21 +438,21 @@
 .subagent-role-title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
 .subagent-role-name {
   margin: 0;
   color: var(--mac-text-primary);
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 650;
   letter-spacing: -0.01em;
   white-space: nowrap;
 }
 
 .subagent-role-status-chip {
-  padding: 1px 7px;
+  padding: 1px 6px;
   border: 0;
   border-radius: 999px;
   background: var(--codey-surface-sunken);
@@ -479,8 +468,8 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -501,7 +490,8 @@
 
 .subagent-role-switch-wrap {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 .subagent-control-group {
@@ -525,25 +515,29 @@
   min-width: 0;
 }
 
-/* 四列、列间距和内边距至少需要 690px，另为滚动条留出空间。 */
-@container settings-content (max-width: 720px) {
+/* 窄容器回落为紧凑堆叠布局，开关仍置于角色前方。 */
+@container settings-content (max-width: 600px) {
   .subagent-table-head {
     display: none;
   }
 
   .subagent-role-item {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 10px;
+    grid-template-columns: auto minmax(0, 1fr);
+    row-gap: 8px;
   }
 
-  .subagent-role-identity {
+  .subagent-role-switch-wrap {
     grid-column: 1;
     grid-row: 1;
   }
 
-  .subagent-role-switch-wrap {
+  .subagent-role-identity {
     grid-column: 2;
     grid-row: 1;
+  }
+
+  .subagent-group-card--default > .subagent-role-item > .subagent-role-identity {
+    grid-column: 1 / -1;
   }
 
   .subagent-control-group {
@@ -560,11 +554,11 @@
 .subagent-policy-callout {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 8px;
   width: auto;
-  margin: 18px var(--page-gutter-end, 28px) 24px var(--page-gutter, 28px);
-  padding: 14px 18px;
-  border-radius: 18px;
+  margin: 12px var(--page-gutter-end, 28px) 16px var(--page-gutter, 28px);
+  padding: 10px 14px;
+  border-radius: 12px;
   background: var(--codey-panel);
   border: 0;
 }

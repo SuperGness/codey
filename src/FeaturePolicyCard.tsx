@@ -174,11 +174,32 @@ export function SubagentPolicyCardComponent({
           roleDisabled ? "subagent-role-disabled" : ""
         }`}
       >
+        {!isDefaultRole && (
+          <div className="subagent-role-switch-wrap">
+            <span
+              className="inline-flex"
+              title={
+                isSingleEnabledRole ? "至少需要保留一个启用的调度角色" : undefined
+              }
+            >
+              <Switch
+                size="sm"
+                checked={selection.enabled}
+                disabled={
+                  subagentPolicyControlsDisabled || isSingleEnabledRole
+                }
+                onCheckedChange={(enabled) => updateRole({ enabled })}
+                aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
+              />
+            </span>
+          </div>
+        )}
+
         <div className="subagent-role-identity">
           <div
             className={`subagent-role-icon-box subagent-role-icon-box--${task.id}`}
           >
-            <TaskIcon size={18} stroke={1.9} aria-hidden="true" />
+            <TaskIcon size={16} stroke={1.9} aria-hidden="true" />
           </div>
           <div className="subagent-role-meta">
             <div className="subagent-role-title-row">
@@ -265,24 +286,6 @@ export function SubagentPolicyCardComponent({
             />
           </div>
         </div>
-        <div className="subagent-role-switch-wrap">
-          {!isDefaultRole && (
-            <span
-              title={
-                isSingleEnabledRole ? "至少需要保留一个启用的调度角色" : undefined
-              }
-            >
-              <Switch
-                checked={selection.enabled}
-                disabled={
-                  subagentPolicyControlsDisabled || isSingleEnabledRole
-                }
-                onCheckedChange={(enabled) => updateRole({ enabled })}
-                aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
-              />
-            </span>
-          )}
-        </div>
       </div>
     );
   };
@@ -327,10 +330,10 @@ export function SubagentPolicyCardComponent({
                   </span>
                 </div>
                 <div className="subagent-table-head" aria-hidden="true">
+                  <span>启用</span>
                   <span>角色</span>
                   <span>模型</span>
                   <span>思考深度</span>
-                  <span>启用</span>
                 </div>
                 <div className="subagent-group-items">
                   {analysisTasks.map(renderRoleCard)}
@@ -354,10 +357,10 @@ export function SubagentPolicyCardComponent({
                   </span>
                 </div>
                 <div className="subagent-table-head" aria-hidden="true">
+                  <span>启用</span>
                   <span>角色</span>
                   <span>模型</span>
                   <span>思考深度</span>
-                  <span>启用</span>
                 </div>
                 <div className="subagent-group-items">
                   {implementationTasks.map(renderRoleCard)}

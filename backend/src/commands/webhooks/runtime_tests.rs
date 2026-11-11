@@ -242,21 +242,31 @@ async fn slow_http_does_not_block_enqueue_and_concurrency_is_global_across_event
     let channels = (0..7)
         .map(|i| server.channel(&format!("channel-{i}")))
         .collect();
-    let state = channel_delivery_test_state(directory.path(), channels);
+    let mut state = channel_delivery_test_state(directory.path(), channels);
+    // 此测试由服务端许可控制 HTTP 完成，客户端不设超时，避免请求先超时释放并发名额。
+    Arc::get_mut(&mut state).unwrap().webhook_http_client_override = Some(
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap(),
+    );
     let worker = delivery::start(Arc::clone(&state)).await.unwrap();
     let payload = json!({"sessionId":"session","turnId":"first","sessionName":"First", "confirmedByRollout":true});
     notify_webhook_completion(&state, &payload).await.unwrap();
     wait_for_count(&server.received, 4).await;
     assert_eq!(server.active.load(Ordering::SeqCst), 4);
     let second = json!({"sessionId":"session","turnId":"second","sessionName":"Second", "confirmedByRollout":true});
+    // 入队包含标题查询和持久提交；用未放行的 HTTP 验证独立性，不以磁盘耗时作判断。
     let queued = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(3),
         notify_webhook_completion(&state, &second),
     )
     .await
     .expect("an unrelated enqueue must not wait for HTTP")
     .unwrap();
     assert_eq!(queued["status"], "queued");
+    assert_eq!(server.active.load(Ordering::SeqCst), 4);
     assert_eq!(server.received.load(Ordering::SeqCst), 4);
     assert_eq!(stored_delivery_states(&state).await.len(), 14);
     server.gate.add_permits(14);
