@@ -4,7 +4,7 @@ const encoder = new TextEncoder();
 
 // 每次按键都会走到这里：纯 ASCII 内容的字节数等于长度，不必整串编码；
 // 只有出现非 ASCII 时才需要精确计算，接近上限的输入也不会每键都做全量编码。
-function exceedsByteLimit(content: string, limit: number) {
+export function exceedsByteLimit(content: string, limit: number) {
   if (content.length > limit) return true;
   if (content.length * 3 <= limit) return false;
   return (
@@ -57,6 +57,7 @@ export function batchTargets(
   selected: string[],
   enabled: boolean,
 ): string[] {
+  if (selected.length === 0) return [];
   const ids = new Set(selected);
   return entries
     .filter(

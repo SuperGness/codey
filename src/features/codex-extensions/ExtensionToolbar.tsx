@@ -165,16 +165,22 @@ export function ExtensionScope({
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
             {!validPath ? (
-              <p className="m-0 text-xs text-muted">
-                请输入或选择项目绝对路径，再读取该项目的配置。
-              </p>
+              trimmedPath.startsWith("~") ? (
+                <p className="m-0 text-xs text-[var(--codey-amber)]" role="status">
+                  不支持 ~ 缩写，请输入展开后的完整绝对路径（如 /Users/name/workspace）。
+                </p>
+              ) : (
+                <p className="m-0 text-xs text-muted">
+                  请输入或选择项目绝对路径，再读取该项目的配置。
+                </p>
+              )
             ) : isProjectLoaded ? (
               <p className="m-0 flex items-center gap-1.5 text-xs text-muted">
                 <span className="extension-stat-dot is-enabled" aria-hidden="true" />
                 <span>当前正在管理此项目工作区的配置。</span>
               </p>
             ) : (
-              <p className="m-0 text-xs text-amber-600 dark:text-amber-400">
+              <p className="m-0 text-xs text-[var(--codey-amber)]">
                 路径已就绪，请点击「读取项目」或按回车加载该项目配置。
               </p>
             )}
@@ -305,7 +311,7 @@ export function ExtensionFilters({
                 <button
                   type="button"
                   aria-label="清空搜索关键词"
-                  className="inline-flex size-5 items-center justify-center rounded-full text-muted hover:bg-[var(--codey-press)] hover:text-foreground"
+                  className="inline-flex size-6 cursor-pointer items-center justify-center rounded-full text-muted hover:bg-[var(--codey-press)] hover:text-foreground"
                   onClick={() => onQuery("")}
                 >
                   <IconX size={12} aria-hidden="true" />

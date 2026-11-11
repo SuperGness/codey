@@ -385,6 +385,7 @@ function CodexExtensionsPageComponent({
     () => selectResources(entries, deferredQuery, filter, source, sort),
     [inventory, kind, deferredQuery, filter, source, sort],
   );
+  if (!active) return null;
   const currentPage = pageResources(filtered, page);
   const clearFilters = () => {
     setQuery("");
@@ -393,6 +394,15 @@ function CodexExtensionsPageComponent({
   };
   const enableTargets = batchTargets(entries, selected, true);
   const disableTargets = batchTargets(entries, selected, false);
+  const pageToggleIds = currentPage.entries.filter(canToggle).map((entry) => entry.id);
+  const selectedIdSet = selected.length > 0 ? new Set(selected) : null;
+  const anyPageSelected =
+    selectedIdSet !== null &&
+    pageToggleIds.some((id) => selectedIdSet.has(id));
+  const canSelectMoreOnPage =
+    selected.length < 100 &&
+    pageToggleIds.some((id) => !selectedIdSet?.has(id));
+  const deselectPage = anyPageSelected && !canSelectMoreOnPage;
   const batch = (enabled: boolean) => {
     const ids = enabled ? enableTargets : disableTargets;
     if (!ids.length) return;
@@ -407,7 +417,6 @@ function CodexExtensionsPageComponent({
       },
     });
   };
-  if (!active) return null;
   return (
     <section
       className="secondary-section"
@@ -497,23 +506,36 @@ function CodexExtensionsPageComponent({
           <div
             key={index}
             role="status"
-            className="flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/8 px-3.5 py-2.5 text-xs leading-relaxed text-warning"
+            className="flex items-start gap-2 rounded-xl border border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--codey-amber)]"
           >
             <IconAlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
             <span className="min-w-0 flex-1 break-words">{warning}</span>
           </div>
         ))}
 
-        <ExtensionFilters
-          kind={kind}
-          entries={entries}
-          query={query}
-          filter={filter}
-          source={source}
-          sort={sort}
-          trailing={
-            inventory && (
+        {inventory && (
+          <ExtensionFilters
+            kind={kind}
+            entries={entries}
+            query={query}
+            filter={filter}
+            source={source}
+            sort={sort}
+            trailing={
               <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted">
+                {loading && (
+                  <span
+                    role="status"
+                    className="inline-flex items-center gap-1.5 rounded-full bg-[var(--codey-surface-sunken)] px-2.5 py-1 text-[11.5px] font-medium text-muted"
+                  >
+                    <IconRefresh
+                      size={12}
+                      className="motion-safe:animate-spin text-accent"
+                      aria-hidden="true"
+                    />
+                    <span>正在刷新…</span>
+                  </span>
+                )}
                 {filtered.length !== entries.length && (
                   <span className="tabular-nums">
                     匹配 {filtered.length} / {entries.length} 项
@@ -522,26 +544,32 @@ function CodexExtensionsPageComponent({
                 <Button
                   size="xs"
                   variant="ghost"
-                  disabled={unavailable || !currentPage.entries.some(canToggle)}
-                  onClick={() =>
-                    setSelected(
-                      currentPage.entries
-                        .filter(canToggle)
-                        .map((entry) => entry.id),
-                    )
+                  disabled={unavailable || (!canSelectMoreOnPage && !deselectPage)}
+                  title={
+                    !unavailable && !deselectPage && !canSelectMoreOnPage && selected.length >= 100
+                      ? "最多同时选择 100 项"
+                      : undefined
                   }
+                  onClick={() => {
+                    const pageToggleIdSet = new Set(pageToggleIds);
+                    setSelected((current) =>
+                      deselectPage
+                        ? current.filter((id) => !pageToggleIdSet.has(id))
+                        : Array.from(new Set([...current, ...pageToggleIds])).slice(0, 100),
+                    );
+                  }}
                 >
-                  选择本页
+                  {deselectPage ? "取消本页" : "选择本页"}
                 </Button>
               </div>
-            )
-          }
-          onQuery={setQuery}
-          onFilter={setFilter}
-          onSource={setSource}
-          onSort={setSort}
-          onClear={clearFilters}
-        />
+            }
+            onQuery={setQuery}
+            onFilter={setFilter}
+            onSource={setSource}
+            onSort={setSort}
+            onClear={clearFilters}
+          />
+        )}
 
         {inventory && selected.length > 0 && (
           <div className="extension-batch-bar" role="region" aria-label="批量操作">
@@ -555,9 +583,7 @@ function CodexExtensionsPageComponent({
               <Button
                 size="xs"
                 variant="outline"
-                disabled={
-                  unavailable || !batchTargets(entries, selected, true).length
-                }
+                disabled={unavailable || !enableTargets.length}
                 onClick={() => batch(true)}
               >
                 启用
@@ -565,9 +591,7 @@ function CodexExtensionsPageComponent({
               <Button
                 size="xs"
                 variant="outline"
-                disabled={
-                  unavailable || !batchTargets(entries, selected, false).length
-                }
+                disabled={unavailable || !disableTargets.length}
                 onClick={() => batch(false)}
               >
                 禁用
@@ -583,7 +607,7 @@ function CodexExtensionsPageComponent({
           </div>
         )}
 
-        {loading && (
+        {loading && !inventory && (
           <div
             role="status"
             className="rounded-2xl border border-[var(--codey-border)] bg-[var(--codey-panel)] px-4 py-3.5 text-xs text-muted"
@@ -594,26 +618,22 @@ function CodexExtensionsPageComponent({
                 className="motion-safe:animate-spin text-accent"
                 aria-hidden="true"
               />
-              {inventory
-                ? "正在刷新，暂时显示上次读取结果…"
-                : "正在读取配置…"}
+              正在读取配置…
             </div>
-            {!inventory && (
-              <div aria-hidden="true" className="mt-3.5 space-y-2.5">
-                {[0, 1, 2].map((row) => (
-                  <div
-                    key={row}
-                    className="flex items-center gap-3.5 rounded-xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-3.5"
-                  >
-                    <div className="size-10 rounded-xl bg-default/50" />
-                    <div className="flex-1 space-y-2">
-                      <div className="h-3.5 w-1/3 rounded bg-default/50" />
-                      <div className="h-2.5 w-2/3 rounded bg-default/30" />
-                    </div>
+            <div aria-hidden="true" className="mt-3.5 space-y-2.5">
+              {[0, 1, 2].map((row) => (
+                <div
+                  key={row}
+                  className="flex items-center gap-3.5 rounded-xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-3.5"
+                >
+                  <div className="size-10 rounded-xl bg-default/50" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3.5 w-1/3 rounded bg-default/50" />
+                    <div className="h-2.5 w-2/3 rounded bg-default/30" />
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

@@ -16,7 +16,7 @@ import {
   IconWorld,
   IconX,
 } from "@tabler/icons-react";
-import { Badge, Button, Checkbox, Switch } from "../../components/ui";
+import { Badge, Button, Checkbox, Switch, Tooltip } from "../../components/ui";
 import type { McpEntry, SkillEntry, CheckResult } from "./types";
 import { canToggle } from "./state";
 
@@ -91,6 +91,9 @@ export function ExtensionList({
     );
   }
 
+  const hasSelectableRows = Boolean(onSelect) && entries.some(canToggle);
+  const selectedIds = selected.length > 0 ? new Set(selected) : null;
+
   return (
     <div className="extension-feed extension-card-list">
       {entries.map((entry) => {
@@ -106,7 +109,8 @@ export function ExtensionList({
           ("ownership" in entry && !isManaged);
         const checkResult = checks[entry.id];
         const working = busy && busyResourceId === entry.id;
-        const isSelected = selected.includes(entry.id);
+        const isSelected = selectedIds?.has(entry.id) ?? false;
+        const toggleable = canToggle(entry);
 
         const EntryIcon =
           "transport" in entry
@@ -145,15 +149,19 @@ export function ExtensionList({
             }`}
           >
             <div className="flex items-start gap-3.5 min-w-0">
-              {onSelect && canToggle(entry) && (
-                <div className="mt-2.5 shrink-0">
-                  <Checkbox
-                    aria-label={`选择 ${entry.name}`}
-                    checked={isSelected}
-                    disabled={busy || (selected.length >= 100 && !isSelected)}
-                    onCheckedChange={() => onSelect(entry.id)}
-                  />
-                </div>
+              {hasSelectableRows && (
+                toggleable ? (
+                  <div className="mt-2.5 shrink-0">
+                    <Checkbox
+                      aria-label={`选择 ${entry.name}`}
+                      checked={isSelected}
+                      disabled={busy || (selected.length >= 100 && !isSelected)}
+                      onCheckedChange={() => onSelect?.(entry.id)}
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-2.5 w-4 shrink-0" aria-hidden="true" />
+                )
               )}
 
               <div
@@ -315,15 +323,40 @@ export function ExtensionList({
                                 ? "已启用"
                                 : "已禁用"}
                         </Badge>
-                        <Switch
-                          size="sm"
-                          checked={Boolean(isEnabled)}
-                          disabled={busy || !canToggle(entry)}
-                          aria-label={
-                            isEnabled ? `禁用 ${entry.name}` : `启用 ${entry.name}`
-                          }
-                          onCheckedChange={() => onAction("toggle", entry)}
-                        />
+                        {!toggleable ? (
+                          <Tooltip
+                            content={
+                              entry.reason ||
+                              (!isKnown
+                                ? "无法确认启用状态，暂不可切换"
+                                : isInvalid
+                                  ? "请先修复配置"
+                                  : "当前资源不允许修改状态")
+                            }
+                          >
+                            <span className="inline-flex">
+                              <Switch
+                                size="sm"
+                                checked={Boolean(isEnabled)}
+                                disabled
+                                aria-label={
+                                  isEnabled ? `禁用 ${entry.name}` : `启用 ${entry.name}`
+                                }
+                                onCheckedChange={() => onAction("toggle", entry)}
+                              />
+                            </span>
+                          </Tooltip>
+                        ) : (
+                          <Switch
+                            size="sm"
+                            checked={Boolean(isEnabled)}
+                            disabled={busy}
+                            aria-label={
+                              isEnabled ? `禁用 ${entry.name}` : `启用 ${entry.name}`
+                            }
+                            onCheckedChange={() => onAction("toggle", entry)}
+                          />
+                        )}
                       </>
                     )}
                   </div>
@@ -352,7 +385,7 @@ export function ExtensionList({
                 {"error" in entry && entry.error && (
                   <div
                     role="alert"
-                    className="mt-2.5 flex items-start gap-2 rounded-xl border border-red-200/70 bg-red-50/70 px-3 py-2 text-[12px] text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 break-words"
+                    className="mt-2.5 flex items-start gap-2 rounded-xl border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-3 py-2 text-[12px] text-[var(--codey-red)] break-words"
                   >
                     <IconAlertCircle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                     <span className="min-w-0 flex-1">{entry.error}</span>
@@ -362,18 +395,19 @@ export function ExtensionList({
                 {/* 展开的检查详情面板 */}
                 {checkResult && isCheckExpanded(entry.id, checkResult.ok) && (
                   <div
+                    id={`check-panel-${entry.id}`}
                     role={checkResult.ok ? "status" : "alert"}
                     className={`mt-2.5 rounded-xl border p-3 text-xs ${
                       checkResult.ok
-                        ? "border-emerald-500/30 bg-emerald-500/8 text-emerald-950 dark:text-emerald-200"
-                        : "border-amber-500/30 bg-amber-500/8 text-amber-950 dark:text-amber-200"
+                        ? "border-[var(--codey-green-border)] bg-[var(--codey-green-soft)] text-foreground"
+                        : "border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] text-foreground"
                     }`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="flex items-center gap-1.5 font-semibold">
                         <span
                           className={`size-2 rounded-full shrink-0 ${
-                            checkResult.ok ? "bg-emerald-500" : "bg-amber-500"
+                            checkResult.ok ? "bg-[var(--codey-green)]" : "bg-[var(--codey-amber)]"
                           }`}
                         />
                         <span>
@@ -391,7 +425,7 @@ export function ExtensionList({
                       </button>
                     </div>
                     {checkResult.revision !== revision && (
-                      <p className="mt-1.5 mb-0 text-[11.5px] font-medium text-amber-700 dark:text-amber-300">
+                      <p className="mt-1.5 mb-0 text-[11.5px] font-medium text-[var(--codey-amber)]">
                         配置已变化，此检查结果已失效。
                       </p>
                     )}
@@ -514,13 +548,14 @@ export function ExtensionList({
                       <button
                         type="button"
                         aria-expanded={isCheckExpanded(entry.id, checkResult.ok)}
+                        aria-controls={`check-panel-${entry.id}`}
                         onClick={() => toggleCheckExpanded(entry.id, checkResult.ok)}
                         className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-semibold truncate shrink-0 cursor-pointer transition-opacity hover:opacity-85 ${
                           checkResult.revision !== revision
-                            ? "bg-amber-500/12 text-amber-700 dark:text-amber-300"
+                            ? "bg-[var(--codey-amber-soft)] text-[var(--codey-amber)]"
                             : checkResult.ok
-                              ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                              : "bg-red-500/12 text-red-700 dark:text-red-300"
+                              ? "bg-[var(--codey-green-soft)] text-[var(--codey-green)]"
+                              : "bg-[var(--codey-red-soft)] text-[var(--codey-red)]"
                         }`}
                         title={
                           checkResult.revision !== revision

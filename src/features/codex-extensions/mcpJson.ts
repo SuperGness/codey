@@ -1,3 +1,4 @@
+import { exceedsByteLimit } from "./state";
 import type { EditorDraft } from "./types";
 
 export const NEW_MCP_JSON =
@@ -10,19 +11,9 @@ const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
 const CONTENT_BYTE_LIMIT = 1024 * 1024;
-const encoder = new TextEncoder();
-
-// 编辑器每次渲染都会校验草稿：纯 ASCII 内容的字节数等于长度，不必整串编码。
-function exceedsByteLimit(content: string) {
-  if (content.length > CONTENT_BYTE_LIMIT) return true;
-  return (
-    /[^\x00-\x7F]/.test(content) &&
-    encoder.encode(content).length > CONTENT_BYTE_LIMIT
-  );
-}
 
 function parseServices(content: string): McpJsonService[] {
-  if (exceedsByteLimit(content))
+  if (exceedsByteLimit(content, CONTENT_BYTE_LIMIT))
     throw new Error("JSON 内容不能超过 1 MB。");
   let value: unknown;
   try {

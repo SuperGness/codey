@@ -117,3 +117,69 @@ test("预览期间更改路径丢弃迟到结果，预览后更改路径撤销�
   assert.equal(h.draftEditor().draft.installPreview, undefined);
   assert.equal(h.mutations.length, 0);
 });
+
+test("批量选择跨页达到 100 项上限时，已部分选中的页可取消本页、未选中的页禁用选择本页", () => {
+  const skills = Array.from({ length: 140 }, (_, i) => ({
+    id: `skill-${String(i).padStart(3, "0")}`,
+    name: `skill-${String(i).padStart(3, "0")}`,
+    sourcePath: `/tmp/skill-${i}`,
+    enabled: true,
+    readOnly: false,
+    ownership: "managed",
+    scope: "user",
+  }));
+  const controller = {
+    inventory: { revision: "r1", mcps: [], skills, warnings: [] },
+    scope: { kind: "user" },
+    busy: false,
+    loading: false,
+    checks: {},
+    clearError() {},
+  };
+  const toolbar = autoStubModule("toolbar");
+  const list = autoStubModule("list");
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/CodexExtensionsPage.tsx", import.meta.url), {
+    autoStub: true,
+    stubs: {
+      ...stubs,
+      "./useExtensionsController": { useExtensionsController: () => controller },
+      "./ExtensionToolbar": toolbar,
+      "./ExtensionList": list,
+    },
+  });
+  graph.react.useRef = (initial) => graph.react.useState(() => ({ current: initial }))[0];
+  const render = () => {
+    graph.restart();
+    return graph.exports.CodexExtensionsPage({ kind: "skill", request() {} });
+  };
+  const pageButton = (tree) => {
+    const trailing = elementProps(matching(tree, (node) => elementType(node) === toolbar.ExtensionFilters)[0]).trailing;
+    return matching(trailing, (node) => elementType(node) === ui.Button)[0];
+  };
+  const listProps = (tree) => elementProps(matching(tree, (node) => elementType(node) === list.ExtensionList)[0]);
+
+  // 第 1 页只勾选 10 项，随后第 2~5 页整页选中（共 90 项），第 6 页点击“选择本页”会截断到 100 项（本页仅选中前 10 项）。
+  for (let i = 0; i < 10; i++) {
+    listProps(render()).onSelect(`skill-${String(i).padStart(3, "0")}`);
+  }
+  elementProps(button(render(), "下一页")).onClick();
+  for (let p = 2; p <= 6; p++) {
+    const btn = pageButton(render());
+    assert.equal(textContent(btn), "选择本页");
+    assert.equal(elementProps(btn).disabled, false);
+    elementProps(btn).onClick();
+    if (p < 6) elementProps(button(render(), "下一页")).onClick();
+  }
+
+  // 第 6 页虽未全选，但总选择数已满 100 项且本页已有选中项，应切换为可操作的“取消本页”。
+  const partialCapBtn = pageButton(render());
+  assert.equal(textContent(partialCapBtn), "取消本页");
+  assert.equal(elementProps(partialCapBtn).disabled, false);
+
+  // 翻到第 7 页（本页 0 项选中且总数已满 100 项），“选择本页”应被禁用。
+  elementProps(button(render(), "下一页")).onClick();
+  const cappedEmptyBtn = pageButton(render());
+  assert.equal(textContent(cappedEmptyBtn), "选择本页");
+  assert.equal(elementProps(cappedEmptyBtn).disabled, true);
+  assert.equal(elementProps(cappedEmptyBtn).title, "最多同时选择 100 项");
+});
