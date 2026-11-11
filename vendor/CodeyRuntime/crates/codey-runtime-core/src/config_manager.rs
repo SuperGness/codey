@@ -92,6 +92,9 @@ pub trait FileLockGuard: Send {}
 
 pub trait ConfigFileSystem: Send + Sync {
     fn read_optional(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        Ok(self.read_optional(path)?.is_some())
+    }
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn write_new_synced(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn atomic_replace(&self, source: &Path, destination: &Path) -> io::Result<()>;
@@ -118,6 +121,14 @@ impl ConfigFileSystem for OsConfigFileSystem {
         match fs::read(path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        match fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -324,8 +335,7 @@ impl ConfigManager {
             }
             let mut editor = ConfigEditor::new((*current.document).clone());
             mutate(&mut editor)?;
-            let base_url_changed = editor.base_url_changed();
-            let document = editor.finish()?;
+            let (document, base_url_changed) = editor.finish()?;
             let raw = render_document(&document);
             let candidate = build_snapshot(&self.inner.path, true, raw.into_bytes())?;
             self.commit_locked(&current, &candidate)?;
@@ -428,7 +438,6 @@ impl ConfigManager {
             bail!("config.toml 在保存准备期间被其他写者修改；未覆盖新内容");
         }
 
-        validate_candidate(candidate.raw())?;
         let parent = self
             .inner
             .path
@@ -468,7 +477,7 @@ impl ConfigManager {
         self.inner.fs.remove_optional(&oldest)?;
         for generation in (1..limit).rev() {
             let source = backup_path(&self.inner.path, generation - 1);
-            if self.inner.fs.read_optional(&source)?.is_none() {
+            if !self.inner.fs.exists(&source)? {
                 continue;
             }
             let destination = backup_path(&self.inner.path, generation);
@@ -584,18 +593,13 @@ impl ConfigEditor {
         Ok(())
     }
 
-    fn finish(self) -> Result<DocumentMut> {
+    fn finish(self) -> Result<(DocumentMut, bool)> {
         let current = collect_base_urls(&self.document);
         let changed = changed_base_url_paths(&self.original_base_urls, &current);
         if !changed.is_subset(&self.recorded_base_url_paths) {
             bail!("检测到未通过 ConfigEditor setter 的 base_url 修改");
         }
-        validate_document(&self.document)?;
-        Ok(self.document)
-    }
-
-    fn base_url_changed(&self) -> bool {
-        self.original_base_urls != collect_base_urls(&self.document)
+        Ok((self.document, !changed.is_empty()))
     }
 }
 
@@ -647,13 +651,6 @@ fn validate_document(document: &DocumentMut) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn validate_candidate(bytes: &[u8]) -> Result<()> {
-    let text = std::str::from_utf8(bytes).context("待保存 config.toml 不是 UTF-8")?;
-    let document = parse_document_text(text, Path::new("config.toml"))
-        .context("待保存 config.toml 不是合法 TOML")?;
-    validate_document(&document)
 }
 
 fn parse_document_text(text: &str, path: &Path) -> Result<DocumentMut> {
@@ -830,6 +827,10 @@ mod tests {
     impl ConfigFileSystem for FailingReplaceFs {
         fn read_optional(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
             self.inner.read_optional(path)
+        }
+
+        fn exists(&self, path: &Path) -> io::Result<bool> {
+            self.inner.exists(path)
         }
 
         fn create_dir_all(&self, path: &Path) -> io::Result<()> {

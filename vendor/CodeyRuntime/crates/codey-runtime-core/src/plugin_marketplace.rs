@@ -75,11 +75,21 @@ pub fn openai_curated_marketplace_status(home: &Path) -> MarketplaceStatus {
     let remote_marketplace_root = local_openai_curated_remote_marketplace_root(home)
         .ok()
         .flatten();
-    let config_registered = !managed_reserved_marketplace_config_present(home)
+    let snapshot = ConfigManager::for_home(home).load().ok();
+    let reserved_present = snapshot
+        .as_deref()
+        .is_some_and(|snapshot| managed_reserved_marketplace_in_doc(snapshot.document(), home));
+    let config_registered = !reserved_present
         && remote_marketplace_root
             .as_deref()
             .map(|remote_root| {
-                marketplace_config_points_to_root(home, CODEY_CURATED_MARKETPLACE, remote_root)
+                snapshot.as_deref().is_some_and(|snapshot| {
+                    marketplace_doc_points_to_root(
+                        snapshot.document(),
+                        CODEY_CURATED_MARKETPLACE,
+                        remote_root,
+                    )
+                })
             })
             .unwrap_or(true);
     MarketplaceStatus {
@@ -509,18 +519,20 @@ fn ensure_marketplace_configs_with_plugins(
     let existing = std::str::from_utf8(snapshot.raw())
         .with_context(|| format!("failed to read UTF-8 {}", manager.path().display()))?;
     let without_bom = existing.trim_start_matches('\u{feff}');
-    let updated = merge_marketplace_configs_and_plugins_into_text(
-        without_bom,
+    let mut doc = (*snapshot.document()).clone();
+    merge_marketplace_configs_and_plugins_into_doc(
+        &mut doc,
         marketplace_names,
         marketplace_root,
         plugin_ids,
     )?;
+    let updated = ensure_trailing_newline(doc.to_string());
     if updated.as_bytes() == without_bom.as_bytes() {
         return Ok(false);
     }
-    manager.replace_text(
+    manager.replace_document(
         Some(snapshot.revision()),
-        &updated,
+        doc,
         "register plugin marketplace without changing provider configuration",
         "plugin_marketplace.ensure_marketplace_configs_with_plugins",
     )?;
@@ -530,9 +542,10 @@ fn ensure_marketplace_configs_with_plugins(
 pub fn cleanup_managed_reserved_marketplace_configs(home: &Path) -> anyhow::Result<bool> {
     let manager = ConfigManager::for_home(home);
     let snapshot = manager.load()?;
-    let existing = std::str::from_utf8(snapshot.raw())
-        .with_context(|| format!("failed to read UTF-8 {}", manager.path().display()))?;
-    let mut doc = parse_toml_document(existing)?;
+    if !managed_reserved_marketplace_in_doc(snapshot.document(), home) {
+        return Ok(false);
+    }
+    let mut doc = (*snapshot.document()).clone();
     let official_root = home.join(".tmp").join("plugins");
     let remote_root = home.join(".tmp").join("plugins-remote");
     let managed_entries = [
@@ -561,27 +574,16 @@ pub fn cleanup_managed_reserved_marketplace_configs(home: &Path) -> anyhow::Resu
     if !changed {
         return Ok(false);
     }
-    let updated = ensure_trailing_newline(doc.to_string());
-    manager.replace_text(
+    manager.replace_document(
         Some(snapshot.revision()),
-        &updated,
+        doc,
         "remove Codey-managed reserved plugin marketplace registrations",
         "plugin_marketplace.cleanup_managed_reserved_marketplace_configs",
     )?;
     Ok(true)
 }
 
-fn managed_reserved_marketplace_config_present(home: &Path) -> bool {
-    let manager = ConfigManager::for_home(home);
-    let Ok(snapshot) = manager.load() else {
-        return false;
-    };
-    let Ok(existing) = std::str::from_utf8(snapshot.raw()) else {
-        return false;
-    };
-    let Ok(doc) = parse_toml_document(existing) else {
-        return false;
-    };
+fn managed_reserved_marketplace_in_doc(doc: &DocumentMut, home: &Path) -> bool {
     let Some(marketplaces) = doc.get("marketplaces").and_then(Item::as_table) else {
         return false;
     };
@@ -613,14 +615,13 @@ fn marketplace_table_points_to_root(table: &Table, root: &Path) -> bool {
     source_type == "local" && managed_marketplace_path_matches(source, root)
 }
 
-fn merge_marketplace_configs_and_plugins_into_text(
-    config_text: &str,
+fn merge_marketplace_configs_and_plugins_into_doc(
+    doc: &mut DocumentMut,
     marketplace_names: &[&str],
     marketplace_root: &Path,
     plugin_ids: &[String],
-) -> anyhow::Result<String> {
-    let mut doc = parse_toml_document(config_text)?;
-    let marketplaces = table_mut_or_insert(&mut doc, "marketplaces")?;
+) -> anyhow::Result<()> {
+    let marketplaces = table_mut_or_insert(doc, "marketplaces")?;
     for marketplace_name in marketplace_names {
         if *marketplace_name == CODEY_CURATED_MARKETPLACE
             && let Some(entry) = marketplaces.get(marketplace_name)
@@ -650,7 +651,7 @@ fn merge_marketplace_configs_and_plugins_into_text(
             toml_edit::value(marketplace_config_path(marketplace_root));
     }
     if !plugin_ids.is_empty() {
-        let plugins = table_mut_or_insert(&mut doc, "plugins")?;
+        let plugins = table_mut_or_insert(doc, "plugins")?;
         for plugin_id in plugin_ids {
             let existing_enabled = plugins
                 .get(plugin_id)
@@ -665,6 +666,23 @@ fn merge_marketplace_configs_and_plugins_into_text(
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn merge_marketplace_configs_and_plugins_into_text(
+    config_text: &str,
+    marketplace_names: &[&str],
+    marketplace_root: &Path,
+    plugin_ids: &[String],
+) -> anyhow::Result<String> {
+    let mut doc = parse_toml_document(config_text)?;
+    merge_marketplace_configs_and_plugins_into_doc(
+        &mut doc,
+        marketplace_names,
+        marketplace_root,
+        plugin_ids,
+    )?;
     Ok(ensure_trailing_newline(doc.to_string()))
 }
 
@@ -673,7 +691,10 @@ fn marketplace_config_points_to_root(home: &Path, marketplace_name: &str, root: 
     let Ok(snapshot) = manager.load() else {
         return false;
     };
-    let doc = snapshot.document();
+    marketplace_doc_points_to_root(snapshot.document(), marketplace_name, root)
+}
+
+fn marketplace_doc_points_to_root(doc: &DocumentMut, marketplace_name: &str, root: &Path) -> bool {
     let Some(table) = doc
         .get("marketplaces")
         .and_then(Item::as_table)
@@ -715,6 +736,7 @@ fn marketplace_config_path(path: &Path) -> String {
     }
 }
 
+#[cfg(test)]
 fn parse_toml_document(contents: &str) -> anyhow::Result<DocumentMut> {
     let contents = contents.trim_start_matches('\u{feff}');
     if contents.trim().is_empty() {

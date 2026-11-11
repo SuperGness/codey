@@ -195,19 +195,14 @@ pub fn is_injectable_page_target(target: &CdpTarget) -> bool {
 }
 
 pub fn is_codex_page_target(target: &CdpTarget) -> bool {
-    if target.target_type != "page"
-        || target
-            .url
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("data:text/html")
-    {
+    let url = target.url.trim();
+    if target.target_type != "page" || starts_with_ignore_ascii_case(url, "data:text/html") {
         return false;
     }
-    let haystack = format!("{} {}", target.title, target.url).to_lowercase();
-    haystack.contains("codex")
-        || is_chatgpt_desktop_page(&target.title, &target.url)
-        || is_packaged_codex_page(&target.url)
+    contains_ignore_ascii_case(&target.title, "codex")
+        || contains_ignore_ascii_case(url, "codex")
+        || is_chatgpt_desktop_page(&target.title, url)
+        || is_packaged_codex_page(url)
 }
 
 pub fn is_primary_codex_page_target(target: &CdpTarget) -> bool {
@@ -228,13 +223,15 @@ pub fn is_auxiliary_codex_window_url(url: &str) -> bool {
 /// （`detached-window.html`）或直接以路由为路径。
 fn auxiliary_codex_window_route(url: &str) -> Option<&'static str> {
     let (path, query) = split_app_url(url);
-    let path = path.to_ascii_lowercase();
-    let document = path.strip_prefix("app://-/")?;
-    let document = document.strip_suffix(".html").unwrap_or(document);
-    let route = query_param(query, "initialRoute").map(|route| route.to_ascii_lowercase());
-    AUXILIARY_WINDOW_ROUTES
-        .into_iter()
-        .find(|candidate| route.as_deref() == Some(*candidate) || document == &candidate[1..])
+    let document = strip_prefix_ignore_ascii_case(path, "app://-/")?;
+    let document = strip_suffix_ignore_ascii_case(document, ".html").unwrap_or(document);
+    let route = query_param(query, "initialRoute");
+    AUXILIARY_WINDOW_ROUTES.into_iter().find(|candidate| {
+        route
+            .as_deref()
+            .is_some_and(|route| route.eq_ignore_ascii_case(candidate))
+            || document.eq_ignore_ascii_case(&candidate[1..])
+    })
 }
 
 /// 拆出不含片段的地址主体与查询串。
@@ -281,20 +278,47 @@ fn percent_decode(value: &str) -> String {
 }
 
 fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
-    let title = title.trim().to_ascii_lowercase();
-    let url = url.trim().to_ascii_lowercase();
-    title == "chatgpt"
-        && (url == "https://chatgpt.com"
-            || url.starts_with("https://chatgpt.com/")
-            || url == "https://chat.openai.com"
-            || url.starts_with("https://chat.openai.com/"))
+    let url = url.trim();
+    title.trim().eq_ignore_ascii_case("chatgpt")
+        && (url.eq_ignore_ascii_case("https://chatgpt.com")
+            || starts_with_ignore_ascii_case(url, "https://chatgpt.com/")
+            || url.eq_ignore_ascii_case("https://chat.openai.com")
+            || starts_with_ignore_ascii_case(url, "https://chat.openai.com/"))
 }
 
 fn is_packaged_codex_page(url: &str) -> bool {
-    let url = url.trim().to_ascii_lowercase();
-    url == "app://-/index.html"
-        || url.starts_with("app://-/index.html?")
-        || url.starts_with("app://-/index.html#")
+    let Some(rest) = strip_prefix_ignore_ascii_case(url.trim(), "app://-/index.html") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with('?') || rest.starts_with('#')
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    starts_with_ignore_ascii_case(value, prefix).then(|| &value[prefix.len()..])
+}
+
+fn strip_suffix_ignore_ascii_case<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+    let split = value.len().checked_sub(suffix.len())?;
+    value
+        .get(split..)
+        .filter(|tail| tail.eq_ignore_ascii_case(suffix))
+        .map(|_| &value[..split])
+}
+
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]
@@ -417,5 +441,14 @@ mod tests {
         let second = cdp_http_client().unwrap();
 
         assert!(std::ptr::eq(first, second));
+    }
+
+    #[test]
+    fn ascii_case_insensitive_substring_handles_empty_and_multibyte_inputs() {
+        assert!(contains_ignore_ascii_case("Codex App", ""));
+        assert!(contains_ignore_ascii_case("", ""));
+        assert!(!contains_ignore_ascii_case("", "codex"));
+        assert!(contains_ignore_ascii_case("本地 CoDeX 调试页", "codex"));
+        assert!(!contains_ignore_ascii_case("本地调试页", "codex"));
     }
 }
