@@ -65,7 +65,9 @@ impl RolloutParseState {
                 break;
             }
             consumed += segment.len();
-            if let Ok(record) = serde_json::from_str::<Value>(line) {
+            if self.line_may_affect_state(line)
+                && let Ok(record) = serde_json::from_str::<Value>(line)
+            {
                 self.apply(&record);
             }
             if self.is_subagent {
@@ -73,6 +75,29 @@ impl RolloutParseState {
             }
         }
         consumed
+    }
+
+    fn line_may_affect_state(&self, line: &str) -> bool {
+        let bytes = line.as_bytes();
+        if memchr::memmem::find(bytes, b"\\u").is_some() {
+            return true;
+        }
+        if memchr::memmem::find(bytes, b"session_meta").is_some()
+            || memchr::memmem::find(bytes, b"turn_context").is_some()
+            || memchr::memmem::find(bytes, b"event_msg").is_some()
+        {
+            return true;
+        }
+        if memchr::memmem::find(bytes, b"function_call").is_some()
+            && (memchr::memmem::find(bytes, b"request_").is_some()
+                || memchr::memmem::find(bytes, b"exec_command").is_some()
+                || ((!self.waiting_calls.is_empty() || !self.async_questions.is_empty())
+                    && memchr::memmem::find(bytes, b"function_call_output").is_some()))
+        {
+            return true;
+        }
+        !self.async_questions.is_empty()
+            && memchr::memmem::find(bytes, b"send_user_message_question_reply").is_some()
     }
 
     fn apply(&mut self, record: &Value) {

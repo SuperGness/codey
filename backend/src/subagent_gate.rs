@@ -787,7 +787,10 @@ fn observed_runtime_subagent_selection(
 
     let mut observed: Option<ObservedRuntimeSubagentSelection> = None;
     for line in records.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
+        if line.is_empty()
+            || (memchr::memmem::find(line, b"turn_context").is_none()
+                && memchr::memmem::find(line, b"\\u").is_none())
+        {
             continue;
         }
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
@@ -908,8 +911,17 @@ fn trusted_root_turn_matches(
     }
     let mut previous_aborted = false;
     let mut current_started = false;
-    for line in records.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(&line?) else {
+    let mut line = String::new();
+    while records.read_line(&mut line)? > 0 {
+        let relevant = memchr::memmem::find(line.as_bytes(), b"event_msg").is_some()
+            || memchr::memmem::find(line.as_bytes(), b"\\u").is_some();
+        if !relevant {
+            line.clear();
+            continue;
+        }
+        let parsed = serde_json::from_str::<Value>(&line);
+        line.clear();
+        let Ok(record) = parsed else {
             continue;
         };
         if record["type"] != "event_msg" {

@@ -723,7 +723,7 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn rollout_thread_id_from_filename(name: &str) -> Option<String> {
+pub(crate) fn rollout_thread_id_from_filename(name: &str) -> Option<String> {
     let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
     if stem.len() < 36 {
         return None;

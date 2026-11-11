@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -691,81 +690,25 @@ impl LedgerStore {
     }
 }
 
-fn ledger_temp_sweeps() -> &'static Mutex<Vec<(PathBuf, SystemTime)>> {
-    static SWEEPS: Mutex<Vec<(PathBuf, SystemTime)>> = Mutex::new(Vec::new());
-    &SWEEPS
-}
-
-fn ledger_directory_sweep_is_current(session_dir: &Path) -> bool {
-    let Ok(modified) = fs::metadata(session_dir).and_then(|metadata| metadata.modified()) else {
-        return false;
-    };
-    ledger_temp_sweeps()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-        .any(|(path, seen)| path == session_dir && *seen == modified)
-}
-
-fn ledger_temp_file_exists(session_dir: &Path) -> bool {
-    let prefix = format!(".{LEDGER_FILE}.codey-");
-    fs::read_dir(session_dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry.file_type().is_ok_and(|kind| kind.is_file())
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
-        })
-}
-
-fn remember_ledger_directory_sweep(session_dir: &Path) {
-    let Ok(modified) = fs::metadata(session_dir).and_then(|metadata| metadata.modified()) else {
-        return;
-    };
-    let mut sweeps = ledger_temp_sweeps()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(seen) = sweeps.iter_mut().find(|(path, _)| path == session_dir) {
-        seen.1 = modified;
-        return;
-    }
-    if sweeps.len() >= 128 {
-        sweeps.remove(0);
-    }
-    sweeps.push((session_dir.to_path_buf(), modified));
-}
+const LEDGER_TEMP_PREFIX: &str = ".orchestrator-ledger-v1.json.codey-";
 
 fn cleanup_stale_ledger_temps(session_dir: &Path) -> Result<()> {
-    // 临时文件只在进程崩溃时留下。目录修改时间没变时不必每次打开账本都扫描。
-    // Windows can keep a directory timestamp unchanged for files created in
-    // quick succession. If a matching temp file is present, rescan even when
-    // the cached timestamp says the directory is current.
-    if ledger_directory_sweep_is_current(session_dir) && !ledger_temp_file_exists(session_dir) {
-        return Ok(());
-    }
     let entries = match fs::read_dir(session_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let prefix = format!(".{LEDGER_FILE}.codey-");
     for entry in entries {
         let entry = entry?;
         if entry.file_type()?.is_file()
             && entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+                .is_some_and(|name| name.starts_with(LEDGER_TEMP_PREFIX) && name.ends_with(".tmp"))
         {
             fs::remove_file(entry.path())?;
         }
     }
-    remember_ledger_directory_sweep(session_dir);
     Ok(())
 }
 

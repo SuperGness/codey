@@ -323,19 +323,7 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn rollout_thread_id_from_filename(name: &str) -> Option<String> {
-    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
-    if stem.len() < 36 {
-        return None;
-    }
-    let candidate = &stem[stem.len() - 36..];
-    let valid = candidate
-        .chars()
-        .enumerate()
-        .all(|(index, ch)| match index {
-            8 | 13 | 18 | 23 => ch == '-',
-            _ => ch.is_ascii_hexdigit(),
-        });
-    valid.then(|| candidate.to_string())
+    crate::message_delete::rollout_thread_id_from_filename(name)
 }
 
 fn sqlite_paths(home: &Path) -> Result<Vec<PathBuf>> {

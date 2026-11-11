@@ -247,20 +247,11 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
         let path = checked_path(&home, &path)?;
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
-        let columns: Vec<String> = db
-            .prepare("SELECT name FROM pragma_table_info('threads')")?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        if !columns.iter().any(|c| c == "id") {
+        let columns = crate::sqlite_util::table_columns(&db, "threads")?;
+        if !columns.contains("id") {
             continue;
         }
-        let column = |name: &str| {
-            if columns.iter().any(|c| c == name) {
-                name.to_owned()
-            } else {
-                "NULL".to_owned()
-            }
-        };
+        let column = |name: &'static str| if columns.contains(name) { name } else { "NULL" };
         let sql = format!(
             "SELECT {}, {}, {} FROM threads WHERE id=?1 LIMIT 1",
             column("model"),
@@ -581,11 +572,8 @@ pub(crate) fn native_compaction_source(home: &Path, thread_id: &str) -> Result<O
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
-        let columns: Vec<String> = db
-            .prepare("SELECT name FROM pragma_table_info('threads')")?
-            .query_map([], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        if !columns.iter().any(|c| c == "id") || !columns.iter().any(|c| c == "rollout_path") {
+        let columns = crate::sqlite_util::table_columns(&db, "threads")?;
+        if !columns.contains("id") || !columns.contains("rollout_path") {
             continue;
         }
         let saved: Option<Option<String>> = db
