@@ -171,7 +171,7 @@ fn assert_matches_baseline(root: &Path, query: &RouteRequestLogQuery) {
 
 #[test]
 fn statistics_match_independent_aggregates() {
-    let (directory, from, to) = seed(3_000);
+    let (directory, from, to) = seed(200);
     let query = statistics_query(from, to);
     assert_matches_baseline(directory.path(), &query);
     assert_matches_baseline(

@@ -11,10 +11,9 @@ use super::super::{
 };
 use super::{
     DAY_MS, MAX_QUERY_PAGE, MAX_QUERY_PAGE_SIZE, MAX_QUERY_SEARCH_BYTES,
-    RouteRequestLogModelAliases, clear_route_request_log_files, latest_session_recorded_speed,
-    query_route_request_log_models, query_route_request_log_stats,
-    query_route_request_log_stats_with_model_aliases, query_route_request_logs,
-    session_recorded_timing, sqlite_query_filters,
+    RouteRequestLogModelAliases, clear_route_request_log_files, query_route_request_log_models,
+    query_route_request_log_stats, query_route_request_log_stats_with_model_aliases,
+    query_route_request_logs, sqlite_query_filters,
 };
 use crate::config::RouteRequestLogBackend;
 
@@ -1106,208 +1105,6 @@ fn sqlite_analytics_rejects_invalid_ranges_and_grouping() {
 }
 
 #[test]
-fn session_recorded_speed_uses_latest_eligible_own_request_without_creating_logs() {
-    let directory = tempfile::tempdir().unwrap();
-    assert_eq!(
-        latest_session_recorded_speed(directory.path(), "thread-sample"),
-        None
-    );
-    let path = directory.path().join(SQLITE_FILE_NAME);
-    assert!(!path.exists());
-    let mut sink = SqliteSink::open(&path, 30).unwrap();
-    let mut own = sample_entry("own");
-    own.timestamp_unix_ms = 100;
-    own.codex_session_id = Some("thread-sample".into());
-    own.codex_session_is_parent = false;
-    own.request_kind = "responses".into();
-    own.token_usage.output_tokens = Some(200);
-    own.total_duration_ms = 1100;
-    own.router_pre_upstream_ms = Some(50);
-    own.upstream_first_byte_ms = Some(50);
-    let mut parent = own.clone();
-    parent.request_id = "parent".into();
-    parent.timestamp_unix_ms = 200;
-    parent.codex_session_is_parent = true;
-    let mut missing = own.clone();
-    missing.request_id = "missing".into();
-    missing.timestamp_unix_ms = 300;
-    missing.upstream_first_byte_ms = None;
-    let mut compact = own.clone();
-    compact.request_id = "compact".into();
-    compact.timestamp_unix_ms = 400;
-    compact.request_kind = "responses_compact".into();
-    sink.write_batch(&[
-        queued(own),
-        queued(parent),
-        queued(missing),
-        queued(compact),
-    ])
-    .unwrap();
-    sink.finish().unwrap();
-    drop(sink);
-    assert_eq!(
-        latest_session_recorded_speed(directory.path(), "thread-sample"),
-        Some((200.0, 100))
-    );
-    assert_eq!(
-        latest_session_recorded_speed(directory.path(), "foreign"),
-        None
-    );
-    // 关闭写入后依然只读历史；兼容日志内带 local: 前缀的会话归属。
-    let conn = Connection::open(&path).unwrap();
-    conn.execute("UPDATE route_request_logs SET codex_session_id='local:thread-sample' WHERE request_id='own'", []).unwrap();
-    assert_eq!(
-        latest_session_recorded_speed(directory.path(), "thread-sample"),
-        Some((200.0, 100))
-    );
-    for invalid_output in [0, 99] {
-        conn.execute(
-            "UPDATE route_request_logs SET output_tokens=?1 WHERE request_id='own'",
-            [invalid_output],
-        )
-        .unwrap();
-        assert_eq!(
-            latest_session_recorded_speed(directory.path(), "thread-sample"),
-            None
-        );
-    }
-    conn.execute(
-        "UPDATE route_request_logs SET output_tokens=200 WHERE request_id='own'",
-        [],
-    )
-    .unwrap();
-    // 异常时间不提供速度。
-    conn.execute(
-        "UPDATE route_request_logs SET router_pre_upstream_ms=-1 WHERE request_id='own'",
-        [],
-    )
-    .unwrap();
-    assert_eq!(
-        latest_session_recorded_speed(directory.path(), "thread-sample"),
-        None
-    );
-}
-
-#[test]
-fn session_recorded_timing_excludes_parent_compaction_and_missing_measurements() {
-    let directory = tempfile::tempdir().unwrap();
-    assert!(session_recorded_timing(directory.path(), "own", None).is_none());
-    assert!(!directory.path().join(SQLITE_FILE_NAME).exists());
-    let mut sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
-    let mut entry = sample_entry("first");
-    entry.codex_session_id = Some("own".into());
-    entry.codex_session_is_parent = false;
-    entry.request_kind = "responses".into();
-    entry.total_duration_ms = 1500;
-    entry.router_pre_upstream_ms = Some(500);
-    entry.downstream_first_content_ms = Some(600);
-    let mut missing = entry.clone();
-    missing.request_id = "missing".into();
-    missing.router_pre_upstream_ms = None;
-    missing.downstream_first_content_ms = None;
-    missing.ttft_ms = Some(5);
-    let mut parent = entry.clone();
-    parent.request_id = "parent".into();
-    parent.codex_session_is_parent = true;
-    let mut compact = entry.clone();
-    compact.request_id = "compact".into();
-    compact.request_kind = "responses_compact".into();
-    let mut prefixed = entry.clone();
-    prefixed.request_id = "prefixed".into();
-    prefixed.codex_session_id = Some("local:own".into());
-    prefixed.downstream_first_content_ms = Some(800);
-    sink.write_batch(&[
-        queued(entry),
-        queued(missing),
-        queued(parent),
-        queued(compact),
-        queued(prefixed),
-    ])
-    .unwrap();
-    sink.finish().unwrap();
-    drop(sink);
-    let timing = session_recorded_timing(directory.path(), "own", None).unwrap();
-    assert_eq!(timing.requests, 3);
-    assert_eq!(timing.model_duration_ms, Some(2000));
-    assert_eq!(timing.average_ttft_ms, Some(700.0));
-    assert_eq!(timing.timing_request_count, 2);
-    assert_eq!(timing.ttft_sample_count, 2);
-    assert!(session_recorded_timing(directory.path(), "foreign", None).is_none());
-    // 旧库缺计时字段时只返回未知，不迁移、不创建字段，也不依赖当前日志开关。
-    let old = tempfile::tempdir().unwrap();
-    let connection = Connection::open(old.path().join(SQLITE_FILE_NAME)).unwrap();
-    connection.execute_batch("CREATE TABLE route_request_logs (codex_session_id TEXT, timestamp_unix_ms INTEGER);
-        CREATE INDEX idx_route_request_logs_session_time ON route_request_logs(codex_session_id, timestamp_unix_ms);").unwrap();
-    assert!(session_recorded_timing(old.path(), "own", None).is_none());
-    let columns: u64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('route_request_logs')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(columns, 2);
-}
-
-#[test]
-fn session_recorded_timing_filters_invalid_times_and_applies_runtime_boundary() {
-    use crate::conversation_stats::RuntimeHistoryBoundary;
-    let root = tempfile::tempdir().unwrap();
-    let connection = Connection::open(root.path().join(SQLITE_FILE_NAME)).unwrap();
-    connection.execute_batch("CREATE TABLE route_request_logs (
-        request_id TEXT PRIMARY KEY, codex_session_id TEXT, timestamp_unix_ms INTEGER,
-        request_kind TEXT, codex_session_is_parent INTEGER, total_duration_ms INTEGER,
-        router_pre_upstream_ms INTEGER, downstream_first_content_ms INTEGER);
-        CREATE INDEX idx_route_request_logs_session_time ON route_request_logs(codex_session_id, timestamp_unix_ms);
-        INSERT INTO route_request_logs VALUES
-        ('old','own',100,'responses',0,1100,100,100),
-        ('same-ms-old','local:own',200,'responses',0,2100,100,NULL),
-        ('runtime','own',200,'responses',0,600,100,300),
-        ('later','own',300,'responses',0,1100,100,100),
-        ('invalid-timestamp','own',-1,'responses',0,1100,100,100),
-        ('invalid-model','own',100,'responses',0,1000,-1,200),
-        ('invalid-ttft','own',100,'responses',0,1000,100,1001),
-        ('missing-both','own',100,'responses',0,1000,NULL,NULL);").unwrap();
-    let boundary = RuntimeHistoryBoundary {
-        timestamp_unix_ms: 200,
-        request_ids: std::collections::HashSet::from(["runtime".into()]),
-        exclude_entire_millisecond: false,
-    };
-    let timing = session_recorded_timing(root.path(), "own", Some(&boundary)).unwrap();
-    assert_eq!(timing.requests, 5);
-    assert_eq!(timing.model_duration_ms, Some(3900));
-    assert_eq!(timing.timing_request_count, 3);
-    assert_eq!(timing.average_ttft_ms, Some(150.0));
-    assert_eq!(timing.ttft_sample_count, 2);
-    let overflow = session_recorded_timing(
-        root.path(),
-        "own",
-        Some(&RuntimeHistoryBoundary {
-            exclude_entire_millisecond: true,
-            ..boundary.clone()
-        }),
-    )
-    .unwrap();
-    assert_eq!(overflow.requests, 4);
-    assert_eq!(overflow.model_duration_ms, Some(1900));
-    let (sql, values) = super::session_timing_query("own", Some(&boundary));
-    let plan = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-        .unwrap()
-        .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-        .join(" ");
-    assert!(
-        plan.contains("SEARCH route_request_logs USING INDEX idx_route_request_logs_session_time"),
-        "{plan}"
-    );
-    assert!(plan.contains("timestamp_unix_ms<?"), "{plan}");
-    assert!(!plan.contains("SCAN route_request_logs"), "{plan}");
-}
-
-#[test]
 fn last_turn_stats_query_isolates_window_and_runtime_with_session_time_index() {
     use crate::conversation_stats::{RuntimeHistoryBoundary, TurnWindow};
     let root = tempfile::tempdir().unwrap();
@@ -1322,6 +1119,7 @@ fn last_turn_stats_query_isolates_window_and_runtime_with_session_time_index() {
         ('old','own',99,'responses',0,10000,100,200,200,9999),
         ('first','own',101,'responses',0,1300,100,300,200,100),
         ('second','local:own',200,'responses',0,3300,100,500,200,600),
+        ('same-ms-historical','own',300,'responses',0,1300,100,300,200,100),
         ('parent','own',200,'responses',1,1300,100,300,200,9999),
         ('compact','own',200,'responses_compact',0,1300,100,300,200,9999),
         ('runtime','own',300,'responses',0,1300,100,300,200,500),
@@ -1341,11 +1139,27 @@ fn last_turn_stats_query_isolates_window_and_runtime_with_session_time_index() {
     };
     let totals =
         super::last_turn_recorded_stats(root.path(), "own", &window, Some(&boundary)).unwrap();
-    assert_eq!(totals.requests, 2);
+    assert_eq!(totals.requests, 3);
     assert_eq!(totals.excluded_boundary_requests, 0);
-    assert_eq!(totals.generation.speed(), Some(175.0));
-    assert_eq!(totals.model_duration_ms, 4400);
-    assert_eq!(totals.ttft_total_ms / totals.ttft_samples as f64, 400.0);
+    assert_eq!(totals.generation.speed(), Some(160.0));
+    assert_eq!(totals.model_duration_ms, 5600);
+    assert_eq!(
+        (totals.ttft_total_ms / totals.ttft_samples as f64).round(),
+        367.0
+    );
+    let excluded_ms = super::last_turn_recorded_stats(
+        root.path(),
+        "own",
+        &window,
+        Some(&RuntimeHistoryBoundary {
+            exclude_entire_millisecond: true,
+            ..boundary.clone()
+        }),
+    )
+    .unwrap();
+    assert_eq!(excluded_ms.requests, 2);
+    assert_eq!(excluded_ms.generation.speed(), Some(175.0));
+    assert_eq!(excluded_ms.model_duration_ms, 4400);
     let (sql, values) = super::last_turn_stats_query("own", &window, Some(&boundary));
     let plan = connection
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
@@ -1366,6 +1180,16 @@ fn last_turn_stats_query_isolates_window_and_runtime_with_session_time_index() {
         .execute("DROP INDEX idx_route_request_logs_session_time", [])
         .unwrap();
     assert!(super::last_turn_recorded_stats(root.path(), "own", &window, None).is_none());
+
+    let old_schema = tempfile::tempdir().unwrap();
+    let old_conn = Connection::open(old_schema.path().join(SQLITE_FILE_NAME)).unwrap();
+    old_conn
+        .execute_batch(
+            "CREATE TABLE route_request_logs (codex_session_id TEXT, timestamp_unix_ms INTEGER);
+             CREATE INDEX idx_route_request_logs_session_time ON route_request_logs(codex_session_id, timestamp_unix_ms);",
+        )
+        .unwrap();
+    assert!(super::last_turn_recorded_stats(old_schema.path(), "own", &window, None).is_none());
 }
 
 #[test]
@@ -1424,182 +1248,6 @@ fn last_turn_stats_excludes_boundary_milliseconds_without_hiding_partial_coverag
         super::last_turn_recorded_stats(root.path(), "own", &window, None).unwrap();
     assert_eq!(same_millisecond.requests, 0);
     assert_eq!(same_millisecond.excluded_boundary_requests, 2);
-}
-
-#[test]
-fn session_recorded_average_filters_invalid_rows_and_deduplicates_runtime_boundary() {
-    use super::{session_average_query, session_recorded_average};
-    use crate::conversation_stats::RuntimeHistoryBoundary;
-    let directory = tempfile::tempdir().unwrap();
-    assert!(session_recorded_average(directory.path(), "own", None).is_none());
-    assert!(!directory.path().join(SQLITE_FILE_NAME).exists());
-    let mut sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
-    let mut own = sample_entry("old");
-    own.codex_session_id = Some("own".into());
-    own.codex_session_is_parent = false;
-    own.request_kind = "responses".into();
-    own.timestamp_unix_ms = 100;
-    own.token_usage.output_tokens = Some(10);
-    own.router_pre_upstream_ms = Some(100);
-    own.upstream_first_byte_ms = Some(200);
-    own.total_duration_ms = 1_300;
-    let mut entries = vec![queued(own.clone())];
-    for id in [
-        "same-ms-old",
-        "runtime",
-        "later",
-        "parent",
-        "compact",
-        "foreign",
-        "missing-usage",
-        "missing-time",
-        "invalid",
-        "zero-duration",
-        "zero-output",
-    ] {
-        let mut entry = own.clone();
-        entry.request_id = id.into();
-        entry.timestamp_unix_ms = 200;
-        match id {
-            "same-ms-old" => {
-                entry.codex_session_id = Some("local:own".into());
-                entry.token_usage.output_tokens = Some(30);
-            }
-            "runtime" => entry.token_usage.output_tokens = Some(900),
-            "later" => entry.timestamp_unix_ms = 201,
-            "parent" => entry.codex_session_is_parent = true,
-            "compact" => entry.request_kind = "responses_compact".into(),
-            "foreign" => entry.codex_session_id = Some("foreign".into()),
-            "missing-usage" => entry.token_usage.output_tokens = None,
-            "missing-time" => entry.router_pre_upstream_ms = None,
-            "invalid" => entry.upstream_first_byte_ms = Some(5_000),
-            "zero-duration" => entry.total_duration_ms = 300,
-            "zero-output" => {
-                entry.token_usage.output_tokens = Some(0);
-                entry.timestamp_unix_ms = 100;
-            }
-            _ => {}
-        }
-        entries.push(queued(entry));
-    }
-    sink.write_batch(&entries).unwrap();
-    sink.finish().unwrap();
-    drop(sink);
-    let boundary = RuntimeHistoryBoundary {
-        timestamp_unix_ms: 200,
-        request_ids: std::collections::HashSet::from(["runtime".to_owned()]),
-        exclude_entire_millisecond: false,
-    };
-    let totals = session_recorded_average(directory.path(), "own", Some(&boundary)).unwrap();
-    assert_eq!(totals.output_tokens, 40.0);
-    assert_eq!(totals.generation_ms, 3_000.0);
-    assert_eq!(totals.requests, 3);
-    assert_eq!(totals.speed(), Some(40.0 / 3.0));
-    let old_only = session_recorded_average(
-        directory.path(),
-        "own",
-        Some(&RuntimeHistoryBoundary {
-            exclude_entire_millisecond: true,
-            ..boundary.clone()
-        }),
-    )
-    .unwrap();
-    assert_eq!(old_only.requests, 2);
-    assert_eq!(old_only.speed(), Some(5.0));
-    let all = session_recorded_average(directory.path(), "own", None).unwrap();
-    assert_eq!(all.requests, 5);
-    assert_eq!(all.output_tokens, 950.0);
-    let connection = Connection::open(directory.path().join(SQLITE_FILE_NAME)).unwrap();
-    connection
-        .execute(
-            "UPDATE route_request_logs SET router_pre_upstream_ms=-1 WHERE request_id='old'",
-            [],
-        )
-        .unwrap();
-    assert_eq!(
-        session_recorded_average(directory.path(), "own", Some(&boundary))
-            .unwrap()
-            .requests,
-        2
-    );
-    let (sql, values) = session_average_query("own", Some(&boundary));
-    let plan = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-        .unwrap()
-        .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-        .join(" ");
-    assert!(
-        plan.contains("SEARCH route_request_logs USING INDEX idx_route_request_logs_session_time"),
-        "{plan}"
-    );
-    assert!(plan.contains("timestamp_unix_ms<?"), "{plan}");
-    assert!(!plan.contains("SCAN route_request_logs"), "{plan}");
-}
-
-#[test]
-fn session_recorded_average_is_read_only_for_old_schema() {
-    let directory = tempfile::tempdir().unwrap();
-    let connection = Connection::open(directory.path().join(SQLITE_FILE_NAME)).unwrap();
-    connection.execute_batch("CREATE TABLE route_request_logs (codex_session_id TEXT, timestamp_unix_ms INTEGER);
-        CREATE INDEX idx_route_request_logs_session_time ON route_request_logs(codex_session_id, timestamp_unix_ms);").unwrap();
-    assert!(super::session_recorded_average(directory.path(), "own", None).is_none());
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('route_request_logs')",
-                [],
-                |row| row.get::<_, u64>(0)
-            )
-            .unwrap(),
-        2
-    );
-}
-
-#[test]
-fn session_average_query_uses_index_with_large_unrelated_history() {
-    use super::{session_average_query, session_recorded_average};
-    let directory = tempfile::tempdir().unwrap();
-    let connection = Connection::open(directory.path().join(SQLITE_FILE_NAME)).unwrap();
-    connection.execute_batch("CREATE TABLE route_request_logs (
-        request_id TEXT PRIMARY KEY, codex_session_id TEXT, timestamp_unix_ms INTEGER,
-        request_kind TEXT, codex_session_is_parent INTEGER, output_tokens INTEGER,
-        total_duration_ms INTEGER, router_pre_upstream_ms INTEGER, upstream_first_byte_ms INTEGER);
-        CREATE INDEX idx_route_request_logs_session_time ON route_request_logs(codex_session_id, timestamp_unix_ms);
-        WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<99999)
-        INSERT INTO route_request_logs SELECT 'other-'||x, 'other-'||(x%1000), x, 'responses', 0, 100, 1300, 100, 200 FROM n;
-        WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<9999)
-        INSERT INTO route_request_logs SELECT 'own-'||x, 'own', x, 'responses', 0, 100, 1300, 100, 200 FROM n;").unwrap();
-    let boundary = crate::conversation_stats::RuntimeHistoryBoundary {
-        timestamp_unix_ms: 5000,
-        request_ids: std::collections::HashSet::from(["own-5000".to_owned()]),
-        exclude_entire_millisecond: false,
-    };
-    let started = std::time::Instant::now();
-    let totals = session_recorded_average(directory.path(), "own", Some(&boundary)).unwrap();
-    eprintln!(
-        "session average: 100000 unrelated + 10000 own rows, indexed aggregate of 5000 rows: {:?}",
-        started.elapsed()
-    );
-    assert_eq!(totals.requests, 5000);
-    assert_eq!(totals.speed(), Some(100.0));
-    let (sql, params) = session_average_query("own", Some(&boundary));
-    let plan = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-        .unwrap()
-        .query_map(params_from_iter(params), |row| row.get::<_, String>(3))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-        .join(" ");
-    assert!(
-        plan.contains("SEARCH route_request_logs USING INDEX idx_route_request_logs_session_time"),
-        "{plan}"
-    );
-    assert!(plan.contains("timestamp_unix_ms<?"), "{plan}");
-    assert!(!plan.contains("SCAN route_request_logs"), "{plan}");
 }
 
 #[test]
