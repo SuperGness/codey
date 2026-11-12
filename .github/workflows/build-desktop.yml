@@ -71,6 +71,60 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  frontend:
+    if: inputs.artifact_run_id == ''
+    needs: prepare
+    name: Frontend checks and embedded overlay
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.ref }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.2"
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Download claimed platform build
+        if: inputs.build_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: release-build-context
+
+      - name: Inject validated platform release version
+        if: inputs.build_id != ''
+        run: node scripts/release-automation.mjs prepare-version
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        run: pnpm run check
+
+      - name: JavaScript tests
+        run: pnpm run test:js
+
+      - name: Build embedded frontend assets
+        run: pnpm run vite:build
+
+      - name: Upload embedded frontend overlay
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
+          if-no-files-found: error
+
   notes:
     if: inputs.build_id != ''
     needs: prepare
@@ -111,7 +165,9 @@ jobs:
 
   macos:
     if: inputs.artifact_run_id == ''
-    needs: prepare
+    needs:
+      - prepare
+      - frontend
     name: macOS ${{ matrix.arch }} unsigned
     runs-on: ${{ matrix.runner }}
     env:
@@ -131,25 +187,10 @@ jobs:
           ref: ${{ inputs.source_sha || github.ref }}
           persist-credentials: false
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.2"
-          run_install: false
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Setup Go for native desktop tools
-        if: runner.os == 'Windows'
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -170,11 +211,11 @@ jobs:
           shared-key: macos-release
           cache-on-failure: true
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Verify release admin endpoint
         shell: bash
@@ -194,7 +235,7 @@ jobs:
           CODEY_UPDATE_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
           CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
           CODEY_RELEASE_BUILD_ID: ${{ inputs.build_id }}
-        run: pnpm run build
+        run: node scripts/build.mjs
 
       - name: Verify and archive macOS app
         id: package
@@ -239,7 +280,10 @@ jobs:
           if-no-files-found: error
 
   macos-check:
-    needs: prepare
+    if: inputs.artifact_run_id == ''
+    needs:
+      - prepare
+      - frontend
     name: macOS ${{ matrix.arch }} checks
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -256,45 +300,34 @@ jobs:
           ref: ${{ inputs.source_sha || github.ref }}
           persist-credentials: false
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.2"
-          run_install: false
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Setup Go for native desktop tools
-        if: runner.os == 'Windows'
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      - name: Download claimed platform build
+        if: inputs.build_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: release-build-context
+
+      - name: Inject validated platform release version
+        if: inputs.build_id != ''
+        run: node scripts/release-automation.mjs prepare-version
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: TypeScript check
-        run: pnpm run check
-
-      - name: JavaScript tests
-        run: pnpm run test:js
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Rust format
         run: cargo fmt --all -- --check
@@ -311,7 +344,9 @@ jobs:
 
   windows:
     if: inputs.artifact_run_id == ''
-    needs: prepare
+    needs:
+      - prepare
+      - frontend
     name: Windows x64
     runs-on: windows-latest
     # 测试和 clippy 在 ci.yml 的 Windows 任务里跑。这里只编 release 并打安装包。
@@ -341,18 +376,10 @@ jobs:
             Add-MpPreference -ExclusionPath $path
           }
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.2"
-          run_install: false
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Go for native desktop tools
         if: runner.os == 'Windows'
@@ -405,11 +432,11 @@ jobs:
           "NSISDIR=$nsisHome" | Out-File -FilePath $env:GITHUB_ENV -Append
           "MAKENSIS=$makensis" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Verify release admin endpoint
         shell: pwsh
@@ -426,7 +453,7 @@ jobs:
           CODEY_UPDATE_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
           CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
           CODEY_RELEASE_BUILD_ID: ${{ inputs.build_id }}
-        run: pnpm run build
+        run: node scripts/build.mjs
 
       - name: Build Windows packages
         id: package
@@ -497,7 +524,10 @@ jobs:
           if-no-files-found: error
 
   windows-check:
-    needs: prepare
+    if: inputs.artifact_run_id == ''
+    needs:
+      - prepare
+      - frontend
     name: Windows checks
     runs-on: windows-latest
     # 打包任务只出安装包。标签发布不触发 ci.yml，所以 Windows 测试放在这里，并作为发布前置。
@@ -522,18 +552,10 @@ jobs:
             Add-MpPreference -ExclusionPath $path
           }
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.2"
-          run_install: false
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Go for native desktop tools
         if: runner.os == 'Windows'
@@ -547,17 +569,27 @@ jobs:
         with:
           components: clippy
 
+      - name: Download claimed platform build
+        if: inputs.build_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: release-build-context
+
+      - name: Inject validated platform release version
+        if: inputs.build_id != ''
+        run: node scripts/release-automation.mjs prepare-version
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-release-check
           cache-on-failure: true
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Rust tests
         run: cargo test --workspace --locked
@@ -575,11 +607,12 @@ jobs:
     permissions:
       contents: write
     needs:
+      - frontend
       - macos
       - macos-check
       - windows
       - windows-check
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     env:
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
       CLOUDFLARE_R2_PUBLIC_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
@@ -635,6 +668,10 @@ jobs:
         if: env.CLOUDFLARE_R2_BUCKET == '' || env.CLOUDFLARE_R2_PUBLIC_BASE_URL == '' || env.CLOUDFLARE_ACCOUNT_ID == '' || env.CLOUDFLARE_API_TOKEN == ''
         run: echo "::notice::Cloudflare R2 update sync skipped. Configure the R2 bucket, public base URL, account ID, and API token to enable it."
 
+      - name: Install Wrangler CLI
+        if: env.CLOUDFLARE_R2_BUCKET != '' && env.CLOUDFLARE_R2_PUBLIC_BASE_URL != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
+        run: npm install --global wrangler@4.112.0
+
       - name: Generate Cloudflare R2 update manifest
         if: env.CLOUDFLARE_R2_BUCKET != '' && env.CLOUDFLARE_R2_PUBLIC_BASE_URL != '' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != ''
         shell: bash
@@ -676,13 +713,14 @@ jobs:
             local file="$2"
             local content_type="$3"
             local cache_control="$4"
-            npm exec --yes --package=wrangler@4.112.0 -- wrangler r2 object put "${CLOUDFLARE_R2_BUCKET}/${key}" \
+            wrangler r2 object put "${CLOUDFLARE_R2_BUCKET}/${key}" \
               --file "$file" \
               --remote \
               --content-type "$content_type" \
               --cache-control "$cache_control"
           }
 
+          pids=()
           for ASSET in release-assets/*; do
             test -f "$ASSET" || continue
             FILE_NAME="$(basename "$ASSET")"
@@ -695,19 +733,26 @@ jobs:
                 exit 1
                 ;;
             esac
-            upload_object "releases/${TAG}/${FILE_NAME}" "$ASSET" "$CONTENT_TYPE" "public, max-age=31536000, immutable"
+            upload_object "releases/${TAG}/${FILE_NAME}" "$ASSET" "$CONTENT_TYPE" "public, max-age=31536000, immutable" &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do
+            wait "$pid"
           done
           upload_object "releases/${TAG}/latest.json" "release-assets/latest.json" "application/json" "no-cache, no-store, max-age=0"
 
   managed-publish:
     if: >-
       always() && inputs.build_id != '' && needs.prepare.result == 'success' &&
-      needs.notes.result == 'success' && needs.macos-check.result == 'success' &&
-      needs.windows-check.result == 'success' &&
+      needs.notes.result == 'success' &&
+      (needs.frontend.result == 'success' || (inputs.artifact_run_id != '' && needs.frontend.result == 'skipped')) &&
       (needs.macos.result == 'success' || (inputs.artifact_run_id != '' && needs.macos.result == 'skipped')) &&
-      (needs.windows.result == 'success' || (inputs.artifact_run_id != '' && needs.windows.result == 'skipped'))
+      (needs.macos-check.result == 'success' || (inputs.artifact_run_id != '' && needs.macos-check.result == 'skipped')) &&
+      (needs.windows.result == 'success' || (inputs.artifact_run_id != '' && needs.windows.result == 'skipped')) &&
+      (needs.windows-check.result == 'success' || (inputs.artifact_run_id != '' && needs.windows-check.result == 'skipped'))
     needs:
       - prepare
+      - frontend
       - notes
       - macos
       - macos-check
@@ -733,6 +778,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler@4.112.0
       - uses: actions/download-artifact@v4
         with:
           name: release-build-context
@@ -755,6 +802,7 @@ jobs:
     if: always() && inputs.build_id != '' && needs.prepare.outputs.claimed == 'true' && needs.managed-publish.result != 'success'
     needs:
       - prepare
+      - frontend
       - notes
       - macos
       - macos-check

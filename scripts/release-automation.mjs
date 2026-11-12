@@ -143,13 +143,35 @@ function r2Configuration() {
   if (!/^[a-zA-Z0-9.-]+$/.test(process.env.CLOUDFLARE_R2_BUCKET) || new URL(process.env.CLOUDFLARE_R2_PUBLIC_BASE_URL).protocol !== "https:") throw new Error("R2 配置无效");
 }
 
-async function wrangler(args) {
-  return execute("npm", ["exec", "--yes", "--package=wrangler@4.112.0", "--", "wrangler", "r2", "object", ...args], { timeout: 600_000, maxBuffer: 2 * 1024 * 1024 });
+let cachedWranglerCommand = null;
+
+export function resetWranglerCache() {
+  cachedWranglerCommand = null;
 }
 
-async function getObject(key, path, missing = false) {
+export async function resolveWranglerCommand(runner = execute) {
+  if (cachedWranglerCommand) return cachedWranglerCommand;
+  try {
+    const { stdout } = await runner("wrangler", ["--version"], { timeout: 15_000, maxBuffer: 256 * 1024 });
+    if (/\b4\.112\.0\b/.test(stdout || "")) {
+      cachedWranglerCommand = { command: "wrangler", prefix: ["r2", "object"] };
+      return cachedWranglerCommand;
+    }
+  } catch {
+    // Fall back to pinned npm exec when wrangler@4.112.0 is not preinstalled.
+  }
+  cachedWranglerCommand = { command: "npm", prefix: ["exec", "--yes", "--package=wrangler@4.112.0", "--", "wrangler", "r2", "object"] };
+  return cachedWranglerCommand;
+}
+
+async function wrangler(args, runner = execute) {
+  const cli = await resolveWranglerCommand(runner);
+  return runner(cli.command, [...cli.prefix, ...args], { timeout: 600_000, maxBuffer: 2 * 1024 * 1024 });
+}
+
+async function getObject(key, path, missing = false, runner = execute) {
   await rm(path, { force: true });
-  try { await wrangler(["get", `${process.env.CLOUDFLARE_R2_BUCKET}/${key}`, "--file", path, "--remote"]); }
+  try { await wrangler(["get", `${process.env.CLOUDFLARE_R2_BUCKET}/${key}`, "--file", path, "--remote"], runner); }
   catch (error) {
     if (missing && /(?:\b404\b|NoSuchKey|The specified key does not exist)/i.test(`${error.stdout || ""}\n${error.stderr || ""}`)) return false;
     throw error;
@@ -157,20 +179,26 @@ async function getObject(key, path, missing = false) {
   return true;
 }
 
-async function putObject(key, path, mutable = false) {
+async function putObject(key, path, options = {}, runner = execute) {
+  const mutable = typeof options === "boolean" ? options : Boolean(options.mutable);
+  const checkExisting = typeof options === "boolean" ? true : options.checkExisting !== false;
+  const verifyReadback = typeof options === "boolean" ? true : options.verifyReadback ?? mutable;
   const probe = `${path}.r2-check`;
-  if (await getObject(key, probe, true)) {
+  if (checkExisting && await getObject(key, probe, true, runner)) {
     if (!mutable && ((await stat(probe)).size !== (await stat(path)).size || await checksum(probe) !== await checksum(path))) throw new Error(`R2 已有不同内容，拒绝覆盖：${key}`);
-    if (!mutable) { await rm(probe); return; }
+    if (!mutable) { await rm(probe, { force: true }); return; }
     const original = JSON.parse(await readFile(probe, "utf8"));
     const next = JSON.parse(await readFile(path, "utf8"));
     if (original.build_id !== next.build_id || original.source_sha !== next.source_sha || original.tag !== next.tag) throw new Error("R2 清单已被其他任务占用");
     assertSameAssets(original.assets, next.assets);
+    await rm(probe, { force: true });
   }
-  await wrangler(["put", `${process.env.CLOUDFLARE_R2_BUCKET}/${key}`, "--file", path, "--remote", "--content-type", key.endsWith(".json") ? "application/json" : key.endsWith(".zip") ? "application/zip" : "application/octet-stream", "--cache-control", mutable ? "no-store" : "public, max-age=31536000, immutable"]);
-  await getObject(key, probe);
-  if ((await stat(probe)).size !== (await stat(path)).size || await checksum(probe) !== await checksum(path)) throw new Error(`R2 上传校验失败：${key}`);
-  await rm(probe);
+  await wrangler(["put", `${process.env.CLOUDFLARE_R2_BUCKET}/${key}`, "--file", path, "--remote", "--content-type", key.endsWith(".json") ? "application/json" : key.endsWith(".zip") ? "application/zip" : "application/octet-stream", "--cache-control", mutable ? "no-store" : "public, max-age=31536000, immutable"], runner);
+  if (verifyReadback) {
+    await getObject(key, probe, false, runner);
+    if ((await stat(probe)).size !== (await stat(path)).size || await checksum(probe) !== await checksum(path)) throw new Error(`R2 上传校验失败：${key}`);
+    await rm(probe, { force: true });
+  }
 }
 
 export function assertSameAssets(original, next) {
@@ -328,7 +356,7 @@ async function uploadGithubAsset(release, path) {
   if (!response.ok) throw new Error(`GitHub 安装包上传失败（${response.status}）`);
 }
 
-async function publish() {
+export async function publish({ runner = execute } = {}) {
   const build = await loadBuild();
   r2Configuration();
   await github("");
@@ -336,18 +364,22 @@ async function publish() {
   const directory = resolve("release-assets");
   const paths = (await readdir(directory)).filter((file) => /\.(zip|exe)$/.test(file)).map((file) => join(directory, file));
   const manifestPath = join(directory, "latest.json");
-  await execute(process.execPath, ["scripts/generate-update-manifest.mjs", "--version", build.version, "--tag", build.tag, "--download-base-url", `${process.env.CLOUDFLARE_R2_PUBLIC_BASE_URL.replace(/\/$/, "")}/releases/${build.tag}`, "--output", manifestPath, ...paths]);
+  const manifestScript = fileURLToPath(new URL("./generate-update-manifest.mjs", import.meta.url));
+  await execute(process.execPath, [manifestScript, "--version", build.version, "--tag", build.tag, "--download-base-url", `${process.env.CLOUDFLARE_R2_PUBLIC_BASE_URL.replace(/\/$/, "")}/releases/${build.tag}`, "--output", manifestPath, ...paths]);
   const manifest = { ...JSON.parse(await readFile(manifestPath, "utf8")), build_id: build.id, source_sha: build.source_sha, base_sha: build.base_sha, release_notes: notes.notes, notes_status: notes.notes_status };
   if (manifest.assets.some((asset) => asset.size <= 0)) throw new Error("安装包为空，不能创建发布资源");
   const oldManifestPath = join(directory, "previous.json");
-  if (await getObject(`releases/${build.tag}/latest.json`, oldManifestPath, true)) {
+  const hasExistingManifest = await getObject(`releases/${build.tag}/latest.json`, oldManifestPath, true, runner);
+  if (hasExistingManifest) {
     const old = JSON.parse(await readFile(oldManifestPath, "utf8"));
     if (old.build_id !== build.id || old.source_sha !== build.source_sha) throw new Error("已有 R2 版本不属于当前构建");
     assertSameAssets(old.assets, manifest.assets);
+    await rm(oldManifestPath, { force: true });
   }
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   const existingRelease = await ownedRelease(build);
-  if (!await ownedTag(build)) {
+  const hasExistingTag = Boolean(await ownedTag(build));
+  if (!hasExistingTag) {
     if (existingRelease) throw new Error("Release 存在但 tag 缺失，请人工核实");
     const tag = await github("git/tags", "POST", { tag: build.tag, message: `${build.tag}\n\n${marker(build)}`, object: build.source_sha, type: "commit" });
     await github("git/refs", "POST", { ref: `refs/tags/${build.tag}`, sha: tag.sha });
@@ -355,12 +387,23 @@ async function publish() {
   const identity = releaseIdentity(build.version);
   const release = existingRelease || await github("releases", "POST", { tag_name: identity.tag, target_commitish: build.source_sha, name: identity.name, draft: true, prerelease: identity.prerelease, body: `${notes.notes || "更新日志待管理员补充。"}\n\n${marker(build)}` });
   if (!release.draft) throw new Error("已有 Release 已公开，不能重新打包");
-  for (const path of paths) {
-    await uploadGithubAsset(release, path);
-    await putObject(`releases/${build.tag}/${basename(path)}`, path);
-  }
+  const shouldCheckExistingAssets = build.attempt > 1 || hasExistingManifest || Boolean(existingRelease) || hasExistingTag;
+  await Promise.all(paths.map(async (path) => {
+    await Promise.all([
+      uploadGithubAsset(release, path),
+      putObject(`releases/${build.tag}/${basename(path)}`, path, {
+        mutable: false,
+        checkExisting: shouldCheckExistingAssets,
+        verifyReadback: false,
+      }, runner),
+    ]);
+  }));
   await updateReleaseNotes(release, build, notes.notes);
-  await putObject(`releases/${build.tag}/latest.json`, manifestPath, true);
+  await putObject(`releases/${build.tag}/latest.json`, manifestPath, {
+    mutable: true,
+    checkExisting: hasExistingManifest,
+    verifyReadback: true,
+  }, runner);
   await callback("events", { status: "succeeded", notes_status: notes.notes_status });
 }
 

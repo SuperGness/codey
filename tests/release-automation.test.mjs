@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { analyzeNoteBatch, analyzeNotePatches, assertSameAssets, callback, collectNotePatches, generateNotes, identity, main, selectNoteCandidates, signature, updateReleaseNotes, validateBuild, validateNotes, validateRelease } from "../scripts/release-automation.mjs";
+import { analyzeNoteBatch, analyzeNotePatches, assertSameAssets, callback, collectNotePatches, generateNotes, identity, main, publish, resetWranglerCache, resolveWranglerCommand, selectNoteCandidates, signature, updateReleaseNotes, validateBuild, validateNotes, validateRelease } from "../scripts/release-automation.mjs";
 import { formatNoteResults } from "../scripts/release-note-batches.mjs";
 
 const environment = {
@@ -336,17 +336,17 @@ for (const [lineEndingName, lineEnding] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
     assert.doesNotMatch(notes, /RELEASE_ADMIN_CALLBACK_SECRET|CLOUDFLARE_API_TOKEN|contents: write/);
     assert.match(notes, /persist-credentials: false/);
     const managedPublish = workflow.slice(workflow.indexOf("\n  managed-publish:"), workflow.indexOf("\n  report-failure:"));
-    for (const gate of ["prepare", "notes", "macos", "macos-check", "windows", "windows-check"]) assert.match(managedPublish, new RegExp(`- ${gate}\\r?\\n`));
+    for (const gate of ["prepare", "frontend", "notes", "macos", "macos-check", "windows", "windows-check"]) assert.match(managedPublish, new RegExp(`- ${gate}\\r?\\n`));
     const failure = workflow.slice(workflow.indexOf("\n  report-failure:"));
     assert.match(failure, /needs.prepare.outputs.claimed == 'true'/);
     assert.match(failure, /needs.managed-publish.result != 'success'/);
-    for (const gate of ["prepare", "notes", "macos", "macos-check", "windows", "windows-check", "managed-publish"]) assert.match(failure, new RegExp(`- ${gate}\\r?\\n`));
+    for (const gate of ["prepare", "frontend", "notes", "macos", "macos-check", "windows", "windows-check", "managed-publish"]) assert.match(failure, new RegExp(`- ${gate}\\r?\\n`));
   });
 }
 
 test("managed platform builds inject claimed versions before Rust caches without changing legacy or artifact-reuse paths", async () => {
   const workflow = await readFile(new URL("../.github/workflows/build-desktop.yml", import.meta.url), "utf8");
-  for (const [job, nextJob] of [["macos", "macos-check"], ["windows", "windows-check"]]) {
+  for (const [job, nextJob] of [["macos", "macos-check"], ["macos-check", "windows"], ["windows", "windows-check"], ["windows-check", "publish"]]) {
     const steps = workflow.slice(workflow.indexOf(`\n  ${job}:`), workflow.indexOf(`\n  ${nextJob}:`));
     assert.match(steps, /if: inputs.artifact_run_id == ''/);
     assert.match(steps, /ref: \$\{\{ inputs.source_sha \|\| github.ref \}\}/);
@@ -355,6 +355,9 @@ test("managed platform builds inject claimed versions before Rust caches without
     assert.ok(steps.indexOf("prepare-version") < steps.indexOf("name: Cache Rust build"));
     assert.doesNotMatch(steps, /release\.mjs|generate-lockfile|git push|git commit/);
   }
+  const frontend = workflow.slice(workflow.indexOf("\n  frontend:"), workflow.indexOf("\n  notes:"));
+  assert.match(frontend, /if: inputs.artifact_run_id == ''/);
+  assert.match(frontend, /name: Inject validated platform release version\s+if: inputs.build_id != ''\s+run: node scripts\/release-automation.mjs prepare-version/);
   const notes = workflow.slice(workflow.indexOf("\n  notes:"), workflow.indexOf("\n  macos:"));
   assert.doesNotMatch(notes, /prepare-version/);
   const legacy = workflow.slice(workflow.indexOf("\n  publish:"), workflow.indexOf("\n  managed-publish:"));
@@ -711,5 +714,121 @@ test("managed publication fails immediately if R2 configuration is incomplete", 
     delete process.env.CLOUDFLARE_R2_BUCKET;
     globalThis.fetch = () => assert.fail("missing R2 must fail before remote writes");
     await assert.rejects(main("publish"), /缺少 CLOUDFLARE_R2_BUCKET/);
+  });
+});
+
+test("wrangler CLI resolution prefers preinstalled 4.112.0 binary and falls back to pinned npm exec", async () => {
+  resetWranglerCache();
+  let calls = 0;
+  const direct = await resolveWranglerCommand(async (cmd, args) => {
+    calls += 1;
+    assert.equal(cmd, "wrangler");
+    assert.deepEqual(args, ["--version"]);
+    return { stdout: " ⛅️ wrangler 4.112.0\n" };
+  });
+  assert.deepEqual(direct, { command: "wrangler", prefix: ["r2", "object"] });
+  await resolveWranglerCommand(async () => assert.fail("cached CLI should not re-probe"));
+  assert.equal(calls, 1);
+
+  resetWranglerCache();
+  const fallback = await resolveWranglerCommand(async () => {
+    throw new Error("ENOENT");
+  });
+  assert.deepEqual(fallback.command, "npm");
+  assert.equal(fallback.prefix[2], "--package=wrangler@4.112.0");
+  resetWranglerCache();
+});
+
+test("publish uploads desktop binaries without redundant binary readback while still verifying latest.json readback", async () => {
+  await sandboxBuild("build", async () => {
+    resetWranglerCache();
+    process.env.RELEASE_ATTEMPT = "1";
+    await writeFile(".release-build.json", JSON.stringify({ ...build, attempt: 1, release_id: undefined }));
+    await writeFile("release-notes.json", JSON.stringify({ notes: "**体验优化**\n- 加速产物上传", notes_status: "generated" }));
+    await mkdir("release-assets", { recursive: true });
+    await writeFile("release-assets/Codey-1.2.3-macos-arm64-unsigned.zip", "macos-binary-payload");
+    await writeFile("release-assets/Codey-1.2.3-windows-x64-setup.exe", "windows-binary-payload");
+    Object.assign(process.env, {
+      CLOUDFLARE_R2_BUCKET: "codey-updates",
+      CLOUDFLARE_R2_PUBLIC_BASE_URL: "https://r2.example.com",
+      CLOUDFLARE_ACCOUNT_ID: "test-account",
+      CLOUDFLARE_API_TOKEN: "test-token",
+    });
+
+    const r2Objects = new Map();
+    const r2Ops = [];
+    const runner = async (cmd, args) => {
+      if (cmd === "wrangler" && args[0] === "--version") return { stdout: "wrangler 4.112.0\n" };
+      const op = args[2];
+      const key = args[3];
+      const fileIdx = args.indexOf("--file");
+      const filePath = args[fileIdx + 1];
+      r2Ops.push(`${op}:${key}`);
+      if (op === "get") {
+        if (!r2Objects.has(key)) {
+          const err = new Error("NoSuchKey");
+          err.stderr = "The specified key does not exist";
+          throw err;
+        }
+        await writeFile(filePath, r2Objects.get(key));
+        return { stdout: "" };
+      }
+      if (op === "put") {
+        r2Objects.set(key, await readFile(filePath));
+        return { stdout: "" };
+      }
+      throw new Error(`unexpected runner call ${cmd} ${args.join(" ")}`);
+    };
+
+    const uploadedGithubAssets = [];
+    let succeededCallback = null;
+    globalThis.fetch = async (url, options = {}) => {
+      const parsed = new URL(url);
+      const method = options.method || "GET";
+      if (parsed.hostname === "admin.example.com" && parsed.pathname.endsWith("/events")) {
+        succeededCallback = JSON.parse(options.body);
+        return Response.json({ ok: true });
+      }
+      if (parsed.hostname === "uploads.github.com") {
+        uploadedGithubAssets.push(parsed.searchParams.get("name"));
+        return Response.json({ id: uploadedGithubAssets.length, name: parsed.searchParams.get("name") });
+      }
+      if (parsed.pathname === "/repos/owner/codey") return Response.json({ id: 1 });
+      if (parsed.pathname.endsWith("/releases/tags/v1.2.3")) return new Response(null, { status: 404 });
+      if (parsed.pathname === "/repos/owner/codey/releases" && method === "GET") return Response.json([]);
+      if (parsed.pathname.endsWith("/git/ref/tags/v1.2.3")) return new Response(null, { status: 404 });
+      if (parsed.pathname.endsWith("/git/tags") && method === "POST") return Response.json({ sha: "tag-obj-sha" });
+      if (parsed.pathname.endsWith("/git/refs") && method === "POST") return Response.json({ ref: "refs/tags/v1.2.3" });
+      if (parsed.pathname === "/repos/owner/codey/releases" && method === "POST") {
+        const body = JSON.parse(options.body);
+        return Response.json({
+          id: 10,
+          tag_name: body.tag_name,
+          target_commitish: body.target_commitish,
+          draft: true,
+          body: body.body,
+          upload_url: "https://uploads.github.com/repos/owner/codey/releases/10/assets{?name,label}",
+          assets: [],
+        });
+      }
+      if (parsed.pathname === "/repos/owner/codey/releases/10" && method === "PATCH") {
+        const body = JSON.parse(options.body);
+        return Response.json({ id: 10, tag_name: body.tag_name, target_commitish: build.source_sha, draft: true, body: body.body });
+      }
+      assert.fail(`unexpected fetch ${method} ${url}`);
+    };
+
+    await publish({ runner });
+    resetWranglerCache();
+
+    assert.deepEqual(uploadedGithubAssets.sort(), [
+      "Codey-1.2.3-macos-arm64-unsigned.zip",
+      "Codey-1.2.3-windows-x64-setup.exe",
+    ]);
+    // Attempt 1 checks previous latest.json once, puts 2 binaries without downloading them back, puts latest.json, and reads latest.json back once!
+    assert.equal(r2Ops.filter((item) => item.startsWith("get:") && (item.endsWith(".zip") || item.endsWith(".exe"))).length, 0);
+    assert.equal(r2Ops.filter((item) => item === "put:codey-updates/releases/v1.2.3/latest.json").length, 1);
+    assert.equal(r2Ops.filter((item) => item === "get:codey-updates/releases/v1.2.3/latest.json").length, 2);
+    assert.equal(succeededCallback?.status, "succeeded");
   });
 });

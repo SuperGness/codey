@@ -60,31 +60,37 @@ function workflowJob(name, until) {
 
 test("tag-triggered desktop releases independently enforce Rust quality gates", () => {
   assert.match(workflow, /^\s*RUSTFLAGS: -D warnings$/m);
+  const frontend = workflowJob("frontend", "notes");
   const macosCheck = workflowJob("macos-check", "windows");
   const windowsCheck = workflowJob("windows-check", "publish");
   const publish = workflow.slice(workflow.indexOf("\n  publish:"));
   assertRustQualityGates(macosCheck);
-  assert.match(macosCheck, /pnpm run check/);
-  assert.match(macosCheck, /pnpm run test:js/);
+  assert.match(frontend, /pnpm run check/);
+  assert.match(frontend, /pnpm run test:js/);
   assert.match(windowsCheck, /components: clippy/);
   assert.match(windowsCheck, /cargo test --workspace --locked/);
   assert.match(
     windowsCheck,
     /cargo clippy --workspace --all-targets --locked -- -D warnings/,
   );
+  assert.match(publish, /- frontend/);
   assert.match(publish, /- macos-check/);
   assert.match(publish, /- windows-check/);
   assert.doesNotMatch(workflowJob("windows", "windows-check"), /cargo test --workspace/);
 });
 
 test("desktop release jobs reuse the prebuilt frontend overlay", () => {
+  const frontend = workflowJob("frontend", "notes");
+  assert.match(frontend, /- name: Build embedded frontend assets\s+run: pnpm run vite:build/);
+  assert.match(frontend, /name: frontend-overlay-assets\s+path: dist-overlay/);
   for (const job of [
     workflowJob("macos", "macos-check"),
     workflowJob("macos-check", "windows"),
     workflowJob("windows", "windows-check"),
     workflowJob("windows-check", "publish"),
   ]) {
-    assert.match(job, /- name: Build embedded frontend assets\s+run: pnpm run vite:build/);
+    assert.match(job, /- name: Download prebuilt frontend overlay[\s\S]*?name: frontend-overlay-assets\s+path: dist-overlay/);
+    assert.doesNotMatch(job, /pnpm run vite:build/);
     assert.match(job, /CODEY_SKIP_OVERLAY_BUILD: "1"/);
   }
   for (const job of [
@@ -151,7 +157,7 @@ test("desktop packages include FastCtx license and notice files", () => {
 test("Windows release publishes the installer without a portable zip", () => {
   const nsisInstallStep = workflowStep(
     "- name: Install NSIS",
-    "- name: Install frontend dependencies",
+    "- name: Download prebuilt frontend overlay",
   );
   const windowsPackageStep = workflowStep(
     "- name: Build Windows packages",
