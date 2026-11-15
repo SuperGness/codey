@@ -473,6 +473,10 @@ fn enable_windows_packaged_environment(
     let executable = std::env::current_exe().context("定位 Codey 包启动恢复助手失败")?;
     let feedback_path =
         std::fs::canonicalize(&feedback.path).context("定位 Windows Store 启动助手通知文件失败")?;
+    // canonicalize 在 Windows 上返回 \\?\ 前缀路径，而 EnableDebugging 会以
+    // E_INVALIDARG 拒绝含该前缀的调试器命令，因此命令行一律使用 DOS 路径。
+    let executable = windows_command_line_path(&executable);
+    let feedback_path = windows_command_line_path(&feedback_path);
     // Windows 提供短路径时优先使用，以缩短调试器命令；没有更短别名则保留原路径。
     let executable = windows_short_path(&executable);
     let feedback_path = windows_short_parent_path(&feedback_path);
@@ -498,6 +502,38 @@ fn enable_windows_packaged_environment(
         })
     })
     .context("为 Windows Store Codex 安装一次性 CLI 兼容环境失败")
+}
+
+/// Removes the verbatim (`\\?\`) prefix that `std::fs::canonicalize` returns on
+/// Windows. `IPackageDebugSettings::EnableDebugging` rejects a debugger command
+/// line containing such a path with `E_INVALIDARG` (0x80070057), and
+/// `GetShortPathNameW` cannot shorten it either. Device paths without a DOS
+/// form are kept unchanged.
+#[cfg(windows)]
+fn windows_command_line_path(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let root = match prefix.kind() {
+        Prefix::VerbatimDisk(disk) => format!("{}:\\", disk as char),
+        Prefix::VerbatimUNC(server, share) => format!(
+            "\\\\{}\\{}",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        ),
+        _ => return path.to_path_buf(),
+    };
+    let mut stripped = PathBuf::from(root);
+    for component in components {
+        if let Component::RootDir = component {
+            continue;
+        }
+        stripped.push(component.as_os_str());
+    }
+    stripped
 }
 
 #[cfg(windows)]
@@ -956,6 +992,46 @@ mod tests {
             command,
             r#""C:\Program Files\Codey\codey.exe" --codey-resume-packaged-app --launch-id 37f4f759-55f1-4b66-a45d-160644fe20d4 --launch-state "C:\Users\User\AppData\Local\Codey\resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json""#
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_paths_are_rewritten_to_their_dos_form() {
+        assert_eq!(
+            windows_command_line_path(Path::new(
+                r"\\?\C:\Users\User\AppData\Local\Codey\resume-37f4f759.json"
+            )),
+            Path::new(r"C:\Users\User\AppData\Local\Codey\resume-37f4f759.json")
+        );
+        assert_eq!(
+            windows_command_line_path(Path::new(r"\\?\UNC\server\share\dir\resume.json")),
+            Path::new(r"\\server\share\dir\resume.json")
+        );
+        // DOS paths stay untouched, and device paths have no DOS form to fall back to.
+        for path in [
+            Path::new(r"C:\Users\User\resume.json"),
+            Path::new(r"\\?\Volume{8f8b1f3f-0000-0000-0000-100000000000}\resume.json"),
+        ] {
+            assert_eq!(windows_command_line_path(path), path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn debugger_command_never_carries_a_verbatim_prefix() {
+        let id = uuid::Uuid::parse_str("37f4f759-55f1-4b66-a45d-160644fe20d4").unwrap();
+        let command = build_debugger_command(
+            Path::new(r"C:\Program Files\Codey\codey.exe"),
+            &windows_command_line_path(Path::new(
+                r"\\?\C:\Users\User\AppData\Local\Codey\windows-package-launch\resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json",
+            )),
+            id,
+        );
+        let command = String::from_utf16(&command[..command.len() - 1]).unwrap();
+        assert!(!command.contains(r"\\?\"));
+        assert!(command.ends_with(
+            r#"--launch-state "C:\Users\User\AppData\Local\Codey\windows-package-launch\resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json""#
+        ));
     }
 
     #[test]
