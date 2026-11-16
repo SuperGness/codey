@@ -471,15 +471,11 @@ fn enable_windows_packaged_environment(
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let executable = std::env::current_exe().context("定位 Codey 包启动恢复助手失败")?;
+    let executable = prepare_windows_command_line_path(&executable, windows_short_path)
+        .context("定位 Codey 包启动恢复助手失败")?;
     let feedback_path =
-        std::fs::canonicalize(&feedback.path).context("定位 Windows Store 启动助手通知文件失败")?;
-    // canonicalize 在 Windows 上返回 \\?\ 前缀路径，而 EnableDebugging 会以
-    // E_INVALIDARG 拒绝含该前缀的调试器命令，因此命令行一律使用 DOS 路径。
-    let executable = windows_command_line_path(&executable);
-    let feedback_path = windows_command_line_path(&feedback_path);
-    // Windows 提供短路径时优先使用，以缩短调试器命令；没有更短别名则保留原路径。
-    let executable = windows_short_path(&executable);
-    let feedback_path = windows_short_parent_path(&feedback_path);
+        prepare_windows_command_line_path(&feedback.path, windows_short_parent_path)
+            .context("定位 Windows Store 启动助手通知文件失败")?;
     let debugger_command = build_debugger_command(&executable, &feedback_path, feedback.id);
     let environment = windows_environment_block(environment)?;
 
@@ -504,13 +500,29 @@ fn enable_windows_packaged_environment(
     .context("为 Windows Store Codex 安装一次性 CLI 兼容环境失败")
 }
 
-/// Removes the verbatim (`\\?\`) prefix that `std::fs::canonicalize` returns on
-/// Windows. `IPackageDebugSettings::EnableDebugging` rejects a debugger command
-/// line containing such a path with `E_INVALIDARG` (0x80070057), and
-/// `GetShortPathNameW` cannot shorten it either. Device paths without a DOS
-/// form are kept unchanged.
+/// `EnableDebugging` rejects verbatim paths, so prepare a DOS or UNC path after
+/// retrieving any short alias from the original extended path. Device paths
+/// without a DOS form are kept unchanged.
+#[cfg(windows)]
+fn prepare_windows_command_line_path(
+    path: &Path,
+    shorten: impl FnOnce(&Path) -> PathBuf,
+) -> Result<PathBuf> {
+    let expected = std::fs::canonicalize(path)?;
+    let converted = windows_command_line_path(&shorten(&expected));
+    let actual = std::fs::canonicalize(&converted)
+        .with_context(|| format!("短路径转换后的路径无法访问：转换路径={converted:?}"))?;
+    anyhow::ensure!(
+        actual == expected,
+        "Windows 短路径转换后解析到不同的文件：原始路径={expected:?}，转换路径={converted:?}，转换解析={actual:?}"
+    );
+    Ok(converted)
+}
+
+/// Removes the verbatim (`\\?\`) prefix from disk and UNC paths.
 #[cfg(windows)]
 fn windows_command_line_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
     use std::path::{Component, Prefix};
 
     let mut components = path.components();
@@ -518,12 +530,14 @@ fn windows_command_line_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     let root = match prefix.kind() {
-        Prefix::VerbatimDisk(disk) => format!("{}:\\", disk as char),
-        Prefix::VerbatimUNC(server, share) => format!(
-            "\\\\{}\\{}",
-            server.to_string_lossy(),
-            share.to_string_lossy()
-        ),
+        Prefix::VerbatimDisk(disk) => OsString::from(format!("{}:\\", disk as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut root = OsString::from(r"\\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root
+        }
         _ => return path.to_path_buf(),
     };
     let mut stripped = PathBuf::from(root);
@@ -557,12 +571,7 @@ fn windows_short_path(path: &Path) -> PathBuf {
     if length == 0 {
         return path.to_path_buf();
     }
-    let short = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
-    if short.as_os_str().encode_wide().count() < path.as_os_str().encode_wide().count() {
-        short
-    } else {
-        path.to_path_buf()
-    }
+    PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]))
 }
 
 #[cfg(windows)]
@@ -1032,6 +1041,89 @@ mod tests {
         assert!(command.ends_with(
             r#"--launch-state "C:\Users\User\AppData\Local\Codey\windows-package-launch\resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json""#
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_paths_work_without_short_aliases_and_keep_feedback_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume-37f4f759.json");
+        std::fs::write(&path, b"pending").unwrap();
+        let expected = std::fs::canonicalize(&path).unwrap();
+        for prepare in [
+            Path::to_path_buf as fn(&Path) -> PathBuf,
+            windows_short_parent_path,
+        ] {
+            let prepared = prepare_windows_command_line_path(&path, prepare).unwrap();
+            assert_eq!(std::fs::canonicalize(&prepared).unwrap(), expected);
+            assert_eq!(prepared.file_name(), path.file_name());
+            assert!(!prepared.to_string_lossy().starts_with(r"\\?\"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_paths_reject_normalization_to_another_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let special = root.join("state.");
+        let ordinary = root.join("state");
+        std::fs::create_dir(&special).unwrap();
+        std::fs::create_dir(&ordinary).unwrap();
+        let special_file = special.join("resume.json");
+        let ordinary_file = ordinary.join("resume.json");
+        std::fs::write(&special_file, b"special").unwrap();
+        std::fs::write(&ordinary_file, b"ordinary").unwrap();
+
+        // 模拟没有短别名，转换不能悄悄改为读取 state 下的另一份文件。
+        let error =
+            prepare_windows_command_line_path(&special_file, Path::to_path_buf).unwrap_err();
+        assert!(error.to_string().contains("解析到不同的文件"));
+        assert!(error.to_string().contains("state."));
+        assert_eq!(std::fs::read(&special_file).unwrap(), b"special");
+        assert_eq!(std::fs::read(&ordinary_file).unwrap(), b"ordinary");
+
+        // 真实短路径可用时必须成功，不要求测试磁盘启用 8.3 别名。
+        let shortened = windows_short_parent_path(&special_file);
+        let candidate = windows_command_line_path(&shortened);
+        let has_equivalent_alias = std::fs::canonicalize(&candidate)
+            .is_ok_and(|actual| actual == std::fs::canonicalize(&special_file).unwrap());
+        let prepared = prepare_windows_command_line_path(&special_file, windows_short_parent_path);
+        assert_eq!(prepared.is_ok(), has_equivalent_alias);
+        if let Ok(prepared) = prepared {
+            assert_eq!(prepared.file_name(), special_file.file_name());
+            assert_eq!(std::fs::read(prepared).unwrap(), b"special");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_paths_reject_inaccessible_converted_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume.json");
+        std::fs::write(&path, b"pending").unwrap();
+        let missing = directory.path().join("missing.json");
+        let error = prepare_windows_command_line_path(&path, |_| missing.clone()).unwrap_err();
+        assert!(error.to_string().contains("转换后的路径无法访问"));
+        assert!(error.to_string().contains("missing.json"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_conversion_preserves_non_unicode_share_names() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let mut source = r"\\?\UNC\server\share".encode_utf16().collect::<Vec<_>>();
+        source.push(0xd800);
+        source.extend(r"\resume.json".encode_utf16());
+        let mut expected = r"\\server\share".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        expected.extend(r"\resume.json".encode_utf16());
+        assert_eq!(
+            windows_command_line_path(Path::new(&OsString::from_wide(&source))),
+            PathBuf::from(OsString::from_wide(&expected)),
+        );
     }
 
     #[test]
