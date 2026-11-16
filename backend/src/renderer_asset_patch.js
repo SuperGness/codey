@@ -79,6 +79,7 @@
     "isCustomModelProvider",
     "getHasInProgressLocalConversation",
     "electron-app-state-snapshot-request",
+    "submitDisabledReasons:",
   ];
   const rendererGateFailureExcerpts = (source) => {
     const excerpts = [];
@@ -403,7 +404,7 @@
       || source.includes("CodexComposerAdapter"))
       && source.includes("let{agentMode:")
       && source.includes("resolvedHostId:")
-      && source.includes("submitDisabled:")
+      && (source.includes("submitDisabled:") || source.includes("submitDisabledReasons:"))
       && !source.includes("/*codey-local-quota-gate*/")) {
       // 只改变 Codex 本机发送按钮的额度条件。保留共享额度状态、官方警告
       // 和其他禁用条件；每次渲染读取当前模型，避免模型切换后复用旧判断。
@@ -428,22 +429,24 @@
             pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\("local"===(?<host>[$A-Z_a-z][$\w]*)&&[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>;[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
             replacement: replaceQuota,
           },
+          // Codex 26.1111 起把禁用条件拆成带原因标识的数组拼入 submitDisabledReasons。
+          {
+            pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\("local"===(?<host>[$A-Z_a-z][$\w]*)&&[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let [^;]{0,1024}?,[$A-Z_a-z][$\w]*=\k<quota>&&[`"]usage-limit[`"];[\s\S]{0,6000}?submitDisabledReasons:[$A-Z_a-z][$\w]*,)/g,
+            replacement: replaceQuota,
+          },
         ],
         null,
         "local third-party composer quota",
       );
       // Codex 26.1021 起 Team 等工作空间额度耗尽时另有按主机的硬阻断，
-      // 在禁用表达式中紧挨额度条件；旧版没有该条件时保持不变。
+      // 在禁用表达式或原因列表中紧挨额度条件；旧版没有该条件时保持不变。
       if (quotaGate != null && patched.includes("/*codey-local-quota-gate*/")) {
         const { disabled, host, mode, quota } = quotaGate;
         const name = value => value.replace(/\$/g, "\\$");
         const ident = "[$A-Z_a-z][$\\w]*";
-        const disabledMatches = [...patched.matchAll(new RegExp(`let ${name(disabled)}=[^;]{0,512}?\\|\\|(${ident})\\|\\|${name(quota)}([,;])`, "g"))];
-        const hard = disabledMatches.length === 1 ? disabledMatches[0][1] : null;
-        const terminator = disabledMatches.length === 1 ? disabledMatches[0][2] : null;
-        const hardDefinitions = hard == null
-          ? []
-          : [
+        const hasUniqueHostHardDefinition = (hard) => {
+          if (hard == null || hard === host) return false;
+          const hardDefinitions = [
             ...patched.matchAll(
               new RegExp(
                 `(?:^|[,;{]|(?:const|let|var) )${name(hard)}=(?:${ident}\\(${ident},${name(host)}\\)|\\(0,${ident}\\.${ident}\\)\\(${ident}\\.${ident},${name(host)}\\))`,
@@ -451,13 +454,29 @@
               ),
             ),
           ];
-        if (hard != null
-          && hard !== host
-          && hardDefinitions.length === 1) {
-          const [{ 0: matched, index }] = disabledMatches;
-          const term = `||${hard}||${quota}${terminator}`;
-          const offset = index + matched.length - term.length;
-          patched = `${patched.slice(0, offset)}||${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}||${quota}${terminator}${patched.slice(offset + term.length)}`;
+          return hardDefinitions.length === 1;
+        };
+        if (disabled != null) {
+          const disabledMatches = [...patched.matchAll(new RegExp(`let ${name(disabled)}=[^;]{0,512}?\\|\\|(${ident})\\|\\|${name(quota)}([,;])`, "g"))];
+          const hard = disabledMatches.length === 1 ? disabledMatches[0][1] : null;
+          const terminator = disabledMatches.length === 1 ? disabledMatches[0][2] : null;
+          if (hasUniqueHostHardDefinition(hard)) {
+            const [{ 0: matched, index }] = disabledMatches;
+            const term = `||${hard}||${quota}${terminator}`;
+            const offset = index + matched.length - term.length;
+            patched = `${patched.slice(0, offset)}||${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}||${quota}${terminator}${patched.slice(offset + term.length)}`;
+          }
+        } else {
+          const reasonMatches = [
+            ...patched.matchAll(
+              new RegExp(`(,${ident}=)(${ident})(&&[\\x60"]reserve-limit[\\x60"],${ident}=${name(quota)}&&[\\x60"]usage-limit[\\x60"];)`, "g"),
+            ),
+          ];
+          const hard = reasonMatches.length === 1 ? reasonMatches[0][2] : null;
+          if (hasUniqueHostHardDefinition(hard)) {
+            const [{ 0: matched, 1: prefix, 3: suffix, index }] = reasonMatches;
+            patched = `${patched.slice(0, index)}${prefix}${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}${suffix}${patched.slice(index + matched.length)}`;
+          }
         }
       }
     }

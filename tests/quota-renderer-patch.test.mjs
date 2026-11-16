@@ -251,3 +251,44 @@ test("numeric renderer URLs require a bounded hashed chunk name", () => {
     assert.equal(h.patch(numericChunkFixture, rejectedUrl), numericChunkFixture);
   }
 });
+
+test("Codex 26.1111 submitDisabledReasons composer chunk gates usage-limit and reserve-limit", () => {
+  const submitReasonsFixture = `function render(model,host,quotaBlocked,otherDisabled,hardBlocked=false){
+const n0={settings:{model}},nq=host,A={U:quotaBlocked},i={Ul:value=>value,_U:()=>hardBlocked},et={r9:()=>0},x={qz:"reserve-model",F9:"reserve-atom"},tq={model};
+const nK=(0,i._U)(x.F9,nq),tm=otherDisabled;
+let{agentMode:os}={},ou=n0.settings.model!==tq.model&&(n0.settings.model===x.qz?n0.settings.model!==tq.model:n0.settings.model!==tq.model),op=(0,et.r9)(),oh=(0,i.Ul)("local"===nq&&A.U),nW=false;
+const submission={activeCollaborationMode:n0,agentMode:os,resolvedHostId:nq,useAsbDirect:false};
+let oS=void 0!==tm&&tm&&"caller-disabled",oN=nW&&"provider-blocked",oL=nK&&"reserve-limit",oO=oh&&"usage-limit";
+const eY=[oS,oN,oL,oO].filter(Boolean);
+let oK=eY.join(",");
+const view={submitDisabled:nW,submitDisabledReasons:oK,onSubmitLocal:null};
+return view.submitDisabledReasons;
+}
+// codexComposerAdapter.CodexComposerAdapter.interruptThreadError
+`;
+  const h = harness({ allowsLocalSend: ({ hostId, model }) => hostId === "local" && model === "third-party" });
+  const chunkUrl = "app://-/assets/async/283497.67bf9fca70.js";
+  const patched = h.patch(submitReasonsFixture, chunkUrl);
+  const hardMarker = "/*codey-local-hard-block-gate*/";
+  assert.equal(patched.split(marker).length - 1, 1);
+  assert.equal(patched.split(hardMarker).length - 1, 1);
+  assert.equal(h.patch(patched, chunkUrl), patched);
+  vm.runInContext(patched, h.context);
+  const render = h.context.render;
+  assert.equal(render("third-party", "local", true, false, false), "");
+  assert.equal(render("third-party", "local", false, false, true), "");
+  assert.equal(render("third-party", "local", true, false, true), "");
+  assert.equal(render("third-party", "local", true, true, true), "caller-disabled");
+  assert.equal(render("gpt-official", "local", true, false, false), "usage-limit");
+  assert.equal(render("gpt-official", "local", false, false, true), "reserve-limit");
+  assert.equal(render("gpt-official", "local", true, false, true), "reserve-limit,usage-limit");
+  assert.equal(render("third-party", "remote", false, false, true), "reserve-limit");
+  assert.equal(render("third-party", "remote", true, false, false), "");
+  assert.deepEqual(h.failures, []);
+
+  for (const unavailable of [undefined, { allowsLocalSend() { throw Error("unavailable"); } }]) {
+    const fallback = harness(unavailable);
+    vm.runInContext(fallback.patch(submitReasonsFixture, chunkUrl), fallback.context);
+    assert.equal(fallback.context.render("third-party", "local", true, false, true), "reserve-limit,usage-limit");
+  }
+});
