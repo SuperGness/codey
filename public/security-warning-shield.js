@@ -6,12 +6,19 @@
   const injectionStatusId = "security-warning-shield";
   const injectionStatusChangedEvent = "codey-injection-status-changed";
   const dismissedAttribute = "data-codey-security-warning-dismissed";
-  const actionPatterns = [
+  const sessionActionPatterns = [
     /^hide from this session$/i,
     /^dismiss full access warning for this session$/i,
-    /^don['’]t show again$/i,
+    /^在(?:此|本次?)会话中(?:关闭|隐藏)完(?:全|整)访问权限警告$/,
     /^(?:在|于)?本次会话(?:中)?(?:隐藏|不再显示)$/,
+  ];
+  const persistentActionPatterns = [
+    /^don['’]t show again$/i,
     /^(?:隐藏|不再显示)(?:本次会话)?$/,
+  ];
+  const actionPatterns = [
+    ...sessionActionPatterns,
+    ...persistentActionPatterns,
   ];
   const titlePatterns = [
     /full access is on/i,
@@ -220,6 +227,28 @@
   let scheduleScan = () => {};
   let addPendingRoot = () => {};
 
+  const findSessionControlInContainer = (container) => {
+    const stack = [...(container?.children || [])];
+    let visited = 0;
+    while (stack.length && visited < 32) {
+      const element = stack.shift();
+      if (!(element instanceof Element)) continue;
+      visited += 1;
+      if (
+        !element.disabled
+        && element.getAttribute?.(dismissedAttribute) !== "true"
+        && element.matches?.("button, [role=button]")
+        && normalizedControlLabels(element).some((label) => matchesAny(label, sessionActionPatterns))
+      ) {
+        return element;
+      }
+      if (element.children?.length) {
+        stack.push(...element.children);
+      }
+    }
+    return null;
+  };
+
   const dismissWarnings = (root = document, controls = null) => {
     if (!enabled) return 0;
     const traversal = controls
@@ -235,13 +264,18 @@
       const isUltraAction = labels.some((label) => matchesAny(label, ultraActionPatterns));
       if (!isGeneralAction && !isUltraAction) continue;
       const container = warningContainerFor(control);
-      if (!container) continue;
+      if (!container || container.getAttribute?.(dismissedAttribute) === "true") continue;
       const isUltraConfirmation = matchesAny(normalizedText(container), ultraTitlePatterns);
       if (isUltraConfirmation && !isUltraAction) continue;
       if (!isUltraConfirmation && !isGeneralAction) continue;
+      const targetControl = !isUltraConfirmation
+        && !labels.some((label) => matchesAny(label, sessionActionPatterns))
+        ? (findSessionControlInContainer(container) || control)
+        : control;
       control.setAttribute?.(dismissedAttribute, "true");
+      targetControl.setAttribute?.(dismissedAttribute, "true");
       container.setAttribute?.(dismissedAttribute, "true");
-      control.click?.();
+      targetControl.click?.();
       if (isUltraConfirmation) container.remove?.();
       if (container.isConnected !== false) {
         container.style?.setProperty?.("display", "none", "important");

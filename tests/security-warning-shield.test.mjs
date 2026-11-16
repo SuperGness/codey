@@ -704,3 +704,37 @@ test("config changes publish the shield's current injection status", async () =>
     { id: "security-warning-shield", status: "effective" },
   );
 });
+
+test("enabled shield prefers session-only dismiss on dual-action Chinese and English callouts", async () => {
+  for (const { title, sessionLabel, persistentLabel } of [
+    {
+      title: "完整访问权限已开启 ChatGPT 可以在未经你批准的情况下编辑任何文件，并通过互联网访问权限运行命令。这会增加数据丢失、信息暴露和意外更改的风险。",
+      sessionLabel: "在此会话中关闭完整访问权限警告",
+      persistentLabel: "不再显示",
+    },
+    {
+      title: "Full access is on ChatGPT can edit any file and run commands with internet access without your approval. This increases the risk of data loss, exposed information, and unexpected changes.",
+      sessionLabel: "Dismiss Full access warning for this session",
+      persistentLabel: "Don’t show again",
+    },
+  ]) {
+    const runtime = createRuntime({ hideFullAccessWarning: true });
+    const warning = runtime.body.appendChild(new FakeElement("aside", title));
+    warning.setAttribute("role", "status");
+    const thirtyDayButton = warning.appendChild(new FakeElement("button", persistentLabel));
+    const sessionButton = warning.appendChild(new FakeElement("button", ""));
+    sessionButton.setAttribute("aria-label", sessionLabel);
+    warning.querySelectorAllCalls = 0;
+    thirtyDayButton.querySelectorAllCalls = 0;
+    sessionButton.querySelectorAllCalls = 0;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(sessionButton.clicks, 1);
+    assert.equal(thirtyDayButton.clicks, 0);
+    assert.equal(warning.style.display, "none:important");
+    assert.equal(warning.querySelectorAllCalls, 0);
+    assert.equal(runtime.window.__codeySecurityWarningShield.dismissWarnings(), 0);
+    assert.equal(sessionButton.clicks, 1);
+    assert.equal(thirtyDayButton.clicks, 0);
+  }
+});
