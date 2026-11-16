@@ -80,6 +80,7 @@
     "getHasInProgressLocalConversation",
     "electron-app-state-snapshot-request",
     "submitDisabledReasons:",
+    "checkout-webview-presentation-changed",
   ];
   const rendererGateFailureExcerpts = (source) => {
     const excerpts = [];
@@ -335,6 +336,7 @@
     "shouldPrewarmAvatarOverlay:",
     "forcePricingRefreshInBackground",
     "use_embedded_credit_checkout",
+    "checkout-webview-presentation-changed",
     "Desktop host did not provide its AppServerManager service",
     ".sendFollowUpMessage(",
     ".startTurn(",
@@ -615,6 +617,7 @@
     if (
       source.includes("isPrewarm:")
       && /[`"]use_embedded_credit_checkout[`"]/.test(source)
+      && !source.includes("checkout-webview-presentation-changed")
       && !/&&\(!0\|\|[^;]{0,600}?[`"]use_embedded_credit_checkout[`"]/.test(source)
     ) {
       // 额度购买页同理：未展示时不再挂载隐藏的预热 webview，展示时照常加载。
@@ -623,6 +626,26 @@
         /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\([`"]use_embedded_credit_checkout[`"],!1\)\)\)return null;)/g,
         (_match, presented) => `,!${presented}&&(!0||`,
         "credit checkout webview prewarm",
+      );
+    }
+    if (
+      source.includes("checkout-webview-presentation-changed")
+      && source.includes("isPrewarm:")
+      && !source.includes("/*codey-personal-checkout-prewarm*/")
+    ) {
+      // Codex 26.1111 起个人版定价与额度充值共用 CheckoutPersonalWebviewHost：
+      // 仅在存在实际路由参数时启用宿主，并跳过伴随挂载的隐藏预热 webview。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /,([$A-Z_a-z][$\w]*)=null!=([$A-Z_a-z][$\w]*)\|\|[$A-Z_a-z][$\w]*\|\|[$A-Z_a-z][$\w]*;(?=return\s*[^;]{0,300}?\{chatGptOrigin:[$A-Z_a-z][$\w]*,enabled:\1,search:\2\})/g,
+        (_match, enabled, search) => `,${enabled}=/*codey-personal-checkout-prewarm*/null!=${search};`,
+        "personal checkout webview prewarm",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b[$A-Z_a-z][$\w]*=)\(0,[$A-Z_a-z][$\w]*\.jsx\)\([`"]div[`"],\{[`"]aria-hidden[`"]:!0,inert:!0,className:[`"]pointer-events-none invisible fixed inset-0[`"],children:\(0,[$A-Z_a-z][$\w]*\.jsx\)\([$A-Z_a-z][$\w]*,\{isPrewarm:!0,partition:[$A-Z_a-z][$\w]*,search:[$A-Z_a-z][$\w]*\}\)\}\)/g,
+        (_match, assign) => `${assign}null`,
+        "personal checkout prewarm element",
       );
     }
     if (

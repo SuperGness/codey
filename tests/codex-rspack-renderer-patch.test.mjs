@@ -249,3 +249,29 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
   );
   assert.deepEqual(logs, []);
 });
+
+test("rspack CheckoutPersonalWebviewHost skips background prewarm and renders only presented checkout", async () => {
+  const { logs, patch } = await installPatch();
+  const source = [
+    'const r={c:(n)=>Array(n).fill(Symbol.for("react.memo_cache_sentinel"))},a={Fragment:"Fragment",jsx:(type,props,key)=>({type,props,key}),jsxs:(type,props,key)=>({type,props,key})},v={O1:{dispatchMessage(){}}};',
+    'function M(searchArg,useCheckout,useCredit){let s=(0,r.c)(10),W=searchArg,N=useCheckout,z=useCredit,v="https://chatgpt.com",R="u1",k="a1";let F=JSON.stringify([R,k,v]),G=null!=W||N||z;return(0,a.jsx)(A,{chatGptOrigin:v,enabled:G,search:W},F)}',
+    'function A(e){let u=(0,r.c)(15),{chatGptOrigin:c,enabled:d,search:h}=e,m="part",f="prewarm=1";if(v.O1.dispatchMessage("checkout-webview-presentation-changed",{partition:m,url:h}),!d)return null;let i=(0,a.jsx)("div",{"aria-hidden":!0,inert:!0,className:"pointer-events-none invisible fixed inset-0",children:(0,a.jsx)(W,{isPrewarm:!0,partition:m,search:f})}),l=null==h?null:(0,a.jsx)("div",{className:"fixed inset-0 z-30",children:(0,a.jsx)(W,{partition:m,search:h},h)});return(0,a.jsxs)(a.Fragment,{children:[i,l]})}',
+    'function W(props){return props}',
+  ].join("");
+  const url = "app://-/assets/async/162421.5b98cfa6cf.js";
+  const patched = patch(source, url);
+  assert.ok(patched, "CheckoutPersonalWebviewHost chunk should be patched");
+  assert.ok(patched.includes("/*codey-personal-checkout-prewarm*/"));
+  assert.equal(patch(patched, url), null, "the patch is idempotent");
+  const { M, A } = Function(`${patched};return{M,A}`)();
+  const hiddenHost = M(null, true, true);
+  assert.equal(hiddenHost.props.enabled, false, "embedded checkout experiments no longer enable background prewarm");
+  assert.equal(A(hiddenHost.props), null, "disabled host mounts nothing");
+
+  const activeHost = M("?accountId=personal&url=https%3A%2F%2Fchatgpt.com%2F%23pricing", true, true);
+  assert.equal(activeHost.props.enabled, true, "explicit checkout navigation still enables the host");
+  const rendered = A(activeHost.props);
+  assert.equal(rendered.props.children[0], null, "hidden isPrewarm webview wrapper is skipped");
+  assert.equal(rendered.props.children[1].props.children.props.search, activeHost.props.search, "presented checkout webview still renders");
+  assert.deepEqual(logs, []);
+});
