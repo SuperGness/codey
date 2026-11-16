@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "84";
+  const patchVersion = "85";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -1194,6 +1194,185 @@
 
   const statsigClients = window.__codeySharedRuntime.statsigClients;
 
+  const offlineStatsigMarker = "codey_offline_statsig";
+  const forkPlacementGateKeys = new Set([
+    "sidebarCustomSectionsEnabled",
+    "useAppServerCustomSections",
+  ]);
+  const forkFallbackPollMs = 1_500;
+  const maxForkFallbackPolls = 24;
+  let forkFallbackTimer = 0;
+  let forkFallbackPolls = 0;
+  const forkCapabilitiesRestorers = [];
+
+  const statsigContextWithoutAccount = (client) => {
+    if (!client || typeof client !== "object" || typeof client.getContext !== "function") {
+      return null;
+    }
+    try {
+      const context = client.getContext();
+      if (!context || typeof context !== "object") return null;
+      const user = context.user;
+      if (!user || typeof user !== "object") return null;
+      if ((user.customIDs?.account_id ?? null) != null) return null;
+      return context;
+    } catch {
+      return null;
+    }
+  };
+
+  const isPendingAnonymousStatsigClient = (client) => (
+    (client?.loadingStatus === "Loading" || client?.loadingStatus === "Uninitialized")
+    && statsigContextWithoutAccount(client) != null
+  );
+
+  // When Codex launches offline without a ChatGPT login, Statsig becomes Ready
+  // with `values == null` (NoValues) and never retries in that session, which
+  // prevents publishing execution assignments and blocks fork with
+  // `execution-config-loading`. Seed minimal empty gates in memory only.
+  const seedOfflineAnonymousStatsigClient = (client) => {
+    if (!client || client.loadingStatus !== "Ready") return false;
+    const context = statsigContextWithoutAccount(client);
+    if (!context || context.values != null) return false;
+    const adapter = client.dataAdapter;
+    if (typeof adapter?.setData !== "function" || typeof client.updateUserSync !== "function") {
+      return false;
+    }
+    if (catalog.loaded) patchStatsigClient(client);
+    const values = {
+      feature_gates: {},
+      dynamic_configs: {},
+      layer_configs: {},
+      param_stores: {},
+      time: Date.now(),
+      has_updates: true,
+      hash_used: "none",
+      user: context.user,
+      [offlineStatsigMarker]: true,
+    };
+    try {
+      adapter.setData(JSON.stringify(values));
+      client.updateUserSync(context.user);
+    } catch {
+      return false;
+    }
+    if (catalog.loaded) patchStatsigClient(client);
+    return true;
+  };
+
+  const forkPlacementSettingsProxy = (settings) => new Proxy(settings, {
+    get(target, property) {
+      if (property === "read") {
+        return (key, ...rest) => {
+          const value = target.read(key, ...rest);
+          return value === undefined && forkPlacementGateKeys.has(key)
+            ? false
+            : value;
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  const forkCapabilitiesFallbackActive = (manager) => {
+    if (disposed) return false;
+    try {
+      if (typeof manager?.settings?.read !== "function") return false;
+      return manager.runtime?.accountId?.() == null;
+    } catch {
+      return false;
+    }
+  };
+
+  const installForkCapabilitiesOnPrototype = (prototype) => {
+    if (!prototype || typeof prototype !== "object") return false;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "getForkCapabilities");
+    const original = descriptor?.value;
+    if (typeof original !== "function") return false;
+    if (original.__codeyForkReadinessPatchVersion === patchVersion) return true;
+    if (descriptor.writable === false && descriptor.configurable === false) return false;
+    const patched = function getForkCapabilities(...args) {
+      if (!forkCapabilitiesFallbackActive(this)) return original.apply(this, args);
+      const receiver = Object.create(this, {
+        settings: { value: forkPlacementSettingsProxy(this.settings) },
+      });
+      return original.apply(receiver, args);
+    };
+    Object.defineProperty(patched, "__codeyForkReadinessPatchVersion", {
+      value: patchVersion,
+    });
+    try {
+      Object.defineProperty(prototype, "getForkCapabilities", {
+        ...descriptor,
+        value: patched,
+      });
+    } catch {
+      return false;
+    }
+    if (prototype.getForkCapabilities !== patched) return false;
+    forkCapabilitiesRestorers.push(() => {
+      if (prototype.getForkCapabilities === patched) {
+        Object.defineProperty(prototype, "getForkCapabilities", descriptor);
+      }
+    });
+    return true;
+  };
+
+  const installLocalForkCapabilitiesFallback = () => {
+    const registry = globalThis.__codeyAppServerManagers || window.__codeyAppServerManagers;
+    const manager = registry instanceof Map ? registry.get("local") : null;
+    if (!manager || typeof manager !== "object") return false;
+    for (
+      let proto = Object.getPrototypeOf(manager), depth = 0;
+      proto && proto !== Object.prototype && depth < 6;
+      proto = Object.getPrototypeOf(proto), depth += 1
+    ) {
+      if (Object.prototype.hasOwnProperty.call(proto, "getForkCapabilities")) {
+        return installForkCapabilitiesOnPrototype(proto);
+      }
+    }
+    return false;
+  };
+
+  const clearForkFallbackTimer = () => {
+    if (!forkFallbackTimer) return;
+    window.clearTimeout(forkFallbackTimer);
+    forkFallbackTimer = 0;
+  };
+
+  const scheduleForkFallbackPoll = () => {
+    if (disposed || forkFallbackTimer || forkFallbackPolls >= maxForkFallbackPolls) return;
+    forkFallbackTimer = window.setTimeout(() => {
+      forkFallbackTimer = 0;
+      if (disposed) return;
+      forkFallbackPolls += 1;
+      ensureForkReadinessFallback();
+    }, forkFallbackPollMs);
+  };
+
+  const ensureForkReadinessFallback = ({ resetPollBudget = false } = {}) => {
+    if (disposed) return false;
+    if (resetPollBudget && !forkFallbackTimer) forkFallbackPolls = 0;
+    let seededAny = false;
+    let hasPendingAnonymous = false;
+    for (const client of statsigClients()) {
+      if (seedOfflineAnonymousStatsigClient(client)) {
+        seededAny = true;
+      } else if (isPendingAnonymousStatsigClient(client)) {
+        hasPendingAnonymous = true;
+      }
+    }
+    if (hasPendingAnonymous) {
+      scheduleForkFallbackPoll();
+    } else {
+      clearForkFallbackTimer();
+      forkFallbackPolls = 0;
+    }
+    const patchedCapabilities = installLocalForkCapabilitiesFallback();
+    return seededAny || patchedCapabilities;
+  };
+
   const notifyStatsigClients = () => {
     let notified = 0;
     for (const client of statsigClients()) {
@@ -1209,7 +1388,9 @@
   };
 
   const applyModelWhitelist = () => {
-    if (!catalog.loaded || disposed) return false;
+    if (disposed) return false;
+    ensureForkReadinessFallback();
+    if (!catalog.loaded) return false;
     let changed = false;
     statsigClients().forEach((client) => {
       if (patchStatsigClient(client)) changed = true;
@@ -3498,6 +3679,7 @@
     );
     if (event?.type === "keydown"
       && (!pickerInteraction || !["Enter", " ", "ArrowDown"].includes(event.key))) return;
+    ensureForkReadinessFallback({ resetPollBudget: true });
     if (pickerInteraction) {
       observeModelPickerTrigger(event.target.closest?.(modelPickerTriggerSelector));
     }
@@ -3516,6 +3698,7 @@
     scheduleInteractionModelDelivery(pickerInteraction);
   };
   const handleFocus = () => {
+    ensureForkReadinessFallback({ resetPollBudget: true });
     void loadModelCatalog();
   };
   interactionEvents.forEach((eventName) => {
@@ -4163,6 +4346,10 @@
     }),
     dispose() {
       disposed = true;
+      clearForkFallbackTimer();
+      forkFallbackPolls = 0;
+      forkCapabilitiesRestorers.reverse().forEach((restore) => restore());
+      forkCapabilitiesRestorers.length = 0;
       for (const cancel of portableCancels) cancel();
       requestGateRestorers.reverse().forEach((restore) => restore());
       requestGateRestorers.length = 0;
@@ -4213,5 +4400,6 @@
     },
   };
   window.__codeyModelWhitelistPatch = api;
+  ensureForkReadinessFallback();
   void loadModelCatalog();
 })();
