@@ -69,6 +69,7 @@ test("rspack request client keeps route, identity and model result gates in one 
     "globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult",
     "globalThis.__codeyModelRequestSourceGateInstalled=true",
   ]) assert.ok(patched.includes(marker), marker);
+  assert.equal(patch(patched), null, "the patch is idempotent");
   Function(patched);
   assert.deepEqual(logs, []);
 });
@@ -100,12 +101,16 @@ test("rspack hosted manager marker and completed thread reconciliation follow re
 test("rspack service tier gates grant tiers declared by the model catalog", async () => {
   const { logs, patch } = await installPatch();
   const access = 'let o="default";function i(e){let t=e.requirements?.featureRequirements;return{ultrafast:"supportsIndependentSpeedModes"in e?t?.ultrafast_mode!==!1:!1}}function s(e,t){if(null==e||e===o)return!0;if(null==t)return!1;let n=l(e);return"flex"===e||t[n??"fast"]}function l(e){return e}';
-  const accessCheck = Function(`${patch(access)};return s`)();
+  const patchedAccess = patch(access);
+  assert.equal(patch(patchedAccess), null, "the service tier access patch is idempotent");
+  const accessCheck = Function(`${patchedAccess};return s`)();
   assert.equal(accessCheck("fast", { fast: false }), true);
   assert.equal(accessCheck("ultrafast", null), true);
 
   const state = 'function U(c,_,p,g,h,s,r,n){let t,a,u;let{data:m,isPending:x}=n(s.b9,t),b=!!_?.isLoading||g&&x;c[3]!==m||c[4]!==b||c[5]!==g?(a=g&&!b&&null!=m?(0,r.W6)(m):null,c[3]=m,c[4]=b,c[5]=g,c[6]=a):a=c[6];let y=a;return c[7]!==b||c[8]!==y?(u={serviceTierAccess:y,isLoading:b},c[7]=b,c[8]=y,c[9]=u):u=c[9],u}';
-  const hook = Function(`${patch(state)};return U`)();
+  const patchedState = patch(state);
+  assert.equal(patch(patchedState), null, "the service tier state patch is idempotent");
+  const hook = Function(`${patchedState};return U`)();
   const result = hook([], { isLoading: false }, null, false, null, {}, { W6: () => "native" }, () => ({ data: null, isPending: false }));
   assert.deepEqual({ ...result.serviceTierAccess }, { fast: true, ultrafast: true }, "API key logins keep the speed control");
   assert.deepEqual(logs, []);
@@ -127,7 +132,9 @@ test("rspack Ultra reasoning gate accepts module-member feature ids", async () =
 test("rspack telemetry patches skip heartbeat snapshots and interaction sampling", async () => {
   const { logs, patch } = await installPatch();
   const snapshot = 'async function h(e,t){switch(e.type){case"electron-app-state-snapshot-request":{let a=await t.collectAppStateSnapshot(e.hostId,e.reason);if(null==a)break;t.dispatchMessage("electron-app-state-snapshot-response",{requestId:e.requestId,snapshot:a});break}default:return"other"}return"replied"}';
-  const handle = Function(`${patch(snapshot)};return h`)();
+  const patchedSnapshot = patch(snapshot);
+  assert.equal(patch(patchedSnapshot), null, "the heartbeat snapshot patch is idempotent");
+  const handle = Function(`${patchedSnapshot};return h`)();
   const calls = [];
   const host = { collectAppStateSnapshot: async (...args) => (calls.push(args), {}), dispatchMessage: (...args) => calls.push(args) };
   assert.equal(await handle({ type: "electron-app-state-snapshot-request", hostId: "local", reason: "heartbeat" }, host), "replied");

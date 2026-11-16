@@ -515,6 +515,7 @@
     if (
       source.includes("AppServerRequestClient is missing a message dispatcher")
       && source.includes("mcp_request_enqueued")
+      && !source.includes("globalThis.__codeyModelRequestSourceGateInstalled=true")
       && /this\.dispatchMessage\?\.\([`"]mcp-request[`"]/.test(source)
     ) {
       // Current Codex can create threads through AppServerRequestClient without
@@ -723,7 +724,8 @@
     }
     if (
       source.includes("supportsIndependentSpeedModes") &&
-      source.includes("ultrafast_mode")
+      source.includes("ultrafast_mode") &&
+      !source.includes("/*codey-service-tier-access*/")
     ) {
       // Fast/Ultrafast permission comes only from ChatGPT account requirements.
       // Codey routes declare speed tiers in the model catalog, so the shared
@@ -732,11 +734,12 @@
       patched = replaceUniqueRendererGate(
         patched,
         /if\s*\(\s*(?:([$A-Z_a-z][$\w]*)\s*==\s*null|null\s*==\s*([$A-Z_a-z][$\w]*))\s*\)\s*return\s*!1\s*;\s*let\s+([$A-Z_a-z][$\w]*)\s*=\s*[$A-Z_a-z][$\w]*\(\s*([$A-Z_a-z][$\w]*)\s*\)\s*;\s*return\s*(?:\4\s*===\s*[`"]flex[`"]|[`"]flex[`"]\s*===\s*\4)\s*\|\|\s*(?:\1|\2)\[\s*\3\s*\?\?\s*[`"]fast[`"]\s*\]/g,
-        "return!0",
+        "/*codey-service-tier-access*/return!0",
         "service tier access",
       );
     }
     if (source.includes("={serviceTierAccess:")
+      && !source.includes("{fast:!0,ultrafast:!0}")
       && /=\{serviceTierAccess:[$A-Z_a-z][$\w]*,isLoading:/.test(source)) {
       // API key logins and pending requirements yield a null access object,
       // which hides the speed control and settings entirely. Keep a fixed
@@ -749,6 +752,7 @@
       );
     }
     if (source.includes("electron-app-state-snapshot-request")
+      && !source.includes("/*codey-heartbeat-snapshot-skip*/")
       && /case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
       // Main asks the focused window for a full app-state snapshot every 30 s,
       // then adds process sampling, a debug log and a Sentry breadcrumb. Skip
@@ -759,7 +763,7 @@
         patched,
         /(case[`"]electron-app-state-snapshot-request[`"]:\{)(?=[\s\S]{0,2000}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\2\.reason\)[\s\S]{0,2000}?dispatchMessage\([`"]electron-app-state-snapshot-response[`"][^;]{0,400};break((?: [$A-Z_a-z][$\w]*)?)\})/g,
         (_match, prefix, messageName, label) =>
-          `${prefix}if(${messageName}.reason===\`heartbeat\`)break${label};`,
+          `${prefix}/*codey-heartbeat-snapshot-skip*/if(${messageName}.reason===\`heartbeat\`)break${label};`,
         "app state heartbeat snapshot",
       );
     }
@@ -785,7 +789,8 @@
         "interaction heartbeat",
       );
     }
-    if (patched.includes("globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage")
+    if (!patched.includes("globalThis.__codeyModelRequestSourceGateInstalled=true")
+      && patched.includes("globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage")
       && patched.includes("let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage")
       && patched.includes("globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult")) {
       patched += "\n;globalThis.__codeyModelRequestSourceGateInstalled=true;\n";
