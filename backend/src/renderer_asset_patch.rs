@@ -70,6 +70,8 @@ const MAX_CACHE_ENTRIES: usize = 12_000;
 /// 「无需改写」记录不占体积，每写入这么多条才整理一次目录；写入改写结果时
 /// 照常立即整理。
 const UNCHANGED_STORES_PER_PRUNE: usize = 256;
+/// 当前补丁版本的原子写临时文件（`.{tag}-*.tmp`）保留宽限期，避免并发整理误删正在落盘的临时文件。
+const IN_FLIGHT_TEMP_GRACE: Duration = Duration::from_secs(300);
 /// 页面补丁里前置字面量表的起止标记，后端据此预筛资源。
 const PATCH_ANCHORS_START: &str = "/*codey-renderer-patch-anchors*/";
 const PATCH_ANCHORS_END: &str = "/*end-codey-renderer-patch-anchors*/";
@@ -1280,10 +1282,22 @@ impl PatchCache {
             return;
         };
         let prefix = format!("{}-", self.tag);
+        let temp_prefix = format!(".{prefix}");
         let mut current = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&temp_prefix) && name.ends_with(".tmp") {
+                let keep = entry.metadata().map_or(true, |meta| {
+                    meta.modified()
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_none_or(|age| age < IN_FLIGHT_TEMP_GRACE)
+                });
+                if keep {
+                    continue;
+                }
+            }
             if !name.starts_with(&prefix) {
                 let _ = std::fs::remove_file(&path);
                 continue;
@@ -2343,6 +2357,33 @@ mod tests {
                 format!("{tag}-c-33333333.js.meta.json"),
             ]
         );
+    }
+
+    #[test]
+    fn prune_preserves_in_flight_temp_files_for_current_tag_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = PatchCache::new(temp.path().to_path_buf(), "script");
+        let tag = &cache.tag;
+        let fresh_temp = format!(".{tag}-entry-11111111.js.codey-1234.tmp");
+        let stale_temp = format!(".{tag}-stale-22222222.js.codey-5678.tmp");
+        let other_tag_temp = ".other-entry-33333333.js.codey-9999.tmp";
+        std::fs::write(temp.path().join(&fresh_temp), "fresh").unwrap();
+        std::fs::write(temp.path().join(&stale_temp), "stale").unwrap();
+        std::fs::write(temp.path().join(other_tag_temp), "other").unwrap();
+        std::fs::File::options()
+            .append(true)
+            .open(temp.path().join(&stale_temp))
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(100))
+            .unwrap();
+
+        cache.prune();
+
+        let left: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [fresh_temp]);
     }
 
     #[test]
