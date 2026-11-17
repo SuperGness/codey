@@ -336,11 +336,14 @@ for (const [lineEndingName, lineEnding] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
     assert.doesNotMatch(notes, /RELEASE_ADMIN_CALLBACK_SECRET|CLOUDFLARE_API_TOKEN|contents: write/);
     assert.match(notes, /persist-credentials: false/);
     const managedPublish = workflow.slice(workflow.indexOf("\n  managed-publish:"), workflow.indexOf("\n  report-failure:"));
-    for (const gate of ["prepare", "frontend", "notes", "macos", "macos-check", "windows", "windows-check"]) assert.match(managedPublish, new RegExp(`- ${gate}\\r?\\n`));
+    for (const gate of ["prepare", "frontend", "frontend-check", "notes", "macos", "macos-check", "windows", "windows-check"]) assert.match(managedPublish, new RegExp(`- ${gate}\\r?\\n`));
+    assert.match(managedPublish, /needs.frontend-check.result == 'success' \|\| \(\(inputs.artifact_run_id != '' \|\| needs.prepare.outputs.ci_passed == 'true'\) && needs.frontend-check.result == 'skipped'\)/);
+    assert.match(managedPublish, /needs.windows-check.result == 'success' \|\| \(\(inputs.artifact_run_id != '' \|\| needs.prepare.outputs.ci_passed == 'true'\) && needs.windows-check.result == 'skipped'\)/);
+    assert.match(managedPublish, /needs.macos-check.result == 'success' \|\| \(inputs.artifact_run_id != '' && needs.macos-check.result == 'skipped'\)/);
     const failure = workflow.slice(workflow.indexOf("\n  report-failure:"));
     assert.match(failure, /needs.prepare.outputs.claimed == 'true'/);
     assert.match(failure, /needs.managed-publish.result != 'success'/);
-    for (const gate of ["prepare", "frontend", "notes", "macos", "macos-check", "windows", "windows-check", "managed-publish"]) assert.match(failure, new RegExp(`- ${gate}\\r?\\n`));
+    for (const gate of ["prepare", "frontend", "frontend-check", "notes", "macos", "macos-check", "windows", "windows-check", "managed-publish"]) assert.match(failure, new RegExp(`- ${gate}\\r?\\n`));
   });
 }
 
@@ -355,9 +358,11 @@ test("managed platform builds inject claimed versions before Rust caches without
     assert.ok(steps.indexOf("prepare-version") < steps.indexOf("name: Cache Rust build"));
     assert.doesNotMatch(steps, /release\.mjs|generate-lockfile|git push|git commit/);
   }
-  const frontend = workflow.slice(workflow.indexOf("\n  frontend:"), workflow.indexOf("\n  notes:"));
-  assert.match(frontend, /if: inputs.artifact_run_id == ''/);
-  assert.match(frontend, /name: Inject validated platform release version\s+if: inputs.build_id != ''\s+run: node scripts\/release-automation.mjs prepare-version/);
+  for (const [job, nextJob] of [["frontend", "frontend-check"], ["frontend-check", "notes"]]) {
+    const frontend = workflow.slice(workflow.indexOf(`\n  ${job}:`), workflow.indexOf(`\n  ${nextJob}:`));
+    assert.match(frontend, /if: inputs.artifact_run_id == ''/);
+    assert.match(frontend, /name: Inject validated platform release version\s+if: inputs.build_id != ''\s+run: node scripts\/release-automation.mjs prepare-version/);
+  }
   const notes = workflow.slice(workflow.indexOf("\n  notes:"), workflow.indexOf("\n  macos:"));
   assert.doesNotMatch(notes, /prepare-version/);
   const legacy = workflow.slice(workflow.indexOf("\n  publish:"), workflow.indexOf("\n  managed-publish:"));

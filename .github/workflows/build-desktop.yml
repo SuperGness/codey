@@ -45,8 +45,12 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       claimed: ${{ steps.claim.outputs.claimed }}
+      ci_passed: ${{ steps.ci.outputs.passed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,6 +66,22 @@ jobs:
           CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
           RELEASE_ADMIN_CALLBACK_SECRET: ${{ secrets.RELEASE_ADMIN_CALLBACK_SECRET }}
         run: node scripts/release-automation.mjs claim
+      # ci.yml 已在 master 推送时对同一提交跑过 Linux 全量检查和 Windows Rust 测试；
+      # 托管打包命中成功记录时复用结论，只保留 ci.yml 未覆盖的 macOS 检查。
+      - name: Reuse quality checks already passed for this commit
+        id: ci
+        if: inputs.build_id != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${RELEASE_SOURCE_SHA}&event=push&status=success&per_page=1" --jq '.total_count' 2>/dev/null || echo 0)"
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Quality checks already passed on ${RELEASE_SOURCE_SHA}; skipping duplicated frontend and Windows checks."
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Save claimed build
         if: inputs.build_id != ''
         uses: actions/upload-artifact@v4
@@ -74,7 +94,56 @@ jobs:
   frontend:
     if: inputs.artifact_run_id == ''
     needs: prepare
-    name: Frontend checks and embedded overlay
+    name: Embedded frontend overlay
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.ref }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.2"
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Download claimed platform build
+        if: inputs.build_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: release-build-context
+
+      - name: Inject validated platform release version
+        if: inputs.build_id != ''
+        run: node scripts/release-automation.mjs prepare-version
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build embedded frontend assets
+        run: pnpm run vite:build
+
+      - name: Upload embedded frontend overlay
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
+          if-no-files-found: error
+
+  # 类型检查和 JS 测试与平台编译并行，只作为发布前置，不再阻塞产物构建。
+  frontend-check:
+    if: inputs.artifact_run_id == '' && needs.prepare.outputs.ci_passed != 'true'
+    needs: prepare
+    name: Frontend checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Codey
@@ -114,16 +183,6 @@ jobs:
 
       - name: JavaScript tests
         run: pnpm run test:js
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
-
-      - name: Upload embedded frontend overlay
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-overlay-assets
-          path: dist-overlay
-          if-no-files-found: error
 
   notes:
     if: inputs.build_id != ''
@@ -524,7 +583,7 @@ jobs:
           if-no-files-found: error
 
   windows-check:
-    if: inputs.artifact_run_id == ''
+    if: inputs.artifact_run_id == '' && needs.prepare.outputs.ci_passed != 'true'
     needs:
       - prepare
       - frontend
@@ -608,6 +667,7 @@ jobs:
       contents: write
     needs:
       - frontend
+      - frontend-check
       - macos
       - macos-check
       - windows
@@ -746,13 +806,15 @@ jobs:
       always() && inputs.build_id != '' && needs.prepare.result == 'success' &&
       needs.notes.result == 'success' &&
       (needs.frontend.result == 'success' || (inputs.artifact_run_id != '' && needs.frontend.result == 'skipped')) &&
+      (needs.frontend-check.result == 'success' || ((inputs.artifact_run_id != '' || needs.prepare.outputs.ci_passed == 'true') && needs.frontend-check.result == 'skipped')) &&
       (needs.macos.result == 'success' || (inputs.artifact_run_id != '' && needs.macos.result == 'skipped')) &&
       (needs.macos-check.result == 'success' || (inputs.artifact_run_id != '' && needs.macos-check.result == 'skipped')) &&
       (needs.windows.result == 'success' || (inputs.artifact_run_id != '' && needs.windows.result == 'skipped')) &&
-      (needs.windows-check.result == 'success' || (inputs.artifact_run_id != '' && needs.windows-check.result == 'skipped'))
+      (needs.windows-check.result == 'success' || ((inputs.artifact_run_id != '' || needs.prepare.outputs.ci_passed == 'true') && needs.windows-check.result == 'skipped'))
     needs:
       - prepare
       - frontend
+      - frontend-check
       - notes
       - macos
       - macos-check
@@ -803,6 +865,7 @@ jobs:
     needs:
       - prepare
       - frontend
+      - frontend-check
       - notes
       - macos
       - macos-check

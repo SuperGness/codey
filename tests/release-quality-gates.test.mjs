@@ -60,13 +60,24 @@ function workflowJob(name, until) {
 
 test("tag-triggered desktop releases independently enforce Rust quality gates", () => {
   assert.match(workflow, /^\s*RUSTFLAGS: -D warnings$/m);
-  const frontend = workflowJob("frontend", "notes");
+  const frontend = workflowJob("frontend", "frontend-check");
+  const frontendCheck = workflowJob("frontend-check", "notes");
   const macosCheck = workflowJob("macos-check", "windows");
   const windowsCheck = workflowJob("windows-check", "publish");
   const publish = workflow.slice(workflow.indexOf("\n  publish:"));
   assertRustQualityGates(macosCheck);
-  assert.match(frontend, /pnpm run check/);
-  assert.match(frontend, /pnpm run test:js/);
+  assert.match(frontendCheck, /pnpm run check/);
+  assert.match(frontendCheck, /pnpm run test:js/);
+  assert.match(frontendCheck, /needs: prepare\n/);
+  assert.doesNotMatch(frontend, /pnpm run check|pnpm run test:js/);
+  // 只有托管打包能命中 ci.yml 结论；标签发布不读取该输出，始终自带检查。
+  assert.match(frontendCheck, /if: inputs.artifact_run_id == '' && needs.prepare.outputs.ci_passed != 'true'/);
+  assert.match(windowsCheck, /if: inputs.artifact_run_id == '' && needs.prepare.outputs.ci_passed != 'true'/);
+  assert.doesNotMatch(macosCheck, /ci_passed/);
+  const prepare = workflowJob("prepare", "frontend");
+  assert.match(prepare, /id: ci\s+if: inputs.build_id != ''\s+continue-on-error: true/);
+  assert.match(prepare, /workflows\/ci.yml\/runs\?head_sha=\$\{RELEASE_SOURCE_SHA\}&event=push&status=success/);
+  assert.match(publish, /- frontend-check/);
   assert.match(windowsCheck, /components: clippy/);
   assert.match(windowsCheck, /cargo test --workspace --locked/);
   assert.match(
@@ -80,7 +91,7 @@ test("tag-triggered desktop releases independently enforce Rust quality gates", 
 });
 
 test("desktop release jobs reuse the prebuilt frontend overlay", () => {
-  const frontend = workflowJob("frontend", "notes");
+  const frontend = workflowJob("frontend", "frontend-check");
   assert.match(frontend, /- name: Build embedded frontend assets\s+run: pnpm run vite:build/);
   assert.match(frontend, /name: frontend-overlay-assets\s+path: dist-overlay/);
   for (const job of [
