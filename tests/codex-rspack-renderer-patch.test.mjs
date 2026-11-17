@@ -282,3 +282,266 @@ test("rspack CheckoutPersonalWebviewHost skips background prewarm and renders on
   assert.equal(rendered.props.children[1].props.children.props.search, activeHost.props.search, "presented checkout webview still renders");
   assert.deepEqual(logs, []);
 });
+
+test("rspack performance gates cap pierre workers and skip orbit preload, route prefetch, LoAF observers, and pending sampler", async () => {
+  const { logs, patch } = await installPatch();
+
+  // 1. Pierre syntax highlight worker pool: poolSize 4 -> 1; poolSize 1 stays untouched.
+  const pierreUrl = "app://-/assets/async/517695.46b78d24c8.js";
+  const pierreSource = "function k(){return{}}function render(){let t={workerFactory:k,poolSize:4,totalASTLRUCacheSize:100};return t}";
+  const patchedPierre = patch(pierreSource, pierreUrl);
+  assert.ok(patchedPierre?.includes("/*codey-pierre-pool-size*/1"));
+  assert.equal(patch(patchedPierre, pierreUrl), null);
+  assert.equal(Function(`${patchedPierre};return render()`)().poolSize, 1);
+  assert.equal(patch(pierreSource.replace("poolSize:4", "poolSize:1"), pierreUrl), null);
+
+  // 2. Orbit character preload iframe: d() becomes a callable no-op while preserving Oz/iE.
+  const orbitUrl = "app://-/assets/async/198194.4d5c9b6c90.js";
+  const orbitSource = 'var o={a:()=>"/frame.html"},c={prefetch(){spy.prefetch+=1}},s={s(){spy.s+=1}},l=!1,a={d(_t,_e,exports){exports.Oz=function(){d(),(0,s.s)()},exports.iE=d}};function d(){let e=(0,o.a)();if("u"<typeof document||null==e||(c.prefetch(),l))return;l=!0;let t=document.createElement("iframe"),a=new URL(e,document.baseURI);a.searchParams.set("preload",""),t.src=a.href,t.hidden=!0,t.setAttribute("sandbox","allow-scripts allow-same-origin"),t.allow="cross-origin-isolated";let n=new AbortController,r=window.setTimeout(i,3e4);function i(){window.clearTimeout(r),n.abort(),t.remove()}window.addEventListener("message",e=>{e.source===t.contentWindow&&e.origin===window.location.origin&&"orbit-character-preloaded"===e.data&&i()},{signal:n.signal}),window.addEventListener("pagehide",i,{once:!0,signal:n.signal}),document.body.append(t)}const out={};a.d(null,null,out);';
+  const patchedOrbit = patch(orbitSource, orbitUrl);
+  assert.ok(patchedOrbit?.includes("/*codey-orbit-preload-skip*/"));
+  assert.equal(patch(patchedOrbit, orbitUrl), null);
+  const appended = [];
+  const spy = { prefetch: 0, s: 0 };
+  const api = Function(
+    "spy",
+    "document",
+    "window",
+    `${patchedOrbit};return out`,
+  )(
+    spy,
+    { baseURI: "https://example.invalid/", createElement: () => ({}), body: { append: (el) => appended.push(el) } },
+    { setTimeout: () => 1, clearTimeout() {}, addEventListener() {}, location: { origin: "https://example.invalid" } },
+  );
+  api.Oz();
+  api.iE();
+  assert.equal(spy.prefetch, 0);
+  assert.equal(spy.s, 1);
+  assert.equal(appended.length, 0);
+
+  // 3. Startup secondary route prefetch: e_() becomes a no-op without prefetching settings/dialog chunks.
+  const prefetchUrl = "app://-/assets/async/55935.5583618e49.js";
+  const prefetchSource = 'function e_(){ea.x.prefetch(),function(){for(let e of(O.B.prefetch(),["general-settings","appearance","keyboard-shortcuts"]))(0,en.OU)(e).catch(()=>void 0);Promise.all([t.e(1),t.e(2)]).then(t.bind(t,"njHN")).catch(()=>void 0)}()}';
+  const patchedPrefetch = patch(prefetchSource, prefetchUrl);
+  assert.ok(patchedPrefetch?.includes("/*codey-startup-prefetch-skip*/"));
+  assert.equal(patch(patchedPrefetch, prefetchUrl), null);
+  let prefetchCalls = 0;
+  Function("ea", "O", "en", "t", `${patchedPrefetch};e_();`)(
+    { x: { prefetch() { prefetchCalls += 1; } } },
+    { B: { prefetch() { prefetchCalls += 1; } } },
+    { OU: async () => { prefetchCalls += 1; } },
+    { e() { prefetchCalls += 1; return Promise.resolve(); }, bind() {} },
+  );
+  assert.equal(prefetchCalls, 0);
+
+  // 4. Sentry LoAF + longtask observer: neither PerformanceObserver nor nZ("longtask") runs, while sibling steps still execute.
+  const sentryUrl = "app://-/assets/async/907538.0572f09d40.js";
+  const sentrySource = 'function setup(){let ran=[],u=true,l=true,w={PerformanceObserver:class{constructor(){ran.push("po")}observe(){ran.push("observe")}}},PerformanceObserver={supportedEntryTypes:["long-animation-frame"]},e7="op";nZ=(kind)=>{ran.push(kind)};return o&&n7()&&eC()&&nZ("element"),u&&w.PerformanceObserver&&PerformanceObserver.supportedEntryTypes&&PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")?new PerformanceObserver(e=>{let t=tk();if(t)for(let n of e.getEntries()){n6(t,0,0,{attributes:{[e7]:"auto.ui.browser.metrics"}})}}).observe({type:"long-animation-frame",buffered:!0}):l&&nZ("longtask",({entries:e})=>{let t=tk();if(!t)return;let{op:n,start_timestamp:r}=tA(t);for(let i of e){let a=i.duration;n6(t,0,a,{name:"Main UI thread blocked",op:"ui.long-task",attributes:{[e7]:"auto.ui.browser.metrics"}})}}),_&&ran.push("after"),ran}';
+  const patchedSentry = patch(sentrySource, sentryUrl);
+  assert.ok(patchedSentry?.includes("/*codey-sentry-loaf-skip*/"));
+  assert.equal(patch(patchedSentry, sentryUrl), null);
+  const sentryRan = Function("o", "_", "n7", "eC", "tk", "tA", "n6", `${patchedSentry};return setup()`)(
+    true, true, () => true, () => true, () => null, () => ({}), () => {},
+  );
+  assert.deepEqual(sentryRan, ["element", "after"]);
+
+  // 5. Interaction LoAF + longtask observers: ensureObserver returns false cleanly.
+  const interactionUrl = "app://-/assets/async/956370.aff5cce818.js";
+  const interactionSource = 'class Tracker{start(){let n=this.ensureObserver("longtask"),i=this.ensureObserver("long-animation-frame");return{longAnimationFrameSupported:i,longTaskSupported:n}}ensureObserver(e){try{if(!this.isSupported(e))return!1}catch{return!1}if(null!=("longtask"===e?this.longTaskObserver:this.longAnimationFrameObserver))return!0;try{let t="longtask"===e?this.longTaskEntries:this.longAnimationFrameEntries,n=this.createObserver(e,e=>{t.push(...e)});return n.observe({buffered:!0,type:e}),"longtask"===e?this.longTaskObserver=n:this.longAnimationFrameObserver=n,!0}catch{return!1}}}';
+  const patchedInteraction = patch(interactionSource, interactionUrl);
+  assert.ok(patchedInteraction?.includes("/*codey-interaction-loaf-skip*/"));
+  assert.equal(patch(patchedInteraction, interactionUrl), null);
+  let createdObservers = 0;
+  const Tracker = Function(`${patchedInteraction};return Tracker`)();
+  const tracker = new Tracker();
+  tracker.isSupported = () => true;
+  tracker.createObserver = () => { createdObservers += 1; return { observe() {} }; };
+  assert.deepEqual(tracker.start(), { longAnimationFrameSupported: false, longTaskSupported: false });
+  assert.equal(createdObservers, 0);
+
+  // 6. Codex pages pending observation sampler: 10s interval & doc listeners skipped, sendHeartbeat preserved.
+  const pagesSource = 'function startObs(s,e,C){let r,n,l=()=>{},u=()=>{},d=()=>{};return n=C,s.add(n),1===s.size&&(r=setInterval(()=>{for(let e of[...s])e.sample()},1e4),document.addEventListener("visibilitychange",l),document.addEventListener("freeze",u),window.addEventListener("pagehide",d,!0)),e.count("codex_pages",`${p}_started`)}function afterObs(){return {p_pending_age_ms:"pending_age_ms",m:"_pending_observations"}}';
+  const pagesWithHeartbeat = `${pagesSource}class Sync{sendHeartbeat=()=>{this.metrics.count("codex_pages","edit_pending_observations",{},0)}}`;
+  const patchedPages = patch(pagesWithHeartbeat, sentryUrl);
+  assert.ok(patchedPages?.includes("/*codey-pending-observations-sampler-skip*/"));
+  assert.match(patchedPages, /sendHeartbeat=\(\)=>\{this\.metrics\.count/);
+  assert.equal(patch(patchedPages, sentryUrl), null);
+  let intervals = 0;
+  let listeners = 0;
+  const events = [];
+  Function("p", "document", "window", "setInterval", "events", `${patchedPages};startObs(new Set,{count:(a,b)=>events.push([a,b])},{sample(){}})`)(
+    "open",
+    { addEventListener() { listeners += 1; } },
+    { addEventListener() { listeners += 1; } },
+    () => { intervals += 1; return 1; },
+    events,
+  );
+  assert.equal(intervals, 0);
+  assert.equal(listeners, 0);
+  assert.deepEqual(events, [["codex_pages", "open_started"]]);
+
+  assert.deepEqual(logs, []);
+});
+
+test("rspack Statsig startup gates bound post-login bootstrap, skip remote identity stall, and cap async client init", async () => {
+  const { logs, patch } = await installPatch();
+  const url = "app://-/assets/async/907538.0572f09d40.js";
+
+  // 1. Post-login bootstrap timeout: 62500ms deadline -> 5000ms (5e3), 1e4 attempt timeout -> 4500ms.
+  const bootstrapSource =
+    'async function runBootstrap(){let n,r={auth:0,request:0},i=new AbortController,a=setTimeout(()=>{i.abort(new Ny("req_failed",Error("Reached the post-login Statsig bootstrap deadline")))},62500);try{return await async function(u){let d,h=new AbortController,_=u?AbortSignal.any([h.signal,u]):h.signal;function m(){clearTimeout(d),d=setTimeout(()=>{h.abort(Error("Timed out while fetching post-login Statsig bootstrap"))},1e4)}return m(),_.aborted}(i.signal)}finally{clearTimeout(n),clearTimeout(a)}}';
+  const patchedBootstrap = patch(bootstrapSource, url);
+  assert.ok(patchedBootstrap?.includes("/*codey-statsig-bootstrap-deadline*/5e3"));
+  assert.ok(patchedBootstrap?.includes("/*codey-statsig-bootstrap-attempt*/4500"));
+  assert.equal(patch(patchedBootstrap, url), null, "bootstrap timeout patch is idempotent");
+  const recordedDelays = [];
+  await Function(
+    "Ny",
+    "c",
+    "setTimeout",
+    "clearTimeout",
+    `${patchedBootstrap};return runBootstrap();`,
+  )(
+    class extends Error {},
+    {},
+    (fn, ms) => {
+      recordedDelays.push(ms);
+      return { fn, ms };
+    },
+    () => {},
+  );
+  assert.deepEqual(recordedDelays, [5000, 4500]);
+
+  // 2. Fallback identity non-blocking: skips remote accounts/check wait while keeping local token wait.
+  const identitySource =
+    'function nJ(e){let t,n,r,i=(0,l.c)(17),{currentAccount:c,children:v}=e;let{data:y,isLoading:I,hasEverErrored:T}=useAccounts(void 0,t);let{isLoading:C}=useAccountInfo(n),A=c??y;if(C||I&&!T){let e;return i[2]===S?(e=jsx(Loader,{debugName:"CodexStatsigProvider.async.identity"}),i[2]=e):e=i[2],e}return i[3]=jsx(Fallback,{currentAccount:A,children:v}),i[3]}';
+  const patchedIdentity = patch(identitySource, url);
+  assert.ok(patchedIdentity?.includes("/*codey-statsig-identity-nonblocking*/"));
+  assert.equal(patch(patchedIdentity, url), null, "identity non-blocking patch is idempotent");
+  const runIdentity = ({ localLoading, accountsLoading, errored, accountsData }) =>
+    Function(
+      "l",
+      "S",
+      "jsx",
+      "Loader",
+      "Fallback",
+      "useAccounts",
+      "useAccountInfo",
+      `${patchedIdentity};return nJ({currentAccount:undefined,children:"routes"});`,
+    )(
+      { c: (n) => Array(n).fill(Symbol.for("react.memo_cache_sentinel")) },
+      Symbol.for("react.memo_cache_sentinel"),
+      (type, props) => ({ type, props }),
+      "Loader",
+      "Fallback",
+      () => ({ data: accountsData, isLoading: accountsLoading, hasEverErrored: errored }),
+      () => ({ isLoading: localLoading }),
+    );
+  const localWaiting = runIdentity({
+    localLoading: true,
+    accountsLoading: false,
+    errored: false,
+    accountsData: undefined,
+  });
+  assert.equal(localWaiting.type, "Loader");
+  assert.equal(localWaiting.props.debugName, "CodexStatsigProvider.async.identity");
+  const remoteStalled = runIdentity({
+    localLoading: false,
+    accountsLoading: true,
+    errored: false,
+    accountsData: { id: "cached-account" },
+  });
+  assert.equal(remoteStalled.type, "Fallback");
+  assert.deepEqual(remoteStalled.props.currentAccount, { id: "cached-account" });
+  assert.equal(remoteStalled.props.children, "routes");
+
+  // 3. Fallback async Statsig client init cap: fast init finishes cleanly; stalled init finalizes Ready at 1500ms.
+  const asyncInitSource =
+    'const t={};t.useStatsigInternalClientFactoryAsync=function(e,t){let n=(0,i.useMemo)(()=>{var n;return null!=(n=(0,r._getInstance)(t.sdkKey))?n:e(t)},[]),[a,s]=(0,i.useState)("Ready"!==n.loadingStatus);return(0,i.useMemo)(()=>{"Ready"!==n.loadingStatus&&n.initializeAsync().catch(r.Log.error).finally(()=>s(!1))},[]),{client:n,isLoading:a}}';
+  const patchedAsync = patch(asyncInitSource, url);
+  assert.ok(patchedAsync?.includes("/*codey-statsig-async-init-cap*/"));
+  assert.equal(patch(patchedAsync, url), null, "async init cap patch is idempotent");
+
+  const runAsyncFactory = ({ resolveImmediately }) => {
+    let resolveInit;
+    const finalizedWith = [];
+    const loadingChanges = [];
+    const timers = new Map();
+    const clearedTimers = [];
+    let nextTimerId = 1;
+    const client = {
+      loadingStatus: "Loading",
+      initializeAsync: () =>
+        new Promise((resolve) => {
+          resolveInit = () => {
+            client.loadingStatus = "Ready";
+            resolve({ success: true });
+          };
+          if (resolveImmediately) resolveInit();
+        }),
+      _finalizeUpdate(values) {
+        finalizedWith.push(values);
+        client.loadingStatus = "Ready";
+      },
+    };
+    const api = Function(
+      "client",
+      "i",
+      "r",
+      "setTimeout",
+      "clearTimeout",
+      `${patchedAsync};return t.useStatsigInternalClientFactoryAsync(()=>client,{sdkKey:"k"});`,
+    )(
+      client,
+      {
+        useMemo: (fn) => fn(),
+        useState: (initial) => [
+          initial,
+          (next) => {
+            loadingChanges.push(next);
+          },
+        ],
+      },
+      {
+        _getInstance: () => null,
+        Log: { error() {} },
+      },
+      (fn, ms) => {
+        const id = nextTimerId++;
+        timers.set(id, { fn, ms });
+        return id;
+      },
+      (id) => {
+        clearedTimers.push(id);
+        timers.delete(id);
+      },
+    );
+    return { api, client, finalizedWith, loadingChanges, timers, clearedTimers, resolveInit: () => resolveInit() };
+  };
+
+  const fast = runAsyncFactory({ resolveImmediately: true });
+  assert.equal(fast.api.client, fast.client);
+  assert.equal(fast.api.isLoading, true);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(fast.finalizedWith, []);
+  assert.deepEqual(fast.loadingChanges, [false]);
+  assert.equal(fast.timers.size, 0);
+  assert.deepEqual(fast.clearedTimers, [1]);
+
+  const stalled = runAsyncFactory({ resolveImmediately: false });
+  assert.equal(stalled.timers.get(1)?.ms, 1500);
+  assert.deepEqual(stalled.finalizedWith, []);
+  assert.deepEqual(stalled.loadingChanges, []);
+  stalled.timers.get(1).fn();
+  assert.deepEqual(stalled.finalizedWith, [null]);
+  assert.equal(stalled.client.loadingStatus, "Ready");
+  assert.deepEqual(stalled.loadingChanges, [false]);
+  stalled.resolveInit();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(stalled.finalizedWith, [null]);
+  assert.deepEqual(stalled.loadingChanges, [false]);
+
+  assert.deepEqual(logs, []);
+});

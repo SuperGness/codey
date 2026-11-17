@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail, ensure};
-use memchr::memmem::Finder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::renderer_asset_patch::{css_asset_name, numeric_asset_name};
+use crate::renderer_asset_patch::{PatchAnchorMatcher, css_asset_name, numeric_asset_name};
 
 /// ASAR 索引上限。Codex 26.1029 的索引约 3 MB，留足余量又不至于读入异常文件。
 const MAX_ASAR_HEADER_BYTES: u64 = 64 << 20;
@@ -42,6 +41,8 @@ struct SourceIdentity {
 #[derive(Serialize, Deserialize)]
 struct CachedScan {
     source: SourceIdentity,
+    #[serde(default)]
+    anchors_sha256: Option<String>,
     scan: AssetScan,
 }
 
@@ -52,24 +53,37 @@ pub(crate) struct ScanOutcome {
     pub(crate) cache_write_error: Option<String>,
 }
 
-/// 读取缓存或扫描安装包。缓存文件名已含补丁版本，前置字面量变化即失效。
+/// 读取缓存或扫描安装包（按兼容的单字面量表构造匹配器）。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn load_or_scan(
     app_dir: &Path,
     cache_file: &Path,
     anchors: &[String],
 ) -> Result<ScanOutcome> {
+    let matcher = PatchAnchorMatcher::from_single_anchors(anchors);
+    load_or_scan_with_matcher(app_dir, cache_file, &matcher)
+}
+
+/// 读取缓存或按复合前置规则扫描安装包；规则集合摘要变化时自动失效重扫。
+pub(crate) fn load_or_scan_with_matcher(
+    app_dir: &Path,
+    cache_file: &Path,
+    matcher: &PatchAnchorMatcher,
+) -> Result<ScanOutcome> {
     let source = AssetSource::locate(app_dir)?;
     let identity = source.identity()?;
-    if let Some(scan) = read_cache(cache_file, &identity) {
+    let anchors_sha256 = matcher.digest_hex();
+    if let Some(scan) = read_cache(cache_file, &identity, &anchors_sha256) {
         return Ok(ScanOutcome {
             scan,
             cached: true,
             cache_write_error: None,
         });
     }
-    let scan = source.scan(anchors)?;
+    let scan = source.scan_with_matcher(matcher)?;
     let cached = CachedScan {
         source: identity,
+        anchors_sha256: Some(anchors_sha256),
         scan: scan.clone(),
     };
     let cache_write_error = serde_json::to_vec(&cached)
@@ -84,9 +98,14 @@ pub(crate) fn load_or_scan(
     })
 }
 
-fn read_cache(cache_file: &Path, identity: &SourceIdentity) -> Option<AssetScan> {
+fn read_cache(
+    cache_file: &Path,
+    identity: &SourceIdentity,
+    anchors_sha256: &str,
+) -> Option<AssetScan> {
     let cached: CachedScan = serde_json::from_slice(&std::fs::read(cache_file).ok()?).ok()?;
-    (cached.source == *identity).then_some(cached.scan)
+    (cached.source == *identity && cached.anchors_sha256.as_deref() == Some(anchors_sha256))
+        .then_some(cached.scan)
 }
 
 enum AssetSource {
@@ -141,13 +160,9 @@ impl AssetSource {
         })
     }
 
-    fn scan(&self, anchors: &[String]) -> Result<AssetScan> {
-        // 字面量数量有限，复用子串查找器可减少大脚本上逐字节多模式匹配的成本。
-        let finders = anchors
-            .iter()
-            .map(|anchor| Finder::new(anchor.as_bytes()))
-            .collect::<Vec<_>>();
-        let matches = |bytes: &[u8]| finders.iter().any(|finder| finder.find(bytes).is_some());
+    fn scan_with_matcher(&self, matcher: &PatchAnchorMatcher) -> Result<AssetScan> {
+        let compiled = matcher.compile_finders();
+        let matches = |bytes: &[u8]| compiled.matches_bytes(bytes);
         match self {
             Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, &matches),
             Self::Directory { app } => scan_directory(&app.join("webview/assets"), &matches),
@@ -322,6 +337,8 @@ fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<Ass
 
 #[cfg(test)]
 mod tests {
+    use memchr::memmem::Finder;
+
     use super::*;
 
     fn anchors() -> Vec<String> {
@@ -528,6 +545,51 @@ mod tests {
                 &anchors()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn compound_matcher_requires_all_literals_and_invalidates_changed_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("Codex.app/Contents/Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        write_asar(
+            &resources.join("app.asar"),
+            &[
+                (
+                    "webview/assets/async/1.11111111.js",
+                    b"totalASTLRUCacheSize:100 poolSize:4",
+                ),
+                (
+                    "webview/assets/async/2.22222222.js",
+                    b"workerFactory:k poolSize:4 totalASTLRUCacheSize:100",
+                ),
+            ],
+            &[],
+        );
+        let cache = temp.path().join("scan.json");
+        let app_dir = temp.path().join("Codex.app");
+        let matcher_a = PatchAnchorMatcher::for_script(
+            r#"/*codey-renderer-patch-rules*/[{"allOf":["totalASTLRUCacheSize:","poolSize:","workerFactory:"]}]/*end-codey-renderer-patch-rules*/"#,
+            false,
+        )
+        .unwrap();
+        let first = load_or_scan_with_matcher(&app_dir, &cache, &matcher_a).unwrap();
+        assert!(!first.cached);
+        assert_eq!(first.scan.candidates, ["async/2.22222222.js"]);
+        let second = load_or_scan_with_matcher(&app_dir, &cache, &matcher_a).unwrap();
+        assert!(second.cached);
+
+        let matcher_b = PatchAnchorMatcher::for_script(
+            r#"/*codey-renderer-patch-rules*/[{"allOf":["totalASTLRUCacheSize:"]}]/*end-codey-renderer-patch-rules*/"#,
+            false,
+        )
+        .unwrap();
+        let third = load_or_scan_with_matcher(&app_dir, &cache, &matcher_b).unwrap();
+        assert!(!third.cached);
+        assert_eq!(
+            third.scan.candidates,
+            ["async/1.11111111.js", "async/2.22222222.js"]
         );
     }
 
