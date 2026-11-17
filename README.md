@@ -58,7 +58,7 @@
 
 > [!IMPORTANT]
 > 启动可能重启所选 Codex，请先结束正在运行的任务；仅支持可明确识别的客户端，多版本共存时需明确选择。
-
+> macos安装后需要运行`sudo xattr -dr com.apple.quarantine /Applications/Codey.app`屏蔽签名校验
 ## 使用边界
 
 > [!WARNING]
