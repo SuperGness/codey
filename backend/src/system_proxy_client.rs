@@ -109,6 +109,17 @@ impl SystemProxySource {
     }
 }
 
+/// 获取当前进程共享的系统代理快照（最多每 10 秒读取一次系统代理设置）。
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn current_system_proxy_matcher() -> Arc<SystemProxyMatcher> {
+    SYSTEM.latest_blocking()
+}
+
+struct InFlightRebuild {
+    target: Arc<SystemProxyMatcher>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
 /// 跟随系统代理变化的长期 HTTP 客户端，见模块说明。
 pub(crate) struct SystemProxyClient {
     source: &'static SystemProxySource,
@@ -123,10 +134,29 @@ struct ClientState {
     /// 实际使用的设置比较。
     built_with: Arc<SystemProxyMatcher>,
     built_at: Instant,
-    /// 正在为哪份快照重建；并发请求不重复重建，取消后等下一份快照再试。
-    rebuilding_for: Option<Arc<SystemProxyMatcher>>,
+    /// 正在为哪份快照重建；并发请求等待同一份重建结果并复用新客户端。
+    rebuilding_for: Option<InFlightRebuild>,
+    /// 本轮重建失败的快照；等待下一份快照再重试，避免每个请求都重建。
+    failed_for: Option<Arc<SystemProxyMatcher>>,
     #[cfg(test)]
     rebuilds: usize,
+}
+
+struct RebuildResetGuard<'a> {
+    client: &'a SystemProxyClient,
+    notify: Arc<tokio::sync::Notify>,
+    finished: bool,
+}
+
+impl Drop for RebuildResetGuard<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let mut state = self.client.lock();
+            state.rebuilding_for = None;
+            drop(state);
+            self.notify.notify_waiters();
+        }
+    }
 }
 
 impl SystemProxyClient {
@@ -163,6 +193,7 @@ impl SystemProxyClient {
                 built_with,
                 built_at: Instant::now(),
                 rebuilding_for: None,
+                failed_for: None,
                 #[cfg(test)]
                 rebuilds: 0,
             }),
@@ -186,6 +217,7 @@ impl SystemProxyClient {
                 built_with,
                 built_at: Instant::now(),
                 rebuilding_for: None,
+                failed_for: None,
                 rebuilds: 0,
             }),
         }
@@ -209,46 +241,118 @@ impl SystemProxyClient {
 
     /// 返回访问 `url` 应使用的客户端；快照变化或超过最长使用时长时先重建。
     pub(crate) async fn current(&self, url: &str) -> reqwest::Client {
+        enum Action {
+            Use(reqwest::Client),
+            Wait(Arc<tokio::sync::Notify>),
+            Rebuild {
+                fallback: reqwest::Client,
+                notify: Arc<tokio::sync::Notify>,
+            },
+        }
+
         let Ok(uri) = url.parse::<Uri>() else {
             return self.cached();
         };
         let latest = self.source.latest().await;
-        let current = {
+        let action = {
             let mut state = self.lock();
-            let expired = self
-                .max_age
-                .is_some_and(|max_age| state.built_at.elapsed() >= max_age);
-            let changed = !Arc::ptr_eq(&state.built_with, &latest)
-                && !same_system_proxy(&state.built_with, &latest, &uri);
-            let claimed = state
-                .rebuilding_for
-                .as_ref()
-                .is_some_and(|target| Arc::ptr_eq(target, &latest));
-            if !(expired || changed) || claimed {
-                return state.client.clone();
+            if let Some(in_flight) = state.rebuilding_for.as_ref()
+                && (Arc::ptr_eq(&in_flight.target, &latest)
+                    || same_system_proxy(&in_flight.target, &latest, &uri))
+            {
+                Action::Wait(Arc::clone(&in_flight.notify))
+            } else {
+                let expired = self
+                    .max_age
+                    .is_some_and(|max_age| state.built_at.elapsed() >= max_age);
+                let changed = !Arc::ptr_eq(&state.built_with, &latest)
+                    && !same_system_proxy(&state.built_with, &latest, &uri);
+                let failed_same = state
+                    .failed_for
+                    .as_ref()
+                    .is_some_and(|target| Arc::ptr_eq(target, &latest));
+                if !(expired || changed) || (failed_same && !expired) {
+                    Action::Use(state.client.clone())
+                } else {
+                    let notify = Arc::new(tokio::sync::Notify::new());
+                    state.rebuilding_for = Some(InFlightRebuild {
+                        target: Arc::clone(&latest),
+                        notify: Arc::clone(&notify),
+                    });
+                    Action::Rebuild {
+                        fallback: state.client.clone(),
+                        notify,
+                    }
+                }
             }
-            state.rebuilding_for = Some(Arc::clone(&latest));
-            state.client.clone()
         };
-        let builder = self.builder;
-        let rebuilt = tokio::task::spawn_blocking(move || builder().build())
-            .await
-            .ok()
-            .and_then(Result::ok);
-        // 构建失败时保留旧客户端，等下一份快照再试，避免每个请求都重建。
-        let Some(rebuilt) = rebuilt else {
-            return current;
-        };
-        let mut state = self.lock();
-        state.client = rebuilt.clone();
-        state.built_with = latest;
-        state.built_at = Instant::now();
-        state.rebuilding_for = None;
-        #[cfg(test)]
-        {
-            state.rebuilds += 1;
+
+        match action {
+            Action::Use(client) => client,
+            Action::Wait(notify) => {
+                // 仅在仍处于同一轮重建时等待通知，避免 notify 在持锁检查后错过触发。
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                let still_rebuilding = {
+                    let state = self.lock();
+                    state
+                        .rebuilding_for
+                        .as_ref()
+                        .is_some_and(|in_flight| Arc::ptr_eq(&in_flight.notify, &notify))
+                };
+                if still_rebuilding {
+                    notified.as_mut().enable();
+                    // 再次确认仍在重建，确保通知器在状态转换前已注册。
+                    let still_rebuilding = {
+                        let state = self.lock();
+                        state
+                            .rebuilding_for
+                            .as_ref()
+                            .is_some_and(|in_flight| Arc::ptr_eq(&in_flight.notify, &notify))
+                    };
+                    if still_rebuilding {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), notified).await;
+                    }
+                }
+                self.cached()
+            }
+            Action::Rebuild { fallback, notify } => {
+                let mut guard = RebuildResetGuard {
+                    client: self,
+                    notify: Arc::clone(&notify),
+                    finished: false,
+                };
+                let builder = self.builder;
+                let rebuilt = tokio::task::spawn_blocking(move || builder().build())
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+                let result = {
+                    let mut state = self.lock();
+                    state.rebuilding_for = None;
+                    match rebuilt {
+                        Some(rebuilt) => {
+                            state.client = rebuilt.clone();
+                            state.built_with = latest;
+                            state.built_at = Instant::now();
+                            state.failed_for = None;
+                            #[cfg(test)]
+                            {
+                                state.rebuilds += 1;
+                            }
+                            rebuilt
+                        }
+                        None => {
+                            state.failed_for = Some(latest);
+                            fallback
+                        }
+                    }
+                };
+                guard.finished = true;
+                notify.notify_waiters();
+                result
+            }
         }
-        rebuilt
     }
 }
 
@@ -394,5 +498,78 @@ mod tests {
         assert_eq!(rebuilds(&client), 1);
         client.current_for_any_host().await;
         assert_eq!(rebuilds(&client), 1);
+    }
+
+    static CONCURRENT: AtomicU8 = AtomicU8::new(0);
+    static CONCURRENT_SOURCE: SystemProxySource =
+        SystemProxySource::new(|| matcher_for(&CONCURRENT), Duration::ZERO);
+    static BUILD_GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn versioned_slow_builder() -> reqwest::ClientBuilder {
+        let generation = BUILD_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        if generation > 1 {
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-client-generation",
+            reqwest::header::HeaderValue::from_str(&generation.to_string()).unwrap(),
+        );
+        reqwest::Client::builder()
+            .no_proxy()
+            .default_headers(headers)
+    }
+
+    #[tokio::test]
+    async fn concurrent_callers_wait_for_single_rebuild_and_receive_new_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        BUILD_GENERATION.store(0, Ordering::SeqCst);
+        CONCURRENT.store(0, Ordering::SeqCst);
+        let client =
+            Arc::new(SystemProxyClient::with_source(&CONCURRENT_SOURCE, versioned_slow_builder).unwrap());
+
+        CONCURRENT.store(1, Ordering::SeqCst);
+        let first_task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.current(URL).await })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let second_task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.current(URL).await })
+        };
+        let (first, second) = tokio::join!(first_task, second_task);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(rebuilds(&client), 1, "concurrent callers share one rebuild");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 1024];
+                let n = stream.read(&mut buf).await.unwrap();
+                seen.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+            seen
+        });
+
+        let target = format!("http://{addr}/probe");
+        let _ = first.get(&target).send().await.unwrap();
+        let _ = second.get(&target).send().await.unwrap();
+        let requests = server.await.unwrap();
+        for raw in requests {
+            assert!(
+                raw.to_ascii_lowercase().contains("x-client-generation: 2"),
+                "caller must receive rebuilt client instead of stale client: {raw}"
+            );
+        }
     }
 }

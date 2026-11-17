@@ -800,7 +800,10 @@ pub(crate) fn outbound_proxy_applies_to_route(profile: &ProviderProfile) -> bool
         profile.base_url.clone()
     };
     let base_url = base_url.as_str();
-    outbound_proxy_applies_to_url_with_matcher(base_url, &SystemProxyMatcher::from_system())
+    outbound_proxy_applies_to_url_with_matcher(
+        base_url,
+        &crate::system_proxy_client::current_system_proxy_matcher(),
+    )
 }
 
 #[cfg(test)]
