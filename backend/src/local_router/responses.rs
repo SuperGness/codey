@@ -242,14 +242,30 @@ impl RouterServer {
                     }
                     Some(route) => {
                         // 每个账号读取自己的凭据文档，额度查询也走该线路的出口代理。
+                        if let Some(route_auth) = route
+                            .official_auth
+                            .as_ref()
+                            .filter(|auth| !auth.accepts_incoming_authorization)
+                        {
+                            let client = self.default_client(&route).await;
+                            let _ = maybe_refresh_non_default_official_account(
+                                route_auth,
+                                route.upstream_proxy.as_deref(),
+                                &self.official_auth_cache,
+                                &client,
+                                &self.proxied_clients,
+                            )
+                            .await;
+                        }
                         let auth_path = route
                             .official_auth
                             .as_ref()
                             .map(|auth| auth.path.clone())
                             .unwrap_or_else(|| self.official_auth_path.clone());
-                        let mut cache = self.account_usage_cache.lock().await;
+                        let account_cache = self.account_usage_cache.cache_for_auth_path(&auth_path);
+                        let mut cache = account_cache.lock().await;
                         crate::account_usage::query_snapshot_at(
-                            cache.for_auth_path(&auth_path),
+                            &mut cache,
                             &auth_path,
                             args.force_refresh.unwrap_or(false),
                             route.upstream_proxy.as_deref(),
@@ -1002,13 +1018,17 @@ impl RouterServer {
             } else {
                 let official_auth = match &route.official_auth {
                     Some(auth) => {
+                        let default_client = self.default_client(route).await;
                         resolve_managed_official_upstream_auth(
                             request,
                             &self.bearer_token,
                             auth,
+                            route.upstream_proxy.as_deref(),
                             &self.official_auth_cache,
+                            &default_client,
+                            &self.proxied_clients,
                         )
-                        .await
+                        .await?
                     }
                     None => {
                         resolve_official_upstream_auth(

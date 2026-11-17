@@ -149,10 +149,7 @@ pub struct AppState {
     official_account_logins: Mutex<crate::official_accounts::LoginSessions>,
     /// SIWC 授权会话与 Codex 登录共用同一回调端口，两边同时只允许一条进行。
     official_siwc_logins: Mutex<crate::official_accounts::SiwcLoginSessions>,
-    /// 令牌刷新按账号串行执行。多个请求同时轮换同一个 refresh token 会让
-    /// 先写回的凭据立刻失效。
-    official_account_refresh_lock: Mutex<()>,
-    account_usage_cache: Arc<Mutex<account_usage::AccountUsageCaches>>,
+    account_usage_cache: Arc<account_usage::AccountUsageCaches>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     pub(crate) failed_runtime_start: Mutex<Option<Arc<crate::launcher::PendingRuntimeCleanup>>>,
     runtime_operation: Mutex<()>,
@@ -298,8 +295,7 @@ impl AppState {
             official_account_probe_prewarm: Mutex::new(None),
             official_account_logins: Mutex::new(crate::official_accounts::LoginSessions::default()),
             official_siwc_logins: Mutex::new(crate::official_accounts::SiwcLoginSessions::default()),
-            official_account_refresh_lock: Mutex::new(()),
-            account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCaches::default())),
+            account_usage_cache: Arc::new(account_usage::AccountUsageCaches::default()),
             runtime: Mutex::new(None),
             failed_runtime_start: Mutex::new(None),
             runtime_operation: Mutex::new(()),
@@ -2099,9 +2095,9 @@ pub(crate) fn install_plugin_route_handler(state: Arc<AppState>) {
                 .map_err(|error| error.to_string())
         })
     }));
-    let weak = Arc::downgrade(&state);
+    let weak_for_siwc = Arc::downgrade(&state);
     crate::official_accounts::set_siwc_invalidated_listener(Some(Arc::new(move |account_id| {
-        let Some(state) = weak.upgrade() else {
+        let Some(state) = weak_for_siwc.upgrade() else {
             return;
         };
         let Some(runtime) = state.runtime_handle.clone() else {
@@ -2116,6 +2112,25 @@ pub(crate) fn install_plugin_route_handler(state: Arc<AppState>) {
             .await;
         });
     })));
+    let weak_for_official = Arc::downgrade(&state);
+    crate::official_accounts::set_official_account_invalidated_listener(Some(Arc::new(
+        move |account_id| {
+            let Some(state) = weak_for_official.upgrade() else {
+                return;
+            };
+            let Some(runtime) = state.runtime_handle.clone() else {
+                return;
+            };
+            runtime.spawn(async move {
+                official_accounts::refresh_official_routes_after_invalid_account(
+                    &state,
+                    "router_token_refresh",
+                    &account_id,
+                )
+                .await;
+            });
+        },
+    )));
     let state = Arc::clone(&state);
     crate::codey_plugins::set_route_handler(Arc::new(move |plugin_id, change| {
         let (route_id, _) = apply_plugin_route_change(&state, plugin_id, change)?;
@@ -2873,9 +2888,10 @@ async fn query_official_account_usage(
     }
 
     let home = codex_home();
-    let mut cache = state.account_usage_cache.lock().await;
+    let account_cache = state.account_usage_cache.cache_for_codex_home(home);
+    let mut cache = account_cache.lock().await;
     account_usage::query_snapshot(
-        cache.for_codex_home(home),
+        &mut cache,
         home,
         force_refresh,
         official_proxy.as_deref(),
@@ -2966,9 +2982,10 @@ async fn query_stored_official_account_usage(
     }
     let upstream_proxy = official_account_usage_proxy(state, &account_id).await;
     let snapshot = {
-        let mut cache = state.account_usage_cache.lock().await;
+        let account_cache = state.account_usage_cache.cache_for_auth_path(&auth_path);
+        let mut cache = account_cache.lock().await;
         account_usage::query_snapshot_at(
-            cache.for_auth_path(&auth_path),
+            &mut cache,
             &auth_path,
             force_refresh,
             upstream_proxy.as_deref(),

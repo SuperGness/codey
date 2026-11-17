@@ -5,13 +5,14 @@ pub(crate) struct OfficialUpstreamAuth {
     pub(crate) account_id: Option<String>,
 }
 
-struct IncomingTokenIatCache {
+struct IncomingTokenClaimsCache {
     token: String,
     issued_at: Option<u64>,
+    chatgpt_account_id: Option<String>,
 }
 
 /// Codex 在同一登录期内会反复发送同一条请求头令牌；只保留最近一次解码结果。
-static LAST_INCOMING_TOKEN_IAT: Mutex<Option<IncomingTokenIatCache>> = Mutex::new(None);
+static LAST_INCOMING_TOKEN_CLAIMS: Mutex<Option<IncomingTokenClaimsCache>> = Mutex::new(None);
 
 pub(crate) fn incoming_chatgpt_account_id(request: &HttpRequest) -> Option<String> {
     incoming_header(request, CHATGPT_ACCOUNT_ID_HEADER)
@@ -27,25 +28,43 @@ fn bearer_token(authorization: &str) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
+#[cfg(test)]
 fn access_token_issued_at(token: &str) -> Option<u64> {
     crate::official_accounts::access_token_issued_at(token)
 }
 
-fn incoming_access_token_issued_at(token: &str) -> Option<u64> {
-    let mut cache = LAST_INCOMING_TOKEN_IAT
+fn incoming_access_token_claims(token: &str) -> (Option<u64>, Option<String>) {
+    {
+        let cache = LAST_INCOMING_TOKEN_CLAIMS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref()
+            && cached.token == token
+        {
+            return (cached.issued_at, cached.chatgpt_account_id.clone());
+        }
+    }
+    let claims = crate::official_accounts::jwt_claims(token);
+    let issued_at = claims
+        .as_ref()
+        .and_then(|claims| claims.get("iat"))
+        .and_then(Value::as_u64);
+    let chatgpt_account_id = claims
+        .as_ref()
+        .and_then(crate::official_accounts::chatgpt_account_id_from_claims);
+    let mut cache = LAST_INCOMING_TOKEN_CLAIMS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(cached) = cache.as_ref()
-        && cached.token == token
-    {
-        return cached.issued_at;
-    }
-    let issued_at = access_token_issued_at(token);
-    *cache = Some(IncomingTokenIatCache {
+    *cache = Some(IncomingTokenClaimsCache {
         token: token.to_string(),
         issued_at,
+        chatgpt_account_id: chatgpt_account_id.clone(),
     });
-    issued_at
+    (issued_at, chatgpt_account_id)
+}
+
+fn incoming_access_token_issued_at(token: &str) -> Option<u64> {
+    incoming_access_token_claims(token).0
 }
 
 /// 已启动的 Codex 进程会把登录时拿到的令牌留在内存里；用户在 Codey 里重新
@@ -113,28 +132,80 @@ pub(crate) async fn resolve_official_upstream_auth(
 
 /// 不使用凭据缓存的 TTL 判断账号是否存在，旧路由快照也必须遵守删除结果。
 pub(crate) async fn validate_managed_official_account(auth: &OfficialRouteAuth) -> Result<()> {
-    let record_path = auth.record_path.clone();
-    let metadata = tokio::task::spawn_blocking(move || std::fs::metadata(record_path))
-        .await
-        .context("检查官方账号记录任务异常退出")?
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!("官方账号已移除，请刷新线路后重试")
-            } else {
-                anyhow::anyhow!(error).context("无法确认官方账号记录，已停止转发")
-            }
-        })?;
+    let metadata = std::fs::metadata(&auth.record_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!("官方账号已移除，请刷新线路后重试")
+        } else {
+            anyhow::anyhow!(error).context("无法确认官方账号记录，已停止转发")
+        }
+    })?;
     anyhow::ensure!(metadata.is_file(), "官方账号记录不是文件，已停止转发");
     Ok(())
+}
+
+fn account_store_for_record_path(record_path: &Path) -> crate::official_accounts::OfficialAccountStore {
+    match record_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            crate::official_accounts::OfficialAccountStore::new(dir)
+        }
+        _ => crate::official_accounts::OfficialAccountStore::for_config_path(
+            &crate::config::default_config_path(),
+        ),
+    }
+}
+
+pub(crate) async fn maybe_refresh_non_default_official_account(
+    route_auth: &OfficialRouteAuth,
+    route_upstream_proxy: Option<&str>,
+    auth_caches: &Mutex<crate::account_usage::OfficialAuthCaches>,
+    default_client: &reqwest::Client,
+    proxied_clients: &Mutex<HashMap<String, reqwest::Client>>,
+) -> Result<bool> {
+    let Some(account) = read_cached_official_auth(&route_auth.record_path, auth_caches).await
+    else {
+        return Ok(false);
+    };
+    if account.invalid_reason.is_some() || !account.has_refresh_token {
+        return Ok(false);
+    }
+    let now = crate::official_accounts::unix_timestamp();
+    let stale = account.expires_at.is_some_and(|exp| {
+        exp <= now.saturating_add(crate::official_accounts::TOKEN_REFRESH_MARGIN_SECONDS)
+    });
+    if !stale {
+        return Ok(false);
+    }
+    let store = account_store_for_record_path(&route_auth.record_path);
+    crate::official_accounts::refresh_non_default_account_for_router(
+        default_client,
+        &store,
+        &route_auth.account_id,
+        route_upstream_proxy,
+        Some(proxied_clients),
+    )
+    .await
 }
 
 pub(crate) async fn resolve_managed_official_upstream_auth(
     request: &HttpRequest,
     router_bearer_token: &str,
     route_auth: &OfficialRouteAuth,
+    route_upstream_proxy: Option<&str>,
     auth_caches: &Mutex<crate::account_usage::OfficialAuthCaches>,
-) -> Option<OfficialUpstreamAuth> {
-    let account = read_cached_official_auth(&route_auth.record_path, auth_caches).await?;
+    default_client: &reqwest::Client,
+    proxied_clients: &Mutex<HashMap<String, reqwest::Client>>,
+) -> std::result::Result<Option<OfficialUpstreamAuth>, (u16, &'static str, String)> {
+    let Some(account) = read_cached_official_auth(&route_auth.record_path, auth_caches).await
+    else {
+        return Ok(None);
+    };
+    if let Some(reason) = account.invalid_reason.as_deref() {
+        return Err((
+            401,
+            "official_account_invalid",
+            format!("官方账号登录已失效（{reason}），请重新登录后重试"),
+        ));
+    }
     let mut stored = account.clone();
     let mut accepts_incoming = false;
     if route_auth.accepts_incoming_authorization
@@ -152,23 +223,87 @@ pub(crate) async fn resolve_managed_official_upstream_auth(
         }
     }
     if let Some(expected) = stored.account_id.as_deref() {
-        let incoming_claims = incoming_openai_authorization(request, router_bearer_token)
+        let token_account = incoming_openai_authorization(request, router_bearer_token)
             .and_then(bearer_token)
-            .and_then(crate::official_accounts::jwt_claims);
-        let token_account = incoming_claims.as_ref().and_then(|claims| {
-            claims
-                .get("https://api.openai.com/auth")
-                .and_then(|auth| auth.get("chatgpt_account_id"))
-                .or_else(|| claims.get("chatgpt_account_id"))
-                .and_then(Value::as_str)
-        });
+            .and_then(|token| incoming_access_token_claims(token).1);
         if incoming_chatgpt_account_id(request).is_some_and(|id| id != expected)
             || token_account.is_some_and(|id| id != expected)
         {
             accepts_incoming = false;
         }
     }
-    resolve_official_auth_from_stored(request, router_bearer_token, Some(stored), accepts_incoming)
+    if !accepts_incoming && stored.has_refresh_token {
+        let now = crate::official_accounts::unix_timestamp();
+        let needs_refresh = stored.expires_at.is_some_and(|exp| {
+            exp <= now.saturating_add(crate::official_accounts::TOKEN_REFRESH_MARGIN_SECONDS)
+        });
+        if needs_refresh {
+            let store = account_store_for_record_path(&route_auth.record_path);
+            match crate::official_accounts::refresh_non_default_account_for_router(
+                default_client,
+                &store,
+                &route_auth.account_id,
+                route_upstream_proxy,
+                Some(proxied_clients),
+            )
+            .await
+            {
+                Ok(true) => {
+                    if let Some(refreshed) =
+                        read_cached_official_auth(&route_auth.record_path, auth_caches).await
+                    {
+                        if let Some(reason) = refreshed.invalid_reason.as_deref() {
+                            return Err((
+                                401,
+                                "official_account_invalid",
+                                format!("官方账号登录已失效（{reason}），请重新登录后重试"),
+                            ));
+                        }
+                        stored = refreshed;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    if let Some(invalid) =
+                        error.downcast_ref::<crate::official_accounts::OfficialAccountInvalid>()
+                    {
+                        return Err((
+                            401,
+                            "official_account_invalid",
+                            format!(
+                                "官方账号登录已失效（{}），请重新登录后重试",
+                                invalid.reason()
+                            ),
+                        ));
+                    }
+                    let current =
+                        read_cached_official_auth(&route_auth.record_path, auth_caches).await;
+                    let now = crate::official_accounts::unix_timestamp();
+                    let still_valid = current
+                        .as_ref()
+                        .and_then(|auth| auth.expires_at)
+                        .or(stored.expires_at)
+                        .is_some_and(|exp| exp > now);
+                    if !still_valid {
+                        return Err((
+                            401,
+                            "openai_auth_refresh_failed",
+                            format!("官方账号访问令牌已过期且刷新失败：{error:#}"),
+                        ));
+                    }
+                    if let Some(current) = current {
+                        stored = current;
+                    }
+                }
+            }
+        }
+    }
+    Ok(resolve_official_auth_from_stored(
+        request,
+        router_bearer_token,
+        Some(stored),
+        accepts_incoming,
+    ))
 }
 
 fn resolve_official_auth_from_stored(
@@ -380,9 +515,7 @@ pub(crate) async fn resolve_siwc_upstream_auth(
         crate::official_accounts::unix_timestamp(),
         crate::official_accounts::SIWC_REFRESH_MARGIN_SECONDS,
     ) {
-        let store = crate::official_accounts::OfficialAccountStore::for_config_path(
-            &crate::config::default_config_path(),
-        );
+        let store = account_store_for_record_path(siwc_path);
         if let Err(error) = crate::official_accounts::refresh_siwc_if_stale(
             default_client,
             &store,

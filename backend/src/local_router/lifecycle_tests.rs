@@ -676,6 +676,106 @@ async fn managed_default_route_accepts_same_account_refresh_and_rejects_foreign_
     assert!(error.2.contains("不是文件"));
 }
 
+#[tokio::test]
+async fn non_default_managed_account_handles_invalid_reason_and_near_expiry() {
+    use base64::Engine as _;
+
+    fn account_with_exp(
+        id: &str,
+        exp: u64,
+        refresh_token: &str,
+    ) -> crate::official_accounts::OfficialAccountRecord {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "iat": exp.saturating_sub(3600),
+                "exp": exp,
+                "https://api.openai.com/auth": { "chatgpt_account_id": id }
+            }))
+            .unwrap(),
+        );
+        crate::official_accounts::OfficialAccountRecord::from_auth(
+            json!({
+                "tokens": {
+                    "access_token": format!("header.{payload}.signature"),
+                    "refresh_token": refresh_token,
+                    "account_id": id
+                }
+            }),
+            1,
+        )
+        .unwrap()
+    }
+
+    let now = crate::official_accounts::unix_timestamp();
+    let directory = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let store = crate::official_accounts::OfficialAccountStore::new(directory.path());
+
+    // 1. 临期但仍未真正过期的非默认账号：离线刷新失败时应保留仍有效的令牌。
+    let near_expiry = account_with_exp("near", now + 60, "refresh-near");
+    store.upsert(&near_expiry).unwrap();
+    let (server, mut route) = managed_account_server(OfficialRouteAuth {
+        account_id: near_expiry.id.clone(),
+        email: None,
+        path: store.account_path(&near_expiry.id),
+        record_path: store.account_path(&near_expiry.id),
+        siwc_path: None,
+        accepts_incoming_authorization: false,
+    });
+    route.upstream_proxy = Some("http://127.0.0.1:9".into());
+    let headers = server
+        .prepare_upstream_request_headers(&managed_account_request(&near_expiry), &route)
+        .await
+        .unwrap();
+    assert_eq!(
+        headers[AUTHORIZATION],
+        format!(
+            "Bearer {}",
+            near_expiry.auth["tokens"]["access_token"].as_str().unwrap()
+        )
+    );
+
+    // 2. 已明确标记失效的账号应立即拒绝，不再尝试网络刷新。
+    let mut marked = account_with_exp("marked", now + 60, "refresh-marked");
+    marked.mark_invalid("官方已撤销凭据");
+    store.upsert(&marked).unwrap();
+    let (marked_server, mut marked_route) = managed_account_server(OfficialRouteAuth {
+        account_id: marked.id.clone(),
+        email: None,
+        path: store.account_path(&marked.id),
+        record_path: store.account_path(&marked.id),
+        siwc_path: None,
+        accepts_incoming_authorization: false,
+    });
+    marked_route.upstream_proxy = Some("http://127.0.0.1:9".into());
+    let error = marked_server
+        .prepare_upstream_request_headers(&managed_account_request(&marked), &marked_route)
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, 401);
+    assert_eq!(error.1, "official_account_invalid");
+
+    // 3. 已真正过期的非默认账号在刷新失败时应明确报错。
+    let expired = account_with_exp("expired", now.saturating_sub(60), "refresh-expired");
+    store.upsert(&expired).unwrap();
+    let (server, mut expired_route) = managed_account_server(OfficialRouteAuth {
+        account_id: expired.id.clone(),
+        email: None,
+        path: store.account_path(&expired.id),
+        record_path: store.account_path(&expired.id),
+        siwc_path: None,
+        accepts_incoming_authorization: false,
+    });
+    expired_route.upstream_proxy = Some("http://127.0.0.1:9".into());
+    let _ = home;
+    let error = server
+        .prepare_upstream_request_headers(&managed_account_request(&expired), &expired_route)
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, 401);
+    assert_eq!(error.1, "openai_auth_refresh_failed");
+}
+
 fn foreign_history_items() -> Value {
     json!([
         {"type":"reasoning","id":"item_summary","summary":[{"type":"summary_text","text":"preserved reasoning"}],"encrypted_content":"foreign-state"},

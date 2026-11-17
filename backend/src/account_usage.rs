@@ -42,6 +42,12 @@ pub(crate) struct OfficialAuth {
     pub(crate) account_id: Option<String>,
     /// 读盘时解析一次，供路由比较新旧令牌时避免重复解码 JWT。
     pub(crate) issued_at: Option<u64>,
+    /// 读盘时从 access token JWT 解析出的过期时间（秒级 Unix 时间戳）。
+    pub(crate) expires_at: Option<u64>,
+    /// 是否带有可用于后台轮换的 refresh_token。
+    pub(crate) has_refresh_token: bool,
+    /// 官方账号记录标记的失效原因（读取嵌套账号记录时提取）。
+    pub(crate) invalid_reason: Option<String>,
 }
 
 impl PartialEq for OfficialAuth {
@@ -229,34 +235,54 @@ pub struct AccountUsageCache {
     auth_fingerprint_initialized: bool,
     auth_fingerprint: Option<OfficialAuthFingerprint>,
     auth_generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct AccountUsageCacheEntry {
+    cache: Arc<tokio::sync::Mutex<AccountUsageCache>>,
     last_used: u64,
 }
 
-/// Usage snapshots for several official accounts at once. Each credential file
-/// keeps its own snapshot, TTL, failure backoff and auth fingerprint, so one
-/// account being unavailable never hides another account's usage.
 #[derive(Debug, Default)]
-pub struct AccountUsageCaches {
-    caches: HashMap<String, AccountUsageCache>,
+struct AccountUsageCachesInner {
+    caches: HashMap<String, AccountUsageCacheEntry>,
     usage_clock: u64,
 }
 
+/// Usage snapshots for several official accounts at once. Each credential file
+/// keeps its own snapshot, TTL, failure backoff, auth fingerprint and async
+/// mutex, so querying or backing off one account never blocks another account.
+#[derive(Debug, Default)]
+pub struct AccountUsageCaches {
+    inner: std::sync::Mutex<AccountUsageCachesInner>,
+}
+
 impl AccountUsageCaches {
-    pub(crate) fn for_auth_path(&mut self, auth_path: &Path) -> &mut AccountUsageCache {
+    pub(crate) fn cache_for_auth_path(
+        &self,
+        auth_path: &Path,
+    ) -> Arc<tokio::sync::Mutex<AccountUsageCache>> {
         let key = auth_path.to_string_lossy().into_owned();
-        if !self.caches.contains_key(&key) && self.caches.len() >= MAX_ACCOUNT_USAGE_CACHES {
-            evict_least_recently_used(&mut self.caches, |cache| cache.last_used);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inner.caches.contains_key(&key) && inner.caches.len() >= MAX_ACCOUNT_USAGE_CACHES {
+            evict_least_recently_used(&mut inner.caches, |entry| entry.last_used);
         }
-        self.usage_clock = self.usage_clock.saturating_add(1);
-        let last_used = self.usage_clock;
-        let cache = self.caches.entry(key).or_default();
-        cache.last_used = last_used;
-        cache
+        inner.usage_clock = inner.usage_clock.saturating_add(1);
+        let last_used = inner.usage_clock;
+        let entry = inner.caches.entry(key).or_default();
+        entry.last_used = last_used;
+        Arc::clone(&entry.cache)
     }
 
-    pub(crate) fn for_codex_home(&mut self, codex_home: &Path) -> &mut AccountUsageCache {
+    pub(crate) fn cache_for_codex_home(
+        &self,
+        codex_home: &Path,
+    ) -> Arc<tokio::sync::Mutex<AccountUsageCache>> {
         let auth_path = codex_home.join(CODEX_AUTH_FILE_NAME);
-        self.for_auth_path(&auth_path)
+        self.cache_for_auth_path(&auth_path)
     }
 }
 
@@ -653,8 +679,35 @@ pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
             })
         });
 
+    let invalid_reason = if value.get("auth").is_some() {
+        value
+            .get("invalidReason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(ToString::to_string)
+    } else {
+        None
+    };
+    let has_refresh_token = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .is_some_and(|token| !token.trim().is_empty());
+    let access_claims = crate::official_accounts::jwt_claims(&access_token);
+    let issued_at = access_claims
+        .as_ref()
+        .and_then(|claims| claims.get("iat"))
+        .and_then(Value::as_u64);
+    let expires_at = access_claims
+        .as_ref()
+        .and_then(|claims| claims.get("exp"))
+        .and_then(Value::as_u64);
+
     Ok(OfficialAuth {
-        issued_at: crate::official_accounts::access_token_issued_at(&access_token),
+        issued_at,
+        expires_at,
+        has_refresh_token,
+        invalid_reason,
         access_token,
         account_id,
     })
@@ -964,7 +1017,7 @@ mod tests {
     #[tokio::test]
     async fn displayed_usage_is_shared_with_log_window_and_survives_refresh_failure() {
         let home = crate::codex_config::codex_home();
-        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(AccountUsageCaches::default()));
+        let shared = Arc::new(AccountUsageCaches::default());
         let mut snapshot = sample_snapshot();
         snapshot.fetched_at = unix_timestamp();
         snapshot.primary = Some(AccountUsageWindow {
@@ -974,9 +1027,9 @@ mod tests {
         });
         snapshot.secondary = None;
         shared
+            .cache_for_codex_home(home)
             .lock()
             .await
-            .for_codex_home(home)
             .store_displayed_snapshot(&home.join(CODEX_AUTH_FILE_NAME), 1, snapshot.clone())
             .unwrap();
         let mut profile = crate::config::ProviderProfile::new("Official");
@@ -995,9 +1048,9 @@ mod tests {
         for force in [false, true] {
             // Force-refresh must fail locally; this test never contacts the official service.
             shared
+                .cache_for_codex_home(home)
                 .lock()
                 .await
-                .for_codex_home(home)
                 .record_failure("offline".into(), Instant::now());
             let value: Value = client
                 .post(format!(
@@ -1116,6 +1169,9 @@ mod tests {
                 access_token: "token-value".into(),
                 account_id: Some("account-value".into()),
                 issued_at: None,
+                expires_at: None,
+                has_refresh_token: true,
+                invalid_reason: None,
             }
         );
     }
@@ -1150,6 +1206,9 @@ mod tests {
                 access_token: "token-value".into(),
                 account_id: Some("account-value".into()),
                 issued_at: None,
+                expires_at: None,
+                has_refresh_token: false,
+                invalid_reason: None,
             },
             "非默认账号的凭据保存在账号记录的 auth 字段里"
         );
@@ -1487,61 +1546,75 @@ mod tests {
         assert_eq!(credits.next_expires_at, Some(expected));
     }
 
-    #[test]
-    fn every_credential_file_keeps_its_own_usage_cache() {
-        let mut caches = AccountUsageCaches::default();
+    #[tokio::test]
+    async fn every_credential_file_keeps_its_own_usage_cache() {
+        let caches = AccountUsageCaches::default();
         let first = std::path::PathBuf::from("/tmp/codey-usage/acct_1.json");
         let second = std::path::PathBuf::from("/tmp/codey-usage/acct_2.json");
 
-        let first_cache = caches.for_auth_path(&first) as *const AccountUsageCache;
+        let first_cache = caches.cache_for_auth_path(&first);
+        let second_cache = caches.cache_for_auth_path(&second);
         assert!(
-            std::ptr::eq(first_cache, caches.for_auth_path(&first)),
+            Arc::ptr_eq(&first_cache, &caches.cache_for_auth_path(&first)),
             "the same credential document reuses one cache entry"
         );
         assert!(
-            !std::ptr::eq(first_cache, caches.for_auth_path(&second)),
+            !Arc::ptr_eq(&first_cache, &second_cache),
             "a second account never reuses the first account cache entry"
         );
+        // Holding account A's lock must not block acquiring account B's lock.
+        {
+            let _first_guard = first_cache.lock().await;
+            assert!(
+                second_cache.try_lock().is_ok(),
+                "different account caches lock independently"
+            );
+        }
 
         for index in 0..MAX_ACCOUNT_USAGE_CACHES + 4 {
             let path = std::path::PathBuf::from(format!("/tmp/codey-usage/acct_{index}.json"));
             caches
-                .for_auth_path(&path)
+                .cache_for_auth_path(&path)
+                .lock()
+                .await
                 .record_failure("offline".into(), Instant::now());
         }
         assert!(
-            caches.caches.len() <= MAX_ACCOUNT_USAGE_CACHES,
+            caches.inner.lock().unwrap().caches.len() <= MAX_ACCOUNT_USAGE_CACHES,
             "the cache map stays bounded"
         );
     }
 
     #[test]
     fn usage_caches_evict_only_the_least_recently_used_credential_file() {
-        let mut caches = AccountUsageCaches::default();
+        let caches = AccountUsageCaches::default();
         let oldest = "/tmp/codey-usage/oldest.json";
         let recent = "/tmp/codey-usage/recent.json";
         caches
-            .for_auth_path(Path::new(oldest))
+            .cache_for_auth_path(Path::new(oldest))
+            .blocking_lock()
             .record_failure("offline".into(), Instant::now());
         caches
-            .for_auth_path(Path::new(recent))
+            .cache_for_auth_path(Path::new(recent))
+            .blocking_lock()
             .record_failure("offline".into(), Instant::now());
         for index in 0..MAX_ACCOUNT_USAGE_CACHES - 2 {
             let path = format!("/tmp/codey-usage/fill_{index}.json");
-            caches.for_auth_path(Path::new(&path));
+            caches.cache_for_auth_path(Path::new(&path));
         }
-        assert_eq!(caches.caches.len(), MAX_ACCOUNT_USAGE_CACHES);
+        assert_eq!(caches.inner.lock().unwrap().caches.len(), MAX_ACCOUNT_USAGE_CACHES);
         // 再次读取 recent，让最早建立的 oldest 成为唯一的淘汰候选。
-        caches.for_auth_path(Path::new(recent));
-        caches.for_auth_path(Path::new("/tmp/codey-usage/overflow.json"));
+        caches.cache_for_auth_path(Path::new(recent));
+        caches.cache_for_auth_path(Path::new("/tmp/codey-usage/overflow.json"));
 
-        assert_eq!(caches.caches.len(), MAX_ACCOUNT_USAGE_CACHES);
+        let inner = caches.inner.lock().unwrap();
+        assert_eq!(inner.caches.len(), MAX_ACCOUNT_USAGE_CACHES);
         assert!(
-            !caches.caches.contains_key(oldest),
+            !inner.caches.contains_key(oldest),
             "超过上限时只淘汰最久未使用的凭据缓存"
         );
-        assert!(caches.caches.contains_key(recent));
-        assert!(caches.caches.contains_key("/tmp/codey-usage/overflow.json"));
+        assert!(inner.caches.contains_key(recent));
+        assert!(inner.caches.contains_key("/tmp/codey-usage/overflow.json"));
     }
 
     #[test]

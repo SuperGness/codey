@@ -2393,7 +2393,7 @@ impl CodeyRuntime {
         trace_log_write_protection_active: &AtomicBool,
         trace_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
-        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        account_usage_cache: Arc<crate::account_usage::AccountUsageCaches>,
     ) -> Result<(Self, oneshot::Receiver<CodexExit>)> {
         let mut stage_timings = StartupStageTimings::default();
         if !crate::codex_config::runtime_router_platform_supported() {

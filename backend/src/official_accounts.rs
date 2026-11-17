@@ -57,7 +57,7 @@ const MAX_JWT_PAYLOAD_BYTES: usize = 64 * 1024;
 const REFRESH_BEFORE_ACTIVATE_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 /// Access tokens that expire within this margin are refreshed before use, so a
 /// request never starts on a token that is about to lapse.
-const TOKEN_REFRESH_MARGIN_SECONDS: u64 = 5 * 60;
+pub(crate) const TOKEN_REFRESH_MARGIN_SECONDS: u64 = 5 * 60;
 /// Same bound as the local router's proxied upstream clients: a handful of
 /// account proxies keep their TLS pools warm; a rare flood of new addresses
 /// just drops the older pools.
@@ -521,7 +521,7 @@ fn string_claim(claims: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn chatgpt_account_id_from_claims(claims: &Value) -> Option<String> {
+pub(crate) fn chatgpt_account_id_from_claims(claims: &Value) -> Option<String> {
     claims
         .get("https://api.openai.com/auth")
         .and_then(|auth| string_claim(auth, "chatgpt_account_id"))
@@ -562,6 +562,7 @@ pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+#[cfg(test)]
 pub(crate) fn access_token_issued_at(token: &str) -> Option<u64> {
     jwt_claims(token)?.get("iat").and_then(Value::as_u64)
 }
@@ -3107,6 +3108,110 @@ pub(crate) fn notify_siwc_invalidated(account_id: &str) {
         .clone();
     if let Some(listener) = listener {
         listener(account_id.to_string());
+    }
+}
+
+static OFFICIAL_REFRESH_LOCKS: std::sync::LazyLock<
+    Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 按账号串行化 OAuth refresh token 刷新，控制面与数据面共用同一把锁，
+/// 防止轮换后的旧 refresh token 被并发再次使用。
+pub(crate) fn official_account_refresh_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    OFFICIAL_REFRESH_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(account_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+type OfficialInvalidatedListener = Arc<dyn Fn(String) + Send + Sync>;
+
+static OFFICIAL_INVALIDATED_LISTENER: Mutex<Option<OfficialInvalidatedListener>> = Mutex::new(None);
+
+pub fn set_official_account_invalidated_listener(listener: Option<OfficialInvalidatedListener>) {
+    *OFFICIAL_INVALIDATED_LISTENER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = listener;
+}
+
+pub(crate) fn notify_official_account_invalidated(account_id: &str) {
+    let listener = OFFICIAL_INVALIDATED_LISTENER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(listener) = listener {
+        listener(account_id.to_string());
+    }
+}
+
+/// 数据面为非默认官方账号执行按需令牌刷新；若已被切为默认账号则跳过，
+/// 避免抢先轮换 Codex 正在维护的 refresh token。
+pub(crate) async fn refresh_non_default_account_for_router(
+    client: &reqwest::Client,
+    store: &OfficialAccountStore,
+    account_id: &str,
+    upstream_proxy: Option<&str>,
+    proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
+) -> Result<bool> {
+    let lock = official_account_refresh_lock(account_id);
+    let _guard = lock.lock().await;
+    let (default_id, record) = {
+        let store = store.clone();
+        let account_id = account_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<(Option<String>, Option<OfficialAccountRecord>)> {
+            Ok((store.default_account_id()?, store.get(&account_id)?))
+        })
+        .await
+        .context("读取官方账号任务异常退出")??
+    };
+    if default_id.as_deref() == Some(account_id) {
+        return Ok(false);
+    }
+    let Some(mut record) = record else {
+        return Ok(false);
+    };
+    if let Some(reason) = record.invalid_reason() {
+        return Err(anyhow::Error::new(OfficialAccountInvalid {
+            reason: reason.to_string(),
+            detail: None,
+        }));
+    }
+    let expected = record.clone();
+    let effective_proxy = upstream_proxy
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+        .map(str::to_string)
+        .or_else(|| record.upstream_proxy.clone());
+    match refresh_if_stale_cached(client, &mut record, effective_proxy.as_deref(), proxied_clients).await {
+        Ok(true) => {
+            let store = store.clone();
+            let updated = tokio::task::spawn_blocking(move || {
+                store.update_credentials_if_current(&expected, &record)
+            })
+            .await
+            .context("保存官方账号刷新凭据任务异常退出")??;
+            anyhow::ensure!(updated.is_some(), "官方账号已移除");
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(error) => {
+            if let Some(invalid) = error.downcast_ref::<OfficialAccountInvalid>() {
+                let was_invalid = expected.invalid();
+                let mut marked = expected.clone();
+                marked.mark_invalid(invalid.reason());
+                let store = store.clone();
+                let written = tokio::task::spawn_blocking(move || {
+                    store.update_credentials_if_current(&expected, &marked)
+                })
+                .await;
+                if !was_invalid && matches!(written, Ok(Ok(Some(ref updated))) if updated.invalid()) {
+                    notify_official_account_invalidated(account_id);
+                }
+            }
+            Err(error)
+        }
     }
 }
 

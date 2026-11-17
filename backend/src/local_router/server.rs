@@ -222,7 +222,7 @@ impl LocalRouter {
 
     pub(crate) async fn start_with_usage(
         config: &CodeyConfig,
-        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        account_usage_cache: Arc<crate::account_usage::AccountUsageCaches>,
     ) -> Result<Self> {
         Self::start_with_logger_and_usage(
             config,
@@ -235,7 +235,7 @@ impl LocalRouter {
     async fn start_with_logger_and_usage(
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
-        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        account_usage_cache: Arc<crate::account_usage::AccountUsageCaches>,
     ) -> Result<Self> {
         let listener = bind_router_listener().await?;
         Self::start_with_bound_listener(config, request_log, account_usage_cache, listener).await
@@ -244,7 +244,7 @@ impl LocalRouter {
     pub(super) async fn start_with_bound_listener(
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
-        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        account_usage_cache: Arc<crate::account_usage::AccountUsageCaches>,
         listener: TcpListener,
     ) -> Result<Self> {
         let address = listener
@@ -898,8 +898,7 @@ pub(crate) struct RouterServer {
     /// 超出后清空重建（代理地址变更是罕见操作，代价仅为重建连接）。
     pub(crate) proxied_clients: Mutex<HashMap<String, reqwest::Client>>,
     pub(crate) official_auth_path: PathBuf,
-    pub(crate) account_usage_cache:
-        Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+    pub(crate) account_usage_cache: Arc<crate::account_usage::AccountUsageCaches>,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCaches>>,
     /// SIWC 直连凭据的读取缓存；与 `official_auth_cache` 分开，两套
     /// 凭据互不覆盖。

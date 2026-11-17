@@ -47,9 +47,9 @@ pub(super) async fn invoke(
                 } else {
                     state
                         .account_usage_cache
+                        .cache_for_codex_home(codex_home())
                         .lock()
                         .await
-                        .for_codex_home(codex_home())
                         .store_displayed_snapshot(
                             &crate::account_usage::codex_auth_path(codex_home()),
                             generation,
@@ -572,8 +572,10 @@ pub(super) async fn refresh_official_account_tokens(
     state: &Arc<AppState>,
     account_id: &str,
 ) -> Result<OfficialAccountRecord, String> {
-    // 刷新统一串行执行：并发轮换同一个 refresh token 会让先写回的凭据立刻失效。
-    let _refresh_guard = state.official_account_refresh_lock.lock().await;
+    // 刷新按账号串行执行：同账号并发轮换 refresh token 会让先写回的凭据
+    // 立刻失效，不同账号互相独立可并行刷新。
+    let account_lock = crate::official_accounts::official_account_refresh_lock(account_id);
+    let _refresh_guard = account_lock.lock().await;
     let store = state.official_accounts();
     let lookup_store = store.clone();
     let lookup_id = account_id.to_string();
