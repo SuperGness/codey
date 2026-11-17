@@ -35,12 +35,10 @@ pub(crate) const CLI_WRAPPER_MISC_MODEL_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MIS
 #[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_MISC_MODEL_FILE_ENV: &str = "CODEY_CODEX_CLI_MISC_MODEL_FILE";
 
-#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn runtime_misc_model_file_path() -> std::path::PathBuf {
     codey_runtime_core::paths::default_app_state_dir().join("runtime-misc-model")
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn write_runtime_misc_model(misc_model: Option<&str>) -> Result<std::path::PathBuf> {
     let path = runtime_misc_model_file_path();
     let content = misc_model.unwrap_or_default().trim();

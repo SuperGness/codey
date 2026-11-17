@@ -220,6 +220,9 @@ pub(crate) fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
 mod tests {
     use super::*;
 
+    // 修改进程级活动代理的测试必须串行执行，避免相互清空状态。
+    static ACTIVE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn resolve_direct(value: &str) -> CodexLaunchProxy {
         match CodexLaunchProxy::resolve(value).unwrap().unwrap() {
             LaunchProxyPlan::Direct { proxy, .. } => proxy,
@@ -347,6 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_app_server_environment_follows_active_then_saved_proxy() {
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
         let saved = || "http://127.0.0.1:7890".to_string();
         set_active(None);
         assert!(resolve_shared_environment(String::new).await.is_empty());
@@ -370,6 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_app_server_environment_never_exposes_credentials() {
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
         set_active(None);
         let environment =
             resolve_shared_environment(|| "http://user:pass@127.0.0.1:9".to_string()).await;
