@@ -78,8 +78,8 @@ const phaseLabels: Record<string, string> = {
 };
 
 const transportLabels: Record<string, string> = { http: "HTTP", http_sse: "HTTP / SSE", ws: "WebSocket" };
-const cardClass = "rounded-xl border border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 bg-[var(--codey-surface-muted,#fafafa)] p-3.5";
-const labelClass = "text-[11px] text-[var(--codey-subtle,#8e8e93)]";
+const cardClass = "request-log-panel";
+const labelClass = "text-[11px] font-bold text-muted";
 
 function labelFor(labels: Record<string, string>, value?: string | null): string {
   return value ? (Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : value) : "未记录";
@@ -92,7 +92,7 @@ function milliseconds(value?: number | null): string {
 function outcomeClass(outcome: string): string {
   if (outcome === "succeeded") return "text-emerald-700 dark:text-emerald-400";
   if (["rejected", "failed", "timed_out", "delivery_failed"].includes(outcome)) return "text-red-700 dark:text-red-400";
-  return "text-[var(--codey-muted,#6e6e73)]";
+  return "text-muted";
 }
 
 export function RequestLogRouteDiagnostics({ item }: { item: RouteDiagnostics }) {
@@ -103,7 +103,7 @@ export function RequestLogRouteDiagnostics({ item }: { item: RouteDiagnostics })
 
   return (
     <section className={cardClass} aria-label="路由诊断">
-      <h4 className="m-0 border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 pb-2 text-xs font-semibold">路由诊断</h4>
+      <h4 className="request-log-panel-title">路由诊断</h4>
       {decision ? (
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2.5">
           <div className="col-span-2 min-w-0">
@@ -139,17 +139,17 @@ export function RequestLogRouteDiagnostics({ item }: { item: RouteDiagnostics })
         </dl>
       ) : null}
       {attempts.length > 0 || omitted > 0 ? (
-        <div className={decision ? "mt-3.5 border-t border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 pt-3.5" : "mt-3"}>
+        <div className={decision ? "mt-4" : "mt-3"}>
           <h5 className="m-0 text-xs font-semibold">上游请求过程</h5>
           <p className={`m-0 mt-1 ${labelClass}`}>按实际发送顺序记录，不包含连接握手。</p>
           <ol className="m-0 mt-2 list-none space-y-2 p-0">
             {attempts.map((attempt, index) => (
-              <li key={`${attempt.sequence}-${index}`} className="min-w-0 rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 bg-[var(--codey-surface,#fff)] p-2.5">
+              <li key={`${attempt.sequence}-${index}`} className="request-log-subpanel">
                 <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                   <span className="break-all font-medium">第 {attempt.sequence} 次 · {labelFor(transportLabels, attempt.transport)}</span>
                   <span className={`break-all font-medium ${outcomeClass(attempt.outcome)}`}>{labelFor(outcomeLabels, attempt.outcome)}</span>
                 </div>
-                <p className="m-0 mt-1 break-words text-[var(--codey-muted,#6e6e73)]">{labelFor(triggerLabels, attempt.trigger)} · {labelFor(phaseLabels, attempt.phase)}{attempt.statusCode != null ? ` · HTTP ${attempt.statusCode}` : ""}</p>
+                <p className="m-0 mt-1 break-words text-muted">{labelFor(triggerLabels, attempt.trigger)} · {labelFor(phaseLabels, attempt.phase)}{attempt.statusCode != null ? ` · HTTP ${attempt.statusCode}` : ""}</p>
                 <dl className="mb-0 mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-3">
                   <div><dt className={labelClass}>请求开始后</dt><dd className="m-0 mt-0.5 font-mono">{milliseconds(attempt.startedMs)}</dd></div>
                   <div><dt className={labelClass}>本次耗时</dt><dd className="m-0 mt-0.5 font-mono">{milliseconds(attempt.durationMs)}</dd></div>

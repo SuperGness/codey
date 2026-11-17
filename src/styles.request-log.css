@@ -1,124 +1,252 @@
+/* 请求日志独立页：页头 → 概览卡片 → 统计卡片 → 请求明细卡片。
+   HeroUI 标准组件（Card、Tabs、Table、Pagination、Chip、Tag、Drawer）保持组件库默认外观，
+   这里只负责页面布局与自有元素；颜色取 HeroUI 语义变量，深浅主题自动跟随。 */
 .request-log-workspace {
-  gap: 14px;
-  padding: 18px 24px 14px;
-  overflow: hidden;
-  background: var(--codey-surface-sunken, #f2f2f5);
-  color: var(--codey-text, #242629);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--codey-surface-sunken, var(--surface-tertiary));
+  color: var(--foreground);
   font-size: 13px;
 }
-.request-log-overview-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-shrink: 0;
-  min-height: 26px;
-  padding: 0 2px;
-}
-
-/* 筛选与概览直接落在画布上，不再叠加边框卡片，减少层层嵌套的盒感。 */
-.request-log-filters { flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
-.request-log-filter-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
-/* 记录状态与页面操作收进筛选行右端，不再单独占用页头。 */
-.request-log-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
-.request-log-search { display: flex; gap: 6px; align-items: center; flex: 1 1 280px; min-width: 240px; max-width: 480px; }
-
-.request-log-overview { flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
-
-/* 统一的白色卡片语言：画布上的唯一层级。 */
-.request-log-results, .request-log-metric, .request-log-analytics {
-  background: var(--codey-surface, #fff);
-  border: 1px solid var(--codey-border, rgba(0, 0, 0, .08));
-  border-radius: 10px;
-  box-shadow: 0 1px 2px rgba(var(--codey-ink-rgb, 0, 0, 0), .035);
-}
-.request-log-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 8px; }
-@media (max-width: 1280px) {
-  .request-log-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
-@media (max-width: 640px) {
-  .request-log-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-.request-log-metric {
+.request-log-page {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  padding: 8px 12px;
+  gap: 16px;
+  /* 外层是纵向 flex，左右 auto 外边距会取消拉伸，需显式占满后再由 max-width 封顶。 */
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 28px 28px 32px;
+}
+
+/* 纵向布局里的卡片与工具条不能被子元素的最小宽度撑出视口。 */
+.request-log-page > *,
+.request-log-records-body > *,
+.request-log-toolbar > * { min-width: 0; }
+.request-log-status { flex-shrink: 0; max-width: 100%; overflow-x: auto; }
+
+/* 页头：标题与说明在左，时间范围与页面操作在右。 */
+.request-log-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 24px;
+}
+.request-log-heading { min-width: 0; }
+.request-log-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.request-log-title {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -.01em;
+  color: var(--foreground);
+}
+.request-log-description { margin: 8px 0 0; font-size: 13px; line-height: 1.4; color: var(--muted); }
+.request-log-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.request-log-range-separator { color: var(--muted); font-size: 12px; }
+.request-log-health-dot {
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.request-log-health-dot.is-warning { animation: request-log-pulse 1.6s ease-in-out infinite; }
+.request-log-health-count { margin-left: 4px; opacity: .72; }
+@keyframes request-log-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .request-log-health-dot.is-warning { animation: none; }
+}
+
+/* 概览指标：色块图标 + 标签 + 等宽读数 + 说明行。 */
+.request-log-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 1100px) {
+  .request-log-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.request-log-stat {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
   min-width: 0;
 }
-.request-log-analytics { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
-.request-log-analytics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.request-log-analytics-section { min-width: 0; display: flex; flex-direction: column; }
-.request-log-analytics-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 0 2px 6px; }
-.request-log-analytics-scroll { max-height: 144px; overflow: auto; border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), .06); border-radius: 6px; }
-/* 统计表：HeroUI Table 覆写密度——小字号、紧凑行距、表头吸顶。 */
-.request-log-analytics-table { font-size: 11px; }
-.request-log-analytics-thead { position: sticky; top: 0; z-index: 1; }
-.request-log-analytics-th {
-  height: auto;
-  padding: 6px 10px;
-  font-size: 10px;
-  font-weight: 500;
-  white-space: nowrap;
-  text-align: left;
-}
-.request-log-analytics-th::after { content: none; }
-.request-log-analytics-td { padding: 4px 10px; }
-
-.request-log-results { min-height: 220px; }
-
-/* 筛选范围内的记录总数：收在筛选行右端的元数据区，读数安静但始终可见。 */
-.request-log-total {
-  font-size: 11px;
-  color: var(--codey-muted, #6e6e73);
-  white-space: nowrap;
-}
-.request-log-total strong {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--codey-text, #1d1d1f);
-}
-
-/* 分段状态筛选：与列表判定 pill 共用色点词汇。 */
-.request-log-segmented {
+.request-log-stat-icon {
+  --tone: var(--accent);
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--codey-surface-sunken, #f1f2f4);
-  border: 1px solid var(--codey-border, rgba(0, 0, 0, .08));
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  color: var(--tone);
+  background: color-mix(in oklab, var(--tone) 13%, transparent);
 }
-.request-log-segment {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  padding: 3px 9px;
-  border-radius: 6px;
+.request-log-stat-icon svg { width: 18px; height: 18px; }
+.request-log-stat-icon.is-blue { --tone: var(--accent); }
+.request-log-stat-icon.is-green { --tone: var(--success); }
+.request-log-stat-icon.is-orange { --tone: var(--warning); }
+.request-log-stat-icon.is-purple { --tone: var(--codey-purple, #8b5cf6); }
+.request-log-stat-icon.is-cyan { --tone: #0891b2; }
+.request-log-stat-body { display: flex; flex-direction: column; min-width: 0; }
+.request-log-stat-label {
   font-size: 12px;
-  line-height: 18px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
   white-space: nowrap;
-  color: var(--codey-muted, #6e6e73);
-  transition: background-color .12s ease, color .12s ease, box-shadow .12s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.request-log-segment:hover { color: var(--codey-text, #1d1d1f); }
-.request-log-segment.is-active {
-  background: var(--codey-surface, #fff);
-  color: var(--codey-text, #1d1d1f);
-  box-shadow: 0 1px 2px rgba(var(--codey-ink-rgb, 0, 0, 0), .12);
+.request-log-stat-value {
+  margin: 9px 0 8px;
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.request-log-segment:focus-visible { outline: 2px solid var(--codey-blue, #007aff); outline-offset: 1px; }
+.request-log-stat-value small {
+  margin-left: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.request-log-stat-detail {
+  font-size: 11.5px;
+  line-height: 1.2;
+  color: color-mix(in oklab, var(--muted) 80%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.request-log-stat-value.is-good,
+.request-log-rate.is-good { color: var(--success); }
+.request-log-stat-value.is-warn,
+.request-log-rate.is-warn { color: var(--warning); }
+.request-log-stat-value.is-bad,
+.request-log-rate.is-bad { color: var(--danger); }
+.request-log-rate { font-weight: 600; }
 
-/* 判定色点：在分段控件里按 tone 类取色，在 pill 里跟随 pill 的文字色。 */
+/* 卡片头：标题说明在左，卡片级操作在右。 */
+.request-log-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.request-log-card-head > :first-child { min-width: 0; flex: 1 1 320px; }
+.request-log-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* 趋势与分组统计：两列并排，各自限高滚动。 */
+.request-log-insights { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.request-log-insight { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.request-log-insight-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.request-log-insight-head h3 { margin: 0; font-size: 13px; font-weight: 700; color: var(--foreground); }
+.request-log-insight-head span { font-size: 11.5px; color: var(--muted); }
+.request-log-insight-scroll { max-height: 260px; overflow: auto; }
+.request-log-insight-label { display: block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-log-insight-empty { display: block; padding: 16px 0; text-align: center; font-size: 12px; color: var(--muted); }
+
+/* 请求明细卡片：页面滚动到此处时正好占满一屏，表格在卡片内滚动并保持表头吸顶。 */
+.request-log-records { height: max(560px, calc(100dvh - 56px)); }
+.request-log-records-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.request-log-total { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.request-log-total strong {
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground);
+}
+.request-log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+.request-log-search { display: flex; flex: 1 1 360px; align-items: center; gap: 8px; min-width: 260px; max-width: 560px; }
+.request-log-facets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.request-log-tab-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+
+.request-log-results {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.request-log-progress {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 10;
+  height: 2px;
+  background: var(--accent);
+  animation: request-log-pulse 1.2s ease-in-out infinite;
+}
+.request-log-state {
+  display: grid;
+  flex: 1;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  min-height: 220px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+.request-log-state strong { font-size: 14px; color: var(--foreground); }
+.request-log-state p { margin: 0; max-width: 480px; font-size: 12px; line-height: 1.6; }
+.request-log-state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--surface-secondary);
+}
+.request-log-state-icon svg { width: 22px; height: 22px; }
+
+.request-log-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding-top: 4px;
+}
+.request-log-pagination-summary { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.request-log-pagination-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
+.request-log-page-jump { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; color: var(--muted); }
+
+/* 标签内容：图标或色点与文字之间留出间距（Chip 自身样式保持组件库默认）。 */
+.request-log-chip-label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+
+/* 判定色点：在状态筛选里按 tone 类取色，在状态 Chip 里跟随 Chip 的文字色。 */
 .request-log-result-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
   flex-shrink: 0;
   background: currentColor;
 }
@@ -127,33 +255,6 @@
 .request-log-result-dot.is-warning { color: var(--codey-amber, #ff9500); }
 .request-log-result-dot.is-muted { color: var(--codey-muted, #6e6e73); }
 
-.request-log-filter-facets { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-
-/* 生效筛选 chips：每条 chip 可单独移除，避免逐个回退下拉框。 */
-.request-log-chips { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
-.request-log-chip {
-  gap: 4px;
-  max-width: 280px;
-  padding: 2px 4px 2px 8px;
-  border-radius: 6px;
-  background: var(--codey-surface, #fff);
-  border: 1px solid var(--codey-border, rgba(0, 0, 0, .08));
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--codey-text-soft, #48484a);
-}
-.request-log-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.request-log-chips-clear {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  padding: 2px 6px;
-  font-size: 11px;
-  color: var(--codey-blue, #007aff);
-  border-radius: 4px;
-}
-.request-log-chips-clear:hover { text-decoration: underline; }
-
 /* ── 请求流 ─────────────────────────────────────────────────────────────
    HeroUI Table：ScrollContainer 承担横向滚动与容器查询，表头（thead）吸顶；
    table-layout:fixed 取表头单元格宽度为列宽，标识列全部固定像素，耗时/
@@ -161,7 +262,7 @@
    大片空白。容器查询在更窄时把行折叠成三行堆叠记录。 */
 .request-log-stream {
   --reqlog-pad: 14px;
-  --reqlog-min: 1350px;
+  --reqlog-min: 1440px;
   container-type: inline-size;
   container-name: reqlog;
   min-height: 0;
@@ -206,15 +307,16 @@
 /* 徽章列居中：协议与思考强度的胶囊在窄列里对中排布。 */
 .request-log-th-protocol,
 .request-log-th-effort { text-align: center; }
-/* 列宽模板：标识列按需取固定像素；耗时/用量/缓存不设宽，三列平分
-   剩余宽度，读数仍靠右钉齐。 */
-.request-log-th-time { width: 300px; }
-.request-log-th-status { width: 120px; }
-.request-log-th-provider { width: 200px; }
-.request-log-th-protocol { width: 88px; }
-.request-log-th-model { width: 210px; }
-.request-log-th-effort { width: 100px; }
-.request-log-th-chevron { width: 30px; }
+/* 列宽模板：时间列容纳完整的 36 位请求 / 会话 ID 与复制图标；标签与读数列固定像素，
+   保证耗时/Token/缓存的两行读数不会互相挤压；供应商与模型不设宽，平分剩余空间。 */
+.request-log-th-time { width: 310px; }
+.request-log-th-status { width: 108px; }
+.request-log-th-protocol { width: 76px; }
+.request-log-th-effort { width: 104px; }
+.request-log-th-latency { width: 156px; }
+.request-log-th-tokens { width: 140px; }
+.request-log-th-cache { width: 104px; }
+.request-log-th-chevron { width: 32px; }
 .request-log-row {
   height: 62px;
   cursor: pointer;
@@ -251,8 +353,8 @@
 .request-log-cell-cache,
 .request-log-cell-chevron { align-items: flex-end; }
 /* 思考强度列：胶囊包裹读数居中，长预算值截断后由悬浮提示兜底。 */
-.request-log-cell-effort { align-items: center; }
-.request-log-cell-effort .request-log-meta-tag { max-width: 100%; overflow: hidden; }
+.request-log-cell-effort,
+.request-log-cell-protocol { align-items: center; }
 /* 偶数行淡底：宽表里的横向视线引导，悬停与选中仍覆盖其上。 */
 .request-log-row:nth-child(even) { background: var(--codey-surface-muted, #fafafc); }
 @media (hover: hover) {
@@ -306,41 +408,8 @@
 }
 .request-log-none { color: var(--codey-subtle, #8e8e93); font-size: 10.5px; }
 
-/* 状态列：带色点的判定 pill，错误细节交给悬浮提示。 */
+/* 状态列：带色点的判定 Chip，错误细节交给悬浮提示。 */
 .request-log-cell-status { align-items: flex-start; gap: 4px; }
-.request-log-result {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.35;
-  padding: 2px 8px;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  white-space: nowrap;
-  cursor: default;
-}
-.request-log-result.is-success {
-  color: var(--codey-green, #047857);
-  background: color-mix(in oklch, var(--codey-green) 12%, transparent);
-  border-color: color-mix(in oklch, var(--codey-green) 30%, transparent);
-}
-.request-log-result.is-danger {
-  color: var(--codey-red, #b91c1c);
-  background: color-mix(in oklch, var(--codey-red) 11%, transparent);
-  border-color: color-mix(in oklch, var(--codey-red) 30%, transparent);
-}
-.request-log-result.is-warning {
-  color: var(--codey-amber, #b45309);
-  background: color-mix(in oklch, var(--codey-amber) 14%, transparent);
-  border-color: color-mix(in oklch, var(--codey-amber) 34%, transparent);
-}
-.request-log-result.is-muted {
-  color: var(--codey-muted, #6e6e73);
-  background: var(--codey-surface-sunken, #f1f2f4);
-  border-color: var(--codey-border, #e2e4e8);
-}
 .request-log-status-sub {
   font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 10.5px;
@@ -384,37 +453,6 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
-}
-.request-log-kind-tag {
-  flex-shrink: 0;
-  border-radius: 999px;
-  padding: 0.5px 7px;
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: .02em;
-  line-height: 1.4;
-  white-space: nowrap;
-  border: 1px solid var(--codey-border, #e2e4e8);
-  background: var(--codey-surface-sunken, #f1f2f4);
-  color: var(--codey-muted, #61666e);
-}
-.request-log-subagent-tag {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  border-radius: 4px;
-  padding: 0 4.5px;
-  height: 16px;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: .02em;
-  white-space: nowrap;
-  cursor: default;
-  color: var(--codey-purple, #7e22ce);
-  background: color-mix(in oklch, var(--codey-purple, #af52de) 12%, transparent);
-  border: 1px solid color-mix(in oklch, var(--codey-purple, #af52de) 28%, transparent);
 }
 /* 模型路由副行：映射后的发送模型用蓝箭头，上游回报的模型用琥珀箭头。 */
 .request-log-model-route {
@@ -550,7 +588,7 @@
   margin-top: 2px;
 }
 
-/* 缓存列：读取缓存与命中率上下两行对齐，按命中率混色。 */
+/* 缓存列：读取缓存与命中率上下两行对齐，命中率 Chip 按档位取语义色。 */
 .request-log-cell-cache { align-items: flex-end; gap: 3px; }
 .request-log-cache-grid {
   display: flex;
@@ -575,25 +613,6 @@
   color: var(--codey-muted, #6e6e73);
   flex-shrink: 0;
 }
-.request-log-cache-pill {
-  --cache-hue: color-mix(in oklch, var(--codey-green) var(--cache-rate, 0%), var(--codey-amber));
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  padding: 1px 7px;
-  border-radius: 6px;
-  line-height: 1.35;
-  white-space: nowrap;
-  cursor: default;
-  color: var(--cache-hue);
-  background: color-mix(in oklch, var(--cache-hue) 13%, transparent);
-  border: 1px solid color-mix(in oklch, var(--cache-hue) 30%, transparent);
-}
-.request-log-cache-pill.is-empty { --cache-hue: var(--codey-subtle, #8e8e93); cursor: help; }
-.request-log-cache-dot { width: 6px; height: 6px; border-radius: 2px; background: var(--cache-hue); flex-shrink: 0; }
 
 .request-log-chevron { color: var(--codey-subtle, #8e8e93); justify-self: end; flex-shrink: 0; }
 
@@ -650,147 +669,114 @@
   .request-log-status-sub { display: none; }
 }
 
-.request-log-protocol {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 36px;
-  height: 20px;
-  padding: 0 6px;
-  border-radius: 5px;
+
+/* 详情抽屉：分组面板 + 标签/读数网格。 */
+.request-log-detail-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.request-log-detail-subtitle {
+  margin-top: 4px;
   font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.request-log-detail { display: grid; gap: 12px; min-width: 0; font-size: 12.5px; color: var(--foreground); }
+.request-log-panel {
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--surface-secondary);
+}
+.request-log-panel.is-danger { background: color-mix(in oklab, var(--danger) 8%, var(--surface)); }
+.request-log-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.request-log-panel-title { margin: 0; font-size: 12px; font-weight: 800; line-height: 1; color: var(--muted); }
+.request-log-panel.is-danger .request-log-panel-title { color: var(--danger); }
+.request-log-panel-figure {
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.request-log-panel-note { margin: 12px 0 0; font-size: 12px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.request-log-rows { display: grid; gap: 9px; margin-top: 12px; }
+.request-log-kv { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.request-log-kv > span { color: var(--muted); }
+.request-log-kv > strong,
+.request-log-kv > code {
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.request-log-kv .is-accent { color: var(--accent); }
+.request-log-kv .is-warning { color: var(--warning); }
+.request-log-panel.is-danger code { color: var(--danger); }
+.request-log-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 12px 0 0;
+}
+.request-log-fields > div { min-width: 0; }
+.request-log-fields > .is-wide { grid-column: 1 / -1; }
+.request-log-fields dt { font-size: 11px; font-weight: 700; line-height: 1; color: color-mix(in oklab, var(--muted) 82%, transparent); }
+.request-log-fields dd {
+  margin: 6px 0 0;
+  min-width: 0;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: .04em;
-  line-height: 1;
-  white-space: nowrap;
-  border: 1px solid transparent;
-  box-shadow: 0 1px 2px rgba(var(--codey-ink-rgb, 0, 0, 0), .02);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
-.request-log-protocol-http {
-  background: color-mix(in oklch, var(--codey-blue, #007aff) 10%, transparent);
-  color: var(--codey-blue, #007aff);
-  border-color: color-mix(in oklch, var(--codey-blue, #007aff) 26%, transparent);
+.request-log-fields dd.is-mono {
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
-.request-log-protocol-sse {
-  background: color-mix(in oklch, var(--codey-green, #34c759) 10%, transparent);
-  color: var(--codey-green, #047857);
-  border-color: color-mix(in oklch, var(--codey-green, #34c759) 26%, transparent);
+.request-log-fields dd.is-large {
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }
-.request-log-protocol-ws {
-  background: color-mix(in oklch, var(--codey-purple, #af52de) 10%, transparent);
-  color: var(--codey-purple, #7e22ce);
-  border-color: color-mix(in oklch, var(--codey-purple, #af52de) 26%, transparent);
+.request-log-field-inline { display: flex; align-items: center; gap: 6px; }
+.request-log-field-stack { display: grid; gap: 2px; }
+.request-log-field-stack .is-danger { color: var(--danger); }
+.request-log-code { display: grid; gap: 6px; margin-top: 12px; min-width: 0; }
+.request-log-code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.request-log-code pre {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  font-family: var(--codey-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
 }
-.request-log-protocol-grpc {
-  background: color-mix(in oklch, var(--codey-amber, #ff9500) 10%, transparent);
-  color: var(--codey-amber, #b45309);
-  border-color: color-mix(in oklch, var(--codey-amber, #ff9500) 26%, transparent);
-}
-.request-log-protocol-default {
-  background: var(--codey-surface-sunken, #f1f2f4);
-  color: var(--codey-muted, #61666e);
-  border-color: var(--codey-border, #e2e4e8);
-}
-/* 思考强度胶囊：灯泡图标点明语义，档位色落在图标、文字与描边上；
-   底色比标记行其他胶囊再淡一点，靠色彩浓度分级而非标签大小。 */
-.request-log-meta-tag {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  border-radius: 999px;
-  padding: 0.5px 8px 0.5px 6px;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: .02em;
-  line-height: 1.5;
-  white-space: nowrap;
-  border: 1px solid transparent;
-}
-.request-log-effort-low {
-  background: var(--codey-surface-sunken, #f1f2f4);
-  color: var(--codey-muted, #61666e);
-  border-color: var(--codey-border, #e2e4e8);
-}
-.request-log-effort-medium {
-  background: color-mix(in oklch, var(--codey-blue, #1d4ed8) 10%, transparent);
-  color: var(--codey-blue, #1d4ed8);
-  border-color: color-mix(in oklch, var(--codey-blue, #1d4ed8) 30%, transparent);
-}
-.request-log-effort-high {
-  background: color-mix(in oklch, var(--codey-purple, #7e22ce) 11%, transparent);
-  color: var(--codey-purple, #7e22ce);
-  border-color: color-mix(in oklch, var(--codey-purple, #7e22ce) 32%, transparent);
-}
-.request-log-effort-max {
-  background: color-mix(in oklch, var(--codey-amber, #c2410c) 12%, transparent);
-  color: var(--codey-amber, #c2410c);
-  border-color: color-mix(in oklch, var(--codey-amber, #c2410c) 34%, transparent);
-}
-.request-log-official-tag {
-  flex-shrink: 0;
-  border-radius: 4px;
-  background: var(--codey-blue-soft, #eaf3ff);
-  padding: 1px 5px;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.3;
-  color: var(--codey-blue, #007aff);
+.request-log-subpanel {
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface);
 }
 
-.request-log-pagination {
-  padding: 8px 14px;
-  background: var(--codey-surface, #fff);
-  border-radius: 0 0 10px 10px;
+@media (max-width: 1100px) {
+  .request-log-insights { grid-template-columns: minmax(0, 1fr); }
 }
-.request-log-pagination .pagination {
-  width: auto;
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0;
+@media (max-width: 720px) {
+  .request-log-page { padding: 18px 14px 20px; gap: 12px; }
+  .request-log-header { align-items: stretch; }
+  .request-log-header-actions { justify-content: flex-start; }
+  .request-log-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .request-log-search { flex-basis: 100%; max-width: none; min-width: 0; }
+  .request-log-records { height: auto; min-height: 560px; }
+  .request-log-pagination { flex-direction: column; align-items: stretch; }
+  .request-log-pagination-controls { justify-content: flex-start; }
+  .request-log-fields { grid-template-columns: minmax(0, 1fr); }
 }
-.request-log-pagination .pagination__content {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.request-log-pagination .pagination__link {
-  border-radius: 6px;
-  font-variant-numeric: tabular-nums;
-  transition: all 0.15s ease;
-}
-.request-log-pagination .pagination__link[data-active="true"] {
-  background: var(--codey-blue, #007aff);
-  color: #ffffff;
-  font-weight: 600;
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--codey-blue) 25%, transparent);
-}
-.request-log-pagination .pagination__link:not([data-active="true"]):hover:not(:disabled):not([aria-disabled="true"]) {
-  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
-  color: var(--codey-text, #1d1d1f);
-}
-.request-log-detail > div:first-child { padding: 22px 24px; background: var(--codey-surface, white); }
-.request-log-detail > div:nth-child(2) { padding: 24px; }
-.request-log-detail > div:nth-child(2) > div:not([class*="border-red"]) { border: 0; border-radius: 0; background: var(--codey-surface, white); padding: 0 0 20px; border-bottom: 1px solid var(--codey-border, #e7e8eb); }
-.request-log-detail [class*="text-purple"] { color: var(--codey-text-soft, #48484a); }
-.request-log-detail dd { overflow-wrap: anywhere; }
-@media (min-width: 1600px) {
-  .request-log-workspace { padding-inline: 36px; }
-}
-@media (max-width: 900px) {
-  .request-log-workspace { padding: 14px 14px 10px; gap: 10px; }
-  .request-log-analytics-grid { grid-template-columns: 1fr; }
-}
-@media (max-width: 600px) {
-  .request-log-workspace { overflow: auto; }
-  .request-log-meta { flex-basis: 100%; }
-  .request-log-search { flex-basis: 100%; max-width: 100%; }
-  .request-log-overview-heading { flex-wrap: wrap; gap: 6px; }
-  .request-log-overview-heading > div { flex-wrap: wrap; }
-  .request-log-results { flex: 1 0 360px; }
-  .request-log-pagination nav { display: flex; flex-wrap: wrap; gap: 4px; }
-  .request-log-detail > div:first-child { padding: 16px; flex-wrap: wrap; gap: 12px; }
-  .request-log-detail > div:nth-child(2) { padding: 16px; }
+@media (max-width: 460px) {
+  .request-log-summary { grid-template-columns: minmax(0, 1fr); }
 }

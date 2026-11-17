@@ -69,8 +69,7 @@ test("request log output speed uses one decimal and preserves unknown values", a
   assert.match(viewer, /const tpsText = formatTokensPerSecondValue\(item\.outputTokensPerSecond\);/);
   assert.match(viewer, /function formatTokensPerSecond\(value\?: number \| null\) \{[\s\S]{0,80}formatTokensPerSecondValue\(value\)/);
   assert.match(viewer, /输出速度<\/span>[\s\S]*?formatTokensPerSecond\(selectedItem\.outputTokensPerSecond\)/);
-  assert.match(viewer, /平均总耗时 \{formatDuration\(stats\.avgDuration\)\} · <span[^>]*>平均输出 \{formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)\}/);
-  assert.match(viewer, /hidden md:inline"[^>]*>速度:[\s\S]*?formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)/);
+  assert.match(viewer, /平均总耗时 \$\{formatDuration\(stats\.avgDuration\)\} · 平均输出 \$\{formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)\}/);
   assert.equal((usage.match(/avgOutputTokensPerSecond: number \| null/g) ?? []).length, 2);
 });
 
@@ -230,14 +229,14 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /profile\.officialAccount \|\| Boolean\(profile\.officialAccountId\)/);
   assert.match(viewer, /label: "SSE", value: "http_sse"/);
   assert.match(viewer, /item\.upstreamTransport === "http_sse" \? "SSE" : \(item\.upstreamTransport \|\| "—"\)\.toUpperCase\(\)/);
-  assert.match(viewer, /protocolTagClass\(item\.upstreamTransport\)/);
+  assert.match(viewer, /color=\{protocolChipColor\(item\.upstreamTransport\)\}/);
   assert.doesNotMatch(viewer, /item\.requestProtocol/);
   assert.match(viewer, /<Pagination[^>]*className="w-auto"/);
   const styles = await readSource("src/styles.request-log.css");
-  assert.match(styles, /\.request-log-protocol-http/);
-  assert.match(styles, /\.request-log-protocol-sse/);
-  assert.match(styles, /\.request-log-protocol-ws/);
-  assert.match(styles, /\.request-log-pagination \.pagination[\s\S]*width:\s*auto/);
+  // 表格标签统一使用 HeroUI Chip 的语义色，不再用页面样式改写胶囊外观。
+  assert.doesNotMatch(styles, /\.request-log-protocol|\.request-log-meta-tag|\.request-log-cache-pill/);
+  // 分页等 HeroUI 标准组件保持组件库默认样式，页面样式表不再改写其内部类名。
+  assert.doesNotMatch(styles, /\.pagination__|\.tabs__|\.card__|\.tag\b|\.drawer__/);
   assert.match(viewer, /<Drawer[\s\S]*onOpenChange=\{[^}]*setSelectedItem\(null\)/);
   assert.match(viewer, /<Table\.Row[\s\S]*?onAction=\{\(\) => onOpen\(item\)\}/);
   // Table 行通过 onAction 打开详情，复制按钮仍阻断点击冒泡。
