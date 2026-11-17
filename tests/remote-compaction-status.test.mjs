@@ -26,6 +26,26 @@ test("getRouteCompactionStatus correctly identifies official, remote, and local 
   assert.equal(unavailableOfficial.badgeVariant, "secondary");
   assert.equal(unavailableOfficial.reason, "官方账号未就绪");
 
+  const storedOfficialWhenDefaultMissing = getRouteCompactionStatus(
+    { ...officialRoute, officialAccountId: "acct-stored" },
+    { running: true },
+    false,
+  );
+  assert.equal(storedOfficialWhenDefaultMissing.mode, "remote");
+  assert.equal(storedOfficialWhenDefaultMissing.badgeText, "远程压缩");
+  assert.equal(storedOfficialWhenDefaultMissing.badgeVariant, "success");
+
+  const siwcOfficialRoute = {
+    ...officialRoute,
+    officialAccountId: "acct-siwc",
+    officialSiwc: true,
+  };
+  const siwcStatus = getRouteCompactionStatus(siwcOfficialRoute, { running: true }, true);
+  assert.equal(siwcStatus.mode, "remote");
+  assert.equal(siwcStatus.badgeText, "网关压缩");
+  assert.equal(siwcStatus.badgeVariant, "success");
+  assert.equal(siwcStatus.reason, "官方直连不支持上游原生压缩");
+
   const customRemoteRoute = {
     id: "route-custom-remote",
     name: "自建-开启",

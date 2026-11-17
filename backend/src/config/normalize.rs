@@ -1068,6 +1068,10 @@ impl CodeyConfig {
                     .is_some_and(|s| s.transport.is_some())
                 {
                     "插件传输不支持原生压缩"
+                } else if profile.official_account && !self.official_route_usable(profile) {
+                    "官方账号未就绪"
+                } else if profile.official_account && profile.official_siwc {
+                    "官方直连不支持上游原生压缩"
                 } else if profile.upstream_protocol != UPSTREAM_PROTOCOL_OPENAI_RESPONSES {
                     "上游协议不支持原生压缩"
                 } else {

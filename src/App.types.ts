@@ -44,6 +44,8 @@ export type Profile = {
   /** 宿主已返回的插件声明；这里只使用独立于用户设置的模型能力。 */
   pluginRouteSpec?: PluginRouteSpec;
   officialAccount: boolean;
+  /** 该线路是否启用了官方直连（SIWC）。 */
+  officialSiwc?: boolean;
   /** 该线路来自哪个已保存的官方账号；多条官方线路靠它区分。 */
   officialAccountId?: string;
   supportsRemoteCompaction?: boolean;

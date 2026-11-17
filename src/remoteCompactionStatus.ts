@@ -16,13 +16,25 @@ export function getRouteCompactionStatus(
   const isOfficial = profile.authMode === "officialAccount" || profile.officialAccount;
 
   if (isOfficial) {
-    if (officialAccountAvailable === false) {
+    const usable =
+      runtimeStatus?.remoteCompaction?.configured !== false &&
+      (officialAccountAvailable !== false || Boolean(profile.officialAccountId));
+    if (!usable) {
       return {
         mode: "local",
         badgeText: "本地压缩",
         badgeVariant: "secondary",
         tooltip: "使用本地压缩（官方账号未就绪）",
         reason: "官方账号未就绪",
+      };
+    }
+    if (profile.officialSiwc) {
+      return {
+        mode: "remote",
+        badgeText: "网关压缩",
+        badgeVariant: "success",
+        tooltip: "由 Codey 网关生成等价摘要（官方直连不支持上游原生压缩）",
+        reason: "官方直连不支持上游原生压缩",
       };
     }
     return {
