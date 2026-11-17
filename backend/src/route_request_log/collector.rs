@@ -33,7 +33,6 @@ pub(crate) struct RouteRequestLogProducer {
     /// `session_stats` 注册表写聚合结果。
     queue: Option<Arc<LogWriterQueue>>,
     accepting: Arc<AtomicBool>,
-    submitting: Arc<AtomicU64>,
     sample_rate_per_million: u32,
     sample_sequence: Arc<AtomicU64>,
     stats: Arc<RouteRequestLogStats>,
@@ -183,18 +182,11 @@ impl RouteRequestLogProducer {
         let Some(queue) = &self.queue else {
             return;
         };
-        self.submitting.fetch_add(1, Ordering::AcqRel);
-        if !self.accepting.load(Ordering::Acquire) {
-            self.submitting.fetch_sub(1, Ordering::AcqRel);
-            self.stats.dropped_closed.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
         let queued = QueuedEntry {
             entry,
             enqueued_at: Instant::now(),
         };
         let result = queue.try_push(queued);
-        self.submitting.fetch_sub(1, Ordering::AcqRel);
         match result {
             Ok(()) => {
                 self.stats.accepted.fetch_add(1, Ordering::Relaxed);
@@ -560,7 +552,6 @@ impl RouteRequestLogProbe {
         RouteRequestLogProducer {
             queue: Some(Arc::new(LogWriterQueue::new(1))),
             accepting: Arc::new(AtomicBool::new(true)),
-            submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
             sample_sequence: Arc::new(AtomicU64::new(0)),
             stats: Arc::new(RouteRequestLogStats::default()),
@@ -1194,7 +1185,6 @@ impl RouteRequestLogController {
             stats_producer: Arc::new(RouteRequestLogProducer {
                 queue: None,
                 accepting: Arc::new(AtomicBool::new(true)),
-                submitting: Arc::new(AtomicU64::new(0)),
                 sample_rate_per_million: PARTS_PER_MILLION as u32,
                 sample_sequence: Arc::new(AtomicU64::new(0)),
                 stats: Arc::new(RouteRequestLogStats::default()),
@@ -1415,11 +1405,9 @@ impl RouteRequestLogRuntime {
         let queue = Arc::new(LogWriterQueue::new(config.queue_capacity));
         let stats = Arc::new(RouteRequestLogStats::default());
         let accepting = Arc::new(AtomicBool::new(true));
-        let submitting = Arc::new(AtomicU64::new(0));
         let producer = RouteRequestLogProducer {
             queue: Some(Arc::clone(&queue)),
             accepting: Arc::clone(&accepting),
-            submitting: Arc::clone(&submitting),
             sample_rate_per_million: config.sample_rate_per_million,
             sample_sequence: Arc::new(AtomicU64::new(0)),
             stats: Arc::clone(&stats),
@@ -1429,7 +1417,6 @@ impl RouteRequestLogRuntime {
         let worker_queue = Arc::clone(&queue);
         let worker_stats = Arc::clone(&stats);
         let worker_accepting = Arc::clone(&accepting);
-        let worker_submitting = Arc::clone(&submitting);
         let (done_tx, done_rx) = oneshot::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker = match thread::Builder::new()
@@ -1452,7 +1439,6 @@ impl RouteRequestLogRuntime {
                         sink,
                         worker_config,
                         &worker_accepting,
-                        &worker_submitting,
                         &worker_stats,
                     )
                 }));

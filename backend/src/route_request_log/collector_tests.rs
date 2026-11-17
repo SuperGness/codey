@@ -31,7 +31,6 @@ fn test_producer_with_queue(
     let producer = RouteRequestLogProducer {
         queue: Some(Arc::clone(&queue)),
         accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
         sample_rate_per_million,
         sample_sequence: Arc::new(AtomicU64::new(0)),
         stats,
@@ -857,6 +856,18 @@ async fn failed_sink_readiness_never_publishes_a_producer() {
             }))
             .is_none()
     );
+}
+
+#[test]
+fn closed_queue_rejects_a_producer_with_a_stale_accepting_flag() {
+    let stats = Arc::new(RouteRequestLogStats::default());
+    let (producer, queue) = test_producer_with_queue(1, 1_000_000, Arc::clone(&stats), None);
+    queue.request_shutdown();
+    producer.submit(sample_entry("after-shutdown"));
+    assert_eq!(stats.accepted.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.dropped_closed.load(Ordering::Relaxed), 1);
+    assert!(!producer.accepting.load(Ordering::Relaxed));
+    assert!(queue.try_pop().is_none());
 }
 
 #[test]

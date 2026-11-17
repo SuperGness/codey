@@ -649,7 +649,7 @@ fn sqlite_sink_prunes_expired_rows_during_normal_writes() {
 
 #[test]
 fn full_queue_shuts_down_and_drains_promptly_without_polling() {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::AtomicBool;
 
     let directory = tempfile::tempdir().unwrap();
     let config = crate::config::RouteRequestLogConfig {
@@ -664,7 +664,6 @@ fn full_queue_shuts_down_and_drains_promptly_without_polling() {
     let sink = BatchSink::open(&worker_config).unwrap();
     let queue = Arc::new(super::LogWriterQueue::new(config.queue_capacity));
     let accepting = Arc::new(AtomicBool::new(true));
-    let submitting = Arc::new(AtomicU64::new(0));
     let stats = Arc::new(RouteRequestLogStats::default());
 
     for id in ["r1", "r2", "r3"] {
@@ -677,7 +676,6 @@ fn full_queue_shuts_down_and_drains_promptly_without_polling() {
 
     let worker_queue = Arc::clone(&queue);
     let worker_accepting = Arc::clone(&accepting);
-    let worker_submitting = Arc::clone(&submitting);
     let worker_stats = Arc::clone(&stats);
     let handle = thread::spawn(move || {
         super::writer_loop(
@@ -685,7 +683,6 @@ fn full_queue_shuts_down_and_drains_promptly_without_polling() {
             sink,
             worker_config,
             &worker_accepting,
-            &worker_submitting,
             &worker_stats,
         );
     });
@@ -697,4 +694,95 @@ fn full_queue_shuts_down_and_drains_promptly_without_polling() {
         queue.try_push(queued(sample_entry("r5"))),
         Err(super::TryPushError::Shutdown)
     ));
+}
+
+#[test]
+fn concurrent_shutdown_flushes_exactly_the_accepted_entries() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Barrier, mpsc};
+
+    const PRODUCERS: usize = 4;
+    const ENTRIES_PER_PRODUCER: usize = 65;
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::config::RouteRequestLogConfig {
+        enabled: true,
+        backend: RouteRequestLogBackend::Ndjson,
+        batch_size: 3,
+        queue_capacity: PRODUCERS * ENTRIES_PER_PRODUCER,
+        flush_interval_ms: 60_000,
+        ..Default::default()
+    };
+    let worker_config = super::WorkerConfig::new(&config, directory.path().to_path_buf());
+    let sink = BatchSink::open(&worker_config).unwrap();
+    let queue = Arc::new(super::LogWriterQueue::new(config.queue_capacity));
+    let stats = Arc::new(RouteRequestLogStats::default());
+    let start_shutdown = Barrier::new(PRODUCERS + 1);
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker_queue = Arc::clone(&queue);
+    let worker_stats = Arc::clone(&stats);
+    let worker = thread::spawn(move || {
+        super::writer_loop(
+            worker_queue,
+            sink,
+            worker_config,
+            &AtomicBool::new(true),
+            &worker_stats,
+        );
+        done_tx.send(()).unwrap();
+    });
+
+    let mut accepted = thread::scope(|scope| {
+        let producers = (0..PRODUCERS)
+            .map(|producer| {
+                let queue = &queue;
+                let start_shutdown = &start_shutdown;
+                scope.spawn(move || {
+                    let first = format!("{producer}-0");
+                    assert!(queue.try_push(queued(sample_entry(&first))).is_ok());
+                    let mut accepted = vec![first];
+                    start_shutdown.wait();
+                    for sequence in 1..ENTRIES_PER_PRODUCER {
+                        let id = format!("{producer}-{sequence}");
+                        match queue.try_push(queued(sample_entry(&id))) {
+                            Ok(()) => accepted.push(id),
+                            Err(super::TryPushError::Shutdown) => {}
+                            Err(super::TryPushError::Full) => panic!("queue fits all test entries"),
+                        }
+                    }
+                    accepted
+                })
+            })
+            .collect::<Vec<_>>();
+        start_shutdown.wait();
+        queue.request_shutdown();
+        // 关闭后立即排空，不应等待正常批量写入期限。
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        producers
+            .into_iter()
+            .flat_map(|producer| producer.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(matches!(
+        queue.try_push(queued(sample_entry("after-shutdown"))),
+        Err(super::TryPushError::Shutdown)
+    ));
+    let contents = fs::read_to_string(directory.path().join(super::NDJSON_FILE_NAME)).unwrap();
+    let mut written = contents
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["requestId"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    accepted.sort();
+    written.sort();
+    assert_eq!(written, accepted);
+    assert_eq!(
+        stats.entries_written.load(Ordering::Relaxed),
+        accepted.len() as u64
+    );
+    assert_eq!(stats.write_dropped.load(Ordering::Relaxed), 0);
 }

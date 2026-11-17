@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -123,7 +123,6 @@ pub(super) fn writer_loop(
     mut sink: BatchSink,
     config: WorkerConfig,
     accepting: &AtomicBool,
-    submitting: &AtomicU64,
     stats: &RouteRequestLogStats,
 ) {
     let mut batch = Vec::with_capacity(config.batch_size);
@@ -147,7 +146,6 @@ pub(super) fn writer_loop(
                     &queue,
                     &mut sink,
                     &mut batch,
-                    submitting,
                     stats,
                     &mut consecutive_failures,
                 );
@@ -208,7 +206,6 @@ fn drain_writer_for_shutdown(
     queue: &LogWriterQueue,
     sink: &mut BatchSink,
     batch: &mut Vec<QueuedEntry>,
-    submitting: &AtomicU64,
     stats: &RouteRequestLogStats,
     consecutive_failures: &mut u32,
 ) {
@@ -222,32 +219,10 @@ fn drain_writer_for_shutdown(
                 batch.push(entry);
             }
         }
-        if !batch.is_empty() && !flush_batch(sink, batch, stats, consecutive_failures) {
+        // 关闭与入队共用同一把锁；进入排空流程后不会再有新记录入队。
+        if batch.is_empty() || !flush_batch(sink, batch, stats, consecutive_failures) {
             break;
         }
-        let empty_after_flush = queue
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entries
-            .is_empty();
-        if empty_after_flush && submitting.load(Ordering::Acquire) == 0 {
-            let mut state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
-            while batch.len() < batch.capacity() {
-                let Some(entry) = state.entries.pop_front() else {
-                    break;
-                };
-                batch.push(entry);
-            }
-            if batch.is_empty() {
-                break;
-            }
-            continue;
-        }
-        if !empty_after_flush {
-            continue;
-        }
-        thread::yield_now();
     }
     stats
         .write_dropped
