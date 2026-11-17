@@ -1150,7 +1150,10 @@ async fn upstream_websocket_in_turn_heartbeat_sends_ping_accepts_pong_and_comple
         .proxy_upstream_websocket(&route, &headers, &mut body2, false, None)
         .await
         .unwrap();
-    assert!(matches!(second_attempt, UpstreamWebSocketAttempt::Completed));
+    assert!(matches!(
+        second_attempt,
+        UpstreamWebSocketAttempt::Completed
+    ));
     assert!(
         downstream
             .upstream

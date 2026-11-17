@@ -417,12 +417,8 @@ fn live_speed_ignores_parent_and_compaction_and_cancelled_requests() {
 fn live_speed_and_usage_survive_log_sampling_without_writing_unsampled_requests() {
     let registry = Arc::new(crate::conversation_stats::ConversationStatsRegistry::default());
     let stats = Arc::new(RouteRequestLogStats::default());
-    let (producer, queue) = test_producer_with_queue(
-        2,
-        1,
-        Arc::clone(&stats),
-        Some(Arc::clone(&registry)),
-    );
+    let (producer, queue) =
+        test_producer_with_queue(2, 1, Arc::clone(&stats), Some(Arc::clone(&registry)));
     let now = Instant::now();
     let probe = producer
         .begin(RouteRequestLogStart {
@@ -866,8 +862,7 @@ async fn failed_sink_readiness_never_publishes_a_producer() {
 #[test]
 fn full_queue_drops_without_backpressure_and_counts_the_drop() {
     let stats = Arc::new(RouteRequestLogStats::default());
-    let (producer, _queue) =
-        test_producer_with_queue(1, 1_000_000, Arc::clone(&stats), None);
+    let (producer, _queue) = test_producer_with_queue(1, 1_000_000, Arc::clone(&stats), None);
     producer.submit(sample_entry("one"));
     producer.submit(sample_entry("two"));
     assert_eq!(stats.accepted.load(Ordering::Relaxed), 1);
@@ -969,8 +964,12 @@ fn probe_submits_exactly_once_with_timing_and_usage() {
 
 #[test]
 fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
-    let (producer, queue) =
-        test_producer_with_queue(2, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
+    let (producer, queue) = test_producer_with_queue(
+        2,
+        1_000_000,
+        Arc::new(RouteRequestLogStats::default()),
+        None,
+    );
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "deferred-finish",
@@ -1014,8 +1013,12 @@ fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
 
 #[test]
 fn synthetic_response_created_does_not_set_ttft() {
-    let (producer, queue) =
-        test_producer_with_queue(1, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
+    let (producer, queue) = test_producer_with_queue(
+        1,
+        1_000_000,
+        Arc::new(RouteRequestLogStats::default()),
+        None,
+    );
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "synthetic-created",
@@ -1040,8 +1043,12 @@ fn synthetic_response_created_does_not_set_ttft() {
 
 #[test]
 fn retry_updates_effective_transport_without_resetting_ttft_origin() {
-    let (producer, queue) =
-        test_producer_with_queue(1, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
+    let (producer, queue) = test_producer_with_queue(
+        1,
+        1_000_000,
+        Arc::new(RouteRequestLogStats::default()),
+        None,
+    );
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "transport-fallback",
@@ -1071,8 +1078,12 @@ fn retry_updates_effective_transport_without_resetting_ttft_origin() {
 
 #[test]
 fn unavailable_usage_has_an_explicit_reason() {
-    let (producer, queue) =
-        test_producer_with_queue(1, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
+    let (producer, queue) = test_producer_with_queue(
+        1,
+        1_000_000,
+        Arc::new(RouteRequestLogStats::default()),
+        None,
+    );
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "usage-unavailable",

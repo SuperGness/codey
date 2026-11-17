@@ -3160,9 +3160,11 @@ pub(crate) async fn refresh_non_default_account_for_router(
     let (default_id, record) = {
         let store = store.clone();
         let account_id = account_id.to_string();
-        tokio::task::spawn_blocking(move || -> Result<(Option<String>, Option<OfficialAccountRecord>)> {
-            Ok((store.default_account_id()?, store.get(&account_id)?))
-        })
+        tokio::task::spawn_blocking(
+            move || -> Result<(Option<String>, Option<OfficialAccountRecord>)> {
+                Ok((store.default_account_id()?, store.get(&account_id)?))
+            },
+        )
         .await
         .context("读取官方账号任务异常退出")??
     };
@@ -3184,7 +3186,14 @@ pub(crate) async fn refresh_non_default_account_for_router(
         .filter(|proxy| !proxy.is_empty())
         .map(str::to_string)
         .or_else(|| record.upstream_proxy.clone());
-    match refresh_if_stale_cached(client, &mut record, effective_proxy.as_deref(), proxied_clients).await {
+    match refresh_if_stale_cached(
+        client,
+        &mut record,
+        effective_proxy.as_deref(),
+        proxied_clients,
+    )
+    .await
+    {
         Ok(true) => {
             let store = store.clone();
             let updated = tokio::task::spawn_blocking(move || {
@@ -3206,7 +3215,8 @@ pub(crate) async fn refresh_non_default_account_for_router(
                     store.update_credentials_if_current(&expected, &marked)
                 })
                 .await;
-                if !was_invalid && matches!(written, Ok(Ok(Some(ref updated))) if updated.invalid()) {
+                if !was_invalid && matches!(written, Ok(Ok(Some(ref updated))) if updated.invalid())
+                {
                     notify_official_account_invalidated(account_id);
                 }
             }

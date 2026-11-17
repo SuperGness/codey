@@ -281,23 +281,17 @@ fn run_macos_stdio_relay_helper() -> Result<()> {
         let _ = unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) };
         Ok(file)
     };
-    let input_pair = input_fd
-        .map(adopt_pipe)
-        .transpose()?
-        .map(|writer| {
-            let input: Box<dyn std::io::BufRead + Send> =
-                Box::new(std::io::BufReader::new(std::io::stdin()));
-            let output: Box<dyn std::io::Write + Send> = Box::new(writer);
-            (input, output)
-        });
-    let output_pair = output_fd
-        .map(adopt_pipe)
-        .transpose()?
-        .map(|reader| {
-            let input: Box<dyn std::io::Read + Send> = Box::new(reader);
-            let output: Box<dyn std::io::Write + Send> = Box::new(std::io::stdout());
-            (input, output)
-        });
+    let input_pair = input_fd.map(adopt_pipe).transpose()?.map(|writer| {
+        let input: Box<dyn std::io::BufRead + Send> =
+            Box::new(std::io::BufReader::new(std::io::stdin()));
+        let output: Box<dyn std::io::Write + Send> = Box::new(writer);
+        (input, output)
+    });
+    let output_pair = output_fd.map(adopt_pipe).transpose()?.map(|reader| {
+        let input: Box<dyn std::io::Read + Send> = Box::new(reader);
+        let output: Box<dyn std::io::Write + Send> = Box::new(std::io::stdout());
+        (input, output)
+    });
     let relays = InProcessStdioRelays::spawn_with_streams(
         input_pair,
         output_pair,
@@ -509,9 +503,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                         Ok(())
                     });
                 }
-                let spawned = relay_cmd
-                    .spawn()
-                    .context("启动 Codex 请求与响应转发失败")?;
+                let spawned = relay_cmd.spawn().context("启动 Codex 请求与响应转发失败")?;
                 stdio_relay = Some(spawned);
                 drop(helper_in_write);
                 drop(helper_out_read);

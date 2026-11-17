@@ -271,7 +271,7 @@ impl SystemProxyClient {
                     .failed_for
                     .as_ref()
                     .is_some_and(|target| Arc::ptr_eq(target, &latest));
-                if !(expired || changed) || (failed_same && !expired) {
+                if (failed_same || !changed) && !expired {
                     Action::Use(state.client.clone())
                 } else {
                     let notify = Arc::new(tokio::sync::Notify::new());
@@ -503,7 +503,8 @@ mod tests {
     static CONCURRENT: AtomicU8 = AtomicU8::new(0);
     static CONCURRENT_SOURCE: SystemProxySource =
         SystemProxySource::new(|| matcher_for(&CONCURRENT), Duration::ZERO);
-    static BUILD_GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static BUILD_GENERATION: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
 
     fn versioned_slow_builder() -> reqwest::ClientBuilder {
         let generation = BUILD_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -526,8 +527,9 @@ mod tests {
 
         BUILD_GENERATION.store(0, Ordering::SeqCst);
         CONCURRENT.store(0, Ordering::SeqCst);
-        let client =
-            Arc::new(SystemProxyClient::with_source(&CONCURRENT_SOURCE, versioned_slow_builder).unwrap());
+        let client = Arc::new(
+            SystemProxyClient::with_source(&CONCURRENT_SOURCE, versioned_slow_builder).unwrap(),
+        );
 
         CONCURRENT.store(1, Ordering::SeqCst);
         let first_task = {

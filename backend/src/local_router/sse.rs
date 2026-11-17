@@ -682,7 +682,8 @@ mod tests {
     fn responses_rewriter_skips_delta_frames_while_applying_response_fix_to_function_calls() {
         let fix = NativeResponseFix::from(XaiResponseFix::default());
         let mut rewriter = ResponsesSseRewriter::new(Some(&fix), true, None);
-        let delta = b": keep\ndata: { \"type\" : \"response.output_text.delta\" , \"delta\" : \"hi\" }\n\n";
+        let delta =
+            b": keep\ndata: { \"type\" : \"response.output_text.delta\" , \"delta\" : \"hi\" }\n\n";
         assert_eq!(rewriter.push(delta).unwrap(), delta);
 
         let fn_done = b"data: {\"type\":\"response.function_call_arguments.done\",\"name\":\"tool\",\"arguments\":\"{\\\"n\\\":1.0}\"}\n\n";

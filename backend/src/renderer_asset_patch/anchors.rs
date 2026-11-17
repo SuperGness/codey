@@ -71,8 +71,8 @@ impl PatchAnchorMatcher {
             + script[start..]
                 .find(PATCH_RULES_END)
                 .context("缺少复合前置规则表结束标记")?;
-        let raw_rules: Vec<PatchAnchorRule> =
-            serde_json::from_str(&script[start..end]).context("复合前置规则表不是有效 JSON 数组")?;
+        let raw_rules: Vec<PatchAnchorRule> = serde_json::from_str(&script[start..end])
+            .context("复合前置规则表不是有效 JSON 数组")?;
         if raw_rules.is_empty() {
             bail!("复合前置规则表不能为空");
         }
@@ -96,9 +96,10 @@ impl PatchAnchorMatcher {
     }
 
     pub(crate) fn matches_bytes(&self, bytes: &[u8]) -> bool {
-        self.rules
-            .iter()
-            .any(|rule| rule.iter().all(|lit| memmem::find(bytes, lit.as_bytes()).is_some()))
+        self.rules.iter().any(|rule| {
+            rule.iter()
+                .all(|lit| memmem::find(bytes, lit.as_bytes()).is_some())
+        })
     }
 
     pub(crate) fn compile_finders(&self) -> CompiledPatchAnchorMatcher<'_> {
@@ -144,7 +145,10 @@ pub(super) fn renderer_patch_anchors(script: &str) -> Result<Vec<String>> {
 }
 
 #[cfg(test)]
-pub(super) fn renderer_patch_anchors_for_mode(script: &str, disable_pet: bool) -> Result<Vec<String>> {
+pub(super) fn renderer_patch_anchors_for_mode(
+    script: &str,
+    disable_pet: bool,
+) -> Result<Vec<String>> {
     let mut anchors = renderer_patch_anchors(script)?;
     if !disable_pet {
         anchors.retain(|anchor| !PET_ONLY_PATCH_ANCHORS.contains(&anchor.as_str()));

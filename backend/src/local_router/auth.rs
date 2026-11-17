@@ -143,7 +143,9 @@ pub(crate) async fn validate_managed_official_account(auth: &OfficialRouteAuth) 
     Ok(())
 }
 
-fn account_store_for_record_path(record_path: &Path) -> crate::official_accounts::OfficialAccountStore {
+fn account_store_for_record_path(
+    record_path: &Path,
+) -> crate::official_accounts::OfficialAccountStore {
     match record_path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => {
             crate::official_accounts::OfficialAccountStore::new(dir)

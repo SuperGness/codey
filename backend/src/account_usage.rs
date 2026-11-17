@@ -1602,7 +1602,10 @@ mod tests {
             let path = format!("/tmp/codey-usage/fill_{index}.json");
             caches.cache_for_auth_path(Path::new(&path));
         }
-        assert_eq!(caches.inner.lock().unwrap().caches.len(), MAX_ACCOUNT_USAGE_CACHES);
+        assert_eq!(
+            caches.inner.lock().unwrap().caches.len(),
+            MAX_ACCOUNT_USAGE_CACHES
+        );
         // 再次读取 recent，让最早建立的 oldest 成为唯一的淘汰候选。
         caches.cache_for_auth_path(Path::new(recent));
         caches.cache_for_auth_path(Path::new("/tmp/codey-usage/overflow.json"));

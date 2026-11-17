@@ -71,6 +71,7 @@ pub(super) fn finish_cli_wrapper_helpers(
 #[cfg(any(windows, target_os = "macos", test))]
 pub(super) struct InProcessStdioRelays {
     output_done: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(any(target_os = "macos", test))]
     input_done: Option<std::sync::mpsc::Receiver<()>>,
 }
 
@@ -95,8 +96,7 @@ impl InProcessStdioRelays {
         let mut child_stdout = None;
         let mut output_thread_pipe = None;
         if observe_output {
-            let (reader, writer) =
-                std::io::pipe().context("创建 Codex 会话响应观察管道失败")?;
+            let (reader, writer) = std::io::pipe().context("创建 Codex 会话响应观察管道失败")?;
             output_thread_pipe = Some(reader);
             child_stdout = Some(writer);
         }
@@ -128,19 +128,30 @@ impl InProcessStdioRelays {
     }
 
     pub(super) fn spawn_with_streams(
-        input_pair: Option<(Box<dyn std::io::BufRead + Send>, Box<dyn std::io::Write + Send>)>,
-        output_pair: Option<(Box<dyn std::io::Read + Send>, Box<dyn std::io::Write + Send>)>,
+        input_pair: Option<(
+            Box<dyn std::io::BufRead + Send>,
+            Box<dyn std::io::Write + Send>,
+        )>,
+        output_pair: Option<(
+            Box<dyn std::io::Read + Send>,
+            Box<dyn std::io::Write + Send>,
+        )>,
         codex_home: std::path::PathBuf,
         runtime_overrides: Vec<String>,
         misc_model: Option<String>,
     ) -> Result<Self> {
+        #[cfg(any(target_os = "macos", test))]
         let mut input_done = None;
         if let Some((input, mut output)) = input_pair {
             let home = codex_home.clone();
             let overrides = runtime_overrides.clone();
             let local_router = super::local_router_runtime_enabled(&overrides);
+            #[cfg(any(target_os = "macos", test))]
             let (tx, rx) = std::sync::mpsc::channel();
-            input_done = Some(rx);
+            #[cfg(any(target_os = "macos", test))]
+            {
+                input_done = Some(rx);
+            }
             std::thread::Builder::new()
                 .name("codey-stdin-relay".into())
                 .spawn(move || {
@@ -157,6 +168,7 @@ impl InProcessStdioRelays {
                     {
                         eprintln!("Codey 转发 Codex 请求失败：{error:#}");
                     }
+                    #[cfg(any(target_os = "macos", test))]
                     let _ = tx.send(());
                 })
                 .context("启动同进程输入转发线程失败")?;
@@ -182,6 +194,7 @@ impl InProcessStdioRelays {
 
         Ok(Self {
             output_done,
+            #[cfg(any(target_os = "macos", test))]
             input_done,
         })
     }
@@ -294,9 +307,7 @@ pub(super) fn observe_local_app_server_output(
 #[cfg(any(windows, target_os = "macos", test))]
 pub(super) fn rewrite_prediction_resume_response(line: &[u8]) -> Option<Vec<u8>> {
     const RESUME_ID_PREFIX: &str = "thread/resume:";
-    if memmem::find(line, b"\"thread/resume:").is_none() {
-        return None;
-    }
+    memmem::find(line, b"\"thread/resume:")?;
     let mut message = serde_json::from_slice::<serde_json::Value>(line).ok()?;
     if !message.get("id")?.as_str()?.starts_with(RESUME_ID_PREFIX) {
         return None;
@@ -383,8 +394,8 @@ struct TrackedInputParams<'a> {
 
 #[cfg(any(windows, target_os = "macos", test))]
 fn effective_misc_model<'a>(fallback: Option<&'a str>) -> Option<Cow<'a, str>> {
-    if let Some(path) = std::env::var_os(super::CLI_WRAPPER_MISC_MODEL_FILE_ENV)
-        .filter(|value| !value.is_empty())
+    if let Some(path) =
+        std::env::var_os(super::CLI_WRAPPER_MISC_MODEL_FILE_ENV).filter(|value| !value.is_empty())
         && let Ok(bytes) = crate::fs_util::read_bounded(Path::new(&path), 1024)
     {
         let trimmed = String::from_utf8_lossy(&bytes).trim().to_string();
@@ -523,7 +534,9 @@ pub(super) fn forward_app_server_input(
                                         }
                                         Ok(None) => {}
                                         // 单向转发器无法发送 RPC 错误响应；保留请求和后续消息，错误仅写 stderr。
-                                        Err(error) => eprintln!("Codey 恢复会话模型失败：{error:#}"),
+                                        Err(error) => {
+                                            eprintln!("Codey 恢复会话模型失败：{error:#}")
+                                        }
                                     }
                                 }
                                 let provider = super::router_provider_for_params(
@@ -691,8 +704,7 @@ fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Resu
     let Some(model) = saved.get("model").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };
-    let Some(catalog_path) = super::runtime_override_string(overrides, "model_catalog_json")
-    else {
+    let Some(catalog_path) = super::runtime_override_string(overrides, "model_catalog_json") else {
         return Ok(None);
     };
     let slugs = cached_catalog_slugs(&catalog_path)?;
@@ -803,12 +815,20 @@ mod tests {
         ]
         .concat();
         let mut output = Vec::new();
-        route_local_app_server_input(stream.as_slice(), &mut output, &overrides, Some(home.path()))
-            .unwrap();
+        route_local_app_server_input(
+            stream.as_slice(),
+            &mut output,
+            &overrides,
+            Some(home.path()),
+        )
+        .unwrap();
         let text = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 5);
-        assert_eq!(lines[0], std::str::from_utf8(unrelated_bad_json).unwrap().trim_end());
+        assert_eq!(
+            lines[0],
+            std::str::from_utf8(unrelated_bad_json).unwrap().trim_end()
+        );
         assert_eq!(
             lines[1],
             r#"{"id":1,"method":"turn/start","params":{"threadId":"t1","largePayload":"ignored"}}"#

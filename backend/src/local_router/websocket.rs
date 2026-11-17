@@ -428,10 +428,10 @@ impl WebSocketResponsesDownstream {
                     message = downstream_socket.next(), if self.pending_messages.is_empty() => IdleWebSocketEvent::Downstream(message),
                 }
             };
-            let wake_clock_jumped = entered_wall
-                .elapsed()
-                .unwrap_or_default()
-                > entered_monotonic.elapsed().saturating_add(Duration::from_secs(15));
+            let wake_clock_jumped = entered_wall.elapsed().unwrap_or_default()
+                > entered_monotonic
+                    .elapsed()
+                    .saturating_add(Duration::from_secs(15));
             if wake_clock_jumped {
                 // 系统休眠/唤醒后 NAT 映射可能已失效，先丢弃缓存上游连接，
                 // 避免新请求踩中半开套接字或在不完整状态下做 Ping。
@@ -774,7 +774,9 @@ impl WebSocketResponsesDownstream {
                     auth_identity,
                     response_ids: VecDeque::new(),
                     config_identity: route.websocket_config,
-                    liveness: UpstreamWebSocketLiveness::new(tokio::time::Instant::now().into_std()),
+                    liveness: UpstreamWebSocketLiveness::new(
+                        tokio::time::Instant::now().into_std(),
+                    ),
                     socket,
                 },
                 Err(error) => {
@@ -970,9 +972,9 @@ impl WebSocketResponsesDownstream {
                                 .await
                             {
                                 Ok(Ok(Ok(()))) => {
-                                    upstream
-                                        .liveness
-                                        .record_heartbeat_sent(tokio::time::Instant::now().into_std());
+                                    upstream.liveness.record_heartbeat_sent(
+                                        tokio::time::Instant::now().into_std(),
+                                    );
                                     continue;
                                 }
                                 Ok(Ok(Err(_)) | Err(_)) => {
@@ -1046,8 +1048,7 @@ impl WebSocketResponsesDownstream {
                     upstream
                         .liveness
                         .record_activity(tokio::time::Instant::now().into_std());
-                    read_idle_deadline =
-                        tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
+                    read_idle_deadline = tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
                     let (single_event, events, raw_json_text) =
                         match serde_json::from_str::<Value>(text.as_str()) {
                             Ok(event) => (Some(event), Vec::new(), Some(text)),
@@ -1272,8 +1273,7 @@ impl WebSocketResponsesDownstream {
                     upstream
                         .liveness
                         .record_activity(tokio::time::Instant::now().into_std());
-                    read_idle_deadline =
-                        tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
+                    read_idle_deadline = tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
                 }
                 WebSocketMessage::Pong(_) => upstream
                     .liveness

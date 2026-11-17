@@ -2890,13 +2890,7 @@ async fn query_official_account_usage(
     let home = codex_home();
     let account_cache = state.account_usage_cache.cache_for_codex_home(home);
     let mut cache = account_cache.lock().await;
-    account_usage::query_snapshot(
-        &mut cache,
-        home,
-        force_refresh,
-        official_proxy.as_deref(),
-    )
-    .await
+    account_usage::query_snapshot(&mut cache, home, force_refresh, official_proxy.as_deref()).await
 }
 
 /// 页头额度跟随设为默认的账号。没有默认账号时回落到账号列表里最早的一条，
@@ -3198,9 +3192,9 @@ fn runtime_requires_restart(
     current: &CodeyConfig,
 ) -> bool {
     let proxy_websocket_drift = current.local_router_enabled
-        && runtime
-            .router_endpoint()
-            .is_some_and(|endpoint| endpoint.supports_websockets != current.runtime_supports_websockets());
+        && runtime.router_endpoint().is_some_and(|endpoint| {
+            endpoint.supports_websockets != current.runtime_supports_websockets()
+        });
     proxy_websocket_drift
         || config_requires_restart_with_route_status(
             provider_route_restart_required_for_runtime(&runtime.applied_config, current)

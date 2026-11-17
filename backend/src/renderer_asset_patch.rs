@@ -30,9 +30,9 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::error_log;
 pub(crate) use anchors::PatchAnchorMatcher;
 use cache::{CACHE_DIR_NAME, CachedAsset, PatchCache, StoredPatch};
-use crate::error_log;
 
 /// 补丁脚本注入页面后暴露的纯函数入口：`(url, source) => patched | null`。
 const RENDERER_ASSET_PATCH_SCRIPT: &str = include_str!("renderer_asset_patch.js");

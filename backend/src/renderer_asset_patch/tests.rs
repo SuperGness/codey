@@ -206,7 +206,8 @@ async fn misses_patch_in_the_page_and_hits_fulfill_from_cache() {
         .await;
 
     let url = "app://-/assets/app-primary-b4ce9e46e8cf.js";
-    let asset_body = "codex-message-from-view old.sendMessageFromView Failed to send message from view";
+    let asset_body =
+        "codex-message-from-view old.sendMessageFromView Failed to send message from view";
     service.send(paused("s1", "r1", url, false)).await;
     let intercept = service.expect("Fetch.continueRequest").await;
     assert_eq!(intercept["params"]["interceptResponse"], true);
@@ -519,8 +520,7 @@ fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
             "{required}"
         );
     }
-    let slim_anchors =
-        renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, true).unwrap();
+    let slim_anchors = renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, true).unwrap();
     let full_pet_anchors =
         renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, false).unwrap();
     assert_eq!(slim_anchors.len(), anchors.len());
@@ -547,9 +547,11 @@ fn compound_rule_matcher_requires_all_literals_in_a_rule_and_respects_pet_mode()
 
     // 仅出现规则里的部分前置字面量不应误命中。
     assert!(!slim_matcher.matches("let{agentMode:a}resolvedHostId:b"));
-    assert!(slim_matcher.matches(
-        "CodexComposerAdapter let{agentMode:a} resolvedHostId:b submitDisabledReasons:c"
-    ));
+    assert!(
+        slim_matcher.matches(
+            "CodexComposerAdapter let{agentMode:a} resolvedHostId:b submitDisabledReasons:c"
+        )
+    );
 
     // petOnly 规则在 disable_pet=false 时不触发。
     let pet_only_sample = "settings.appearance import x from\"./codex-avatar-123.js\"";
@@ -877,18 +879,17 @@ async fn late_asset_scans_narrow_interception_on_attached_pages() {
     let temp = tempfile::tempdir().unwrap();
     let (release, gate) = std::sync::mpsc::channel::<()>();
     let mut service = TestService::start_with(temp.path(), |context| {
-        *context.pending_scan.get_mut().unwrap() =
-            Some(tokio::task::spawn_blocking(move || {
-                gate.recv().unwrap();
-                Ok(crate::renderer_asset_scan::ScanOutcome {
-                    scan: crate::renderer_asset_scan::AssetScan {
-                        numeric_chunks: 2,
-                        candidates: vec!["async/24191.589dcc9878.js".to_string()],
-                    },
-                    cached: false,
-                    cache_write_error: None,
-                })
-            }));
+        *context.pending_scan.get_mut().unwrap() = Some(tokio::task::spawn_blocking(move || {
+            gate.recv().unwrap();
+            Ok(crate::renderer_asset_scan::ScanOutcome {
+                scan: crate::renderer_asset_scan::AssetScan {
+                    numeric_chunks: 2,
+                    candidates: vec!["async/24191.589dcc9878.js".to_string()],
+                },
+                cached: false,
+                cache_write_error: None,
+            })
+        }));
     })
     .await;
     service.answer_startup(json!([])).await;

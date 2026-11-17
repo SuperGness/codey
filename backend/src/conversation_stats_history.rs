@@ -335,7 +335,7 @@ fn cached_history_with_canonical(
     };
     let mut cached = lock_unpoisoned(&entry);
     if cached.lookup_at.is_none_or(|at| at.elapsed() >= LOOKUP_TTL) {
-        let path = locate_rollout(&home, session_id);
+        let path = locate_rollout(home, session_id);
         if cached.path != path {
             cached.version = None;
             cached.append_checkpoint = None;
@@ -351,17 +351,17 @@ fn cached_history_with_canonical(
     let path = cached
         .path
         .as_ref()
-        .and_then(|path| canonical_rollout(&home, path));
+        .and_then(|path| canonical_rollout(home, path));
     let path = match path {
         Some(path) => path,
         None => {
-            cached.path = locate_rollout(&home, session_id);
+            cached.path = locate_rollout(home, session_id);
             cached.lookup_at = Some(Instant::now());
             cached.version = None;
             cached.append_checkpoint = None;
             cached.snapshot = None;
             cached.activity = Default::default();
-            canonical_rollout(&home, cached.path.as_ref()?)?
+            canonical_rollout(home, cached.path.as_ref()?)?
         }
     };
     let version = FileVersion::from_path(&path)?;
