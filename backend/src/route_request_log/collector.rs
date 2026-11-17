@@ -3,7 +3,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,7 +14,7 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
 use super::diagnostics::*;
 use super::query::clear_route_request_log_files;
-use super::writer::{BatchSink, WorkerConfig, WriterControl, writer_loop};
+use super::writer::{BatchSink, LogWriterQueue, TryPushError, WorkerConfig, writer_loop};
 use super::{
     FirstByteSource, MAX_LOG_ERROR_BYTES, MAX_LOG_HEADERS_BYTES, MAX_LOG_STRING_BYTES, QueuedEntry,
     RequestBodySummary, RequestProtocol, RequestStatus, RequestTokenUsage,
@@ -31,7 +31,7 @@ const PARTS_PER_MILLION: u64 = 1_000_000;
 pub(crate) struct RouteRequestLogProducer {
     /// 落盘 producer 持有 writer 队列；会话统计 producer 为 None，只向
     /// `session_stats` 注册表写聚合结果。
-    sender: Option<SyncSender<QueuedEntry>>,
+    queue: Option<Arc<LogWriterQueue>>,
     accepting: Arc<AtomicBool>,
     submitting: Arc<AtomicU64>,
     sample_rate_per_million: u32,
@@ -53,7 +53,7 @@ impl RouteRequestLogProducer {
         }
         // 纯统计 producer 不关心无会话标识的请求（如模型列表），直接短路，
         // 让这些请求保持与日志关闭时相同的零开销路径。
-        if self.sender.is_none() && start.codex_session_id.is_none() {
+        if self.queue.is_none() && start.codex_session_id.is_none() {
             return None;
         }
         let sampled = self.should_sample();
@@ -127,7 +127,7 @@ impl RouteRequestLogProducer {
         // 日志采样只控制落盘，页面会话统计始终采集；未采样探针没有 writer 队列。
         let mut producer = self.clone();
         if !sampled {
-            producer.sender = None;
+            producer.queue = None;
         }
         Some(RouteRequestLogProbe {
             shared: Arc::new(ProbeShared {
@@ -180,7 +180,7 @@ impl RouteRequestLogProducer {
             self.stats.dropped_closed.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let Some(sender) = &self.sender else {
+        let Some(queue) = &self.queue else {
             return;
         };
         self.submitting.fetch_add(1, Ordering::AcqRel);
@@ -193,16 +193,16 @@ impl RouteRequestLogProducer {
             entry,
             enqueued_at: Instant::now(),
         };
-        let result = sender.try_send(queued);
+        let result = queue.try_push(queued);
         self.submitting.fetch_sub(1, Ordering::AcqRel);
         match result {
             Ok(()) => {
                 self.stats.accepted.fetch_add(1, Ordering::Relaxed);
             }
-            Err(TrySendError::Full(_)) => {
+            Err(TryPushError::Full) => {
                 self.stats.dropped_full.fetch_add(1, Ordering::Relaxed);
             }
-            Err(TrySendError::Disconnected(_)) => {
+            Err(TryPushError::Shutdown) => {
                 self.accepting.store(false, Ordering::Relaxed);
                 self.stats.dropped_closed.fetch_add(1, Ordering::Relaxed);
             }
@@ -382,7 +382,7 @@ struct PendingEntry {
 
 impl RouteRequestLogProbe {
     pub(crate) fn records_diagnostics(&self) -> bool {
-        self.shared.producer.sender.is_some()
+        self.shared.producer.queue.is_some()
     }
 
     pub(crate) fn record_route_decision(&self, decision: RouteDecision) {
@@ -557,9 +557,8 @@ impl RouteRequestLogProbe {
 
     #[cfg(test)]
     pub(crate) fn detached_test_probe() -> Self {
-        let (sender, _receiver) = mpsc::sync_channel(1);
         RouteRequestLogProducer {
-            sender: Some(sender),
+            queue: Some(Arc::new(LogWriterQueue::new(1))),
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -1193,7 +1192,7 @@ impl RouteRequestLogController {
         Self {
             active: ArcSwapOption::empty(),
             stats_producer: Arc::new(RouteRequestLogProducer {
-                sender: None,
+                queue: None,
                 accepting: Arc::new(AtomicBool::new(true)),
                 submitting: Arc::new(AtomicU64::new(0)),
                 sample_rate_per_million: PARTS_PER_MILLION as u32,
@@ -1398,7 +1397,7 @@ impl Drop for RouteRequestLogController {
 pub(crate) struct RouteRequestLogRuntime {
     done: Mutex<Option<oneshot::Receiver<()>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
-    shutdown: Mutex<Option<Sender<WriterControl>>>,
+    queue: Arc<LogWriterQueue>,
     accepting: Arc<AtomicBool>,
     shutdown_timeout: Duration,
     stats: Arc<RouteRequestLogStats>,
@@ -1413,13 +1412,12 @@ impl RouteRequestLogRuntime {
         if !config.enabled || config.sample_rate_per_million == 0 {
             return Ok(None);
         }
-        let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
-        let (control_tx, control_rx) = mpsc::channel();
+        let queue = Arc::new(LogWriterQueue::new(config.queue_capacity));
         let stats = Arc::new(RouteRequestLogStats::default());
         let accepting = Arc::new(AtomicBool::new(true));
         let submitting = Arc::new(AtomicU64::new(0));
         let producer = RouteRequestLogProducer {
-            sender: Some(sender),
+            queue: Some(Arc::clone(&queue)),
             accepting: Arc::clone(&accepting),
             submitting: Arc::clone(&submitting),
             sample_rate_per_million: config.sample_rate_per_million,
@@ -1428,6 +1426,7 @@ impl RouteRequestLogRuntime {
             session_stats: Some(session_stats),
         };
         let worker_config = WorkerConfig::new(config, root);
+        let worker_queue = Arc::clone(&queue);
         let worker_stats = Arc::clone(&stats);
         let worker_accepting = Arc::clone(&accepting);
         let worker_submitting = Arc::clone(&submitting);
@@ -1449,8 +1448,7 @@ impl RouteRequestLogRuntime {
                         }
                     };
                     writer_loop(
-                        receiver,
-                        control_rx,
+                        worker_queue,
                         sink,
                         worker_config,
                         &worker_accepting,
@@ -1485,7 +1483,7 @@ impl RouteRequestLogRuntime {
             Self {
                 done: Mutex::new(Some(done_rx)),
                 worker: Mutex::new(Some(worker)),
-                shutdown: Mutex::new(Some(control_tx)),
+                queue,
                 accepting,
                 shutdown_timeout: Duration::from_millis(config.shutdown_flush_timeout_ms),
                 stats,
@@ -1495,9 +1493,7 @@ impl RouteRequestLogRuntime {
 
     fn request_shutdown(&self) {
         self.accepting.store(false, Ordering::Release);
-        if let Some(shutdown) = lock_unpoisoned(&self.shutdown).take() {
-            let _ = shutdown.send(WriterControl::Shutdown);
-        }
+        self.queue.request_shutdown();
     }
 
     pub(crate) async fn stop(&self) -> bool {
@@ -1528,15 +1524,7 @@ impl RouteRequestLogRuntime {
 
 impl Drop for RouteRequestLogRuntime {
     fn drop(&mut self) {
-        self.accepting.store(false, Ordering::Release);
-        if let Some(shutdown) = self
-            .shutdown
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            let _ = shutdown.send(WriterControl::Shutdown);
-        }
+        self.request_shutdown();
     }
 }
 

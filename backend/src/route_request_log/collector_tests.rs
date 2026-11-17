@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,6 +8,7 @@ use rusqlite::Connection;
 use tokio::sync::oneshot;
 
 use super::super::test_support::sample_entry;
+use super::super::writer::LogWriterQueue;
 use super::super::{
     FirstByteSource, MAX_LOG_ERROR_BYTES, RequestBodySummary, RequestInputState, RequestProtocol,
     RequestStatus, RequestTokenUsage, RouteRequestLogQuery, RouteRequestLogStart,
@@ -20,6 +20,25 @@ use super::{
     RouteRequestLogReconfigure, RouteRequestLogRuntime, elapsed_millis, merge_usage,
 };
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
+
+fn test_producer_with_queue(
+    capacity: usize,
+    sample_rate_per_million: u32,
+    stats: Arc<RouteRequestLogStats>,
+    session_stats: Option<Arc<crate::conversation_stats::ConversationStatsRegistry>>,
+) -> (RouteRequestLogProducer, Arc<LogWriterQueue>) {
+    let queue = Arc::new(LogWriterQueue::new(capacity));
+    let producer = RouteRequestLogProducer {
+        queue: Some(Arc::clone(&queue)),
+        accepting: Arc::new(AtomicBool::new(true)),
+        submitting: Arc::new(AtomicU64::new(0)),
+        sample_rate_per_million,
+        sample_sequence: Arc::new(AtomicU64::new(0)),
+        stats,
+        session_stats,
+    };
+    (producer, queue)
+}
 
 #[test]
 fn attempt_diagnostics_are_bounded_and_never_copy_payloads() {
@@ -323,7 +342,7 @@ fn last_turn_statistics_keep_multiple_completed_steps_with_logging_disabled() {
                 })
             })
             .unwrap();
-        assert!(probe.shared.producer.sender.is_none());
+        assert!(probe.shared.producer.queue.is_none());
         probe
             .shared
             .router_pre_upstream_micros
@@ -396,18 +415,14 @@ fn live_speed_ignores_parent_and_compaction_and_cancelled_requests() {
 
 #[test]
 fn live_speed_and_usage_survive_log_sampling_without_writing_unsampled_requests() {
-    let (sender, receiver) = mpsc::sync_channel(2);
     let registry = Arc::new(crate::conversation_stats::ConversationStatsRegistry::default());
     let stats = Arc::new(RouteRequestLogStats::default());
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats: Arc::clone(&stats),
-        session_stats: Some(Arc::clone(&registry)),
-    };
+    let (producer, queue) = test_producer_with_queue(
+        2,
+        1,
+        Arc::clone(&stats),
+        Some(Arc::clone(&registry)),
+    );
     let now = Instant::now();
     let probe = producer
         .begin(RouteRequestLogStart {
@@ -423,7 +438,7 @@ fn live_speed_and_usage_survive_log_sampling_without_writing_unsampled_requests(
         })
         .expect("unsampled session still receives a statistics probe");
     assert_eq!(stats.sampled_out.load(Ordering::Relaxed), 1);
-    assert!(probe.shared.producer.sender.is_none());
+    assert!(probe.shared.producer.queue.is_none());
     probe.observe_event_at(
         &serde_json::json!({"type":"response.output_text.delta","delta":"a".repeat(400)}),
         now - Duration::from_secs(1),
@@ -437,7 +452,7 @@ fn live_speed_and_usage_survive_log_sampling_without_writing_unsampled_requests(
     assert_eq!(complete.in_flight, Some(0));
     assert_eq!(complete.output_tokens, Some(150));
     assert_eq!(complete.requests, Some(1));
-    assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    assert!(queue.try_pop().is_none());
     assert_eq!(stats.accepted.load(Ordering::Relaxed), 0);
 }
 
@@ -850,17 +865,9 @@ async fn failed_sink_readiness_never_publishes_a_producer() {
 
 #[test]
 fn full_queue_drops_without_backpressure_and_counts_the_drop() {
-    let (sender, _receiver) = mpsc::sync_channel(1);
     let stats = Arc::new(RouteRequestLogStats::default());
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1_000_000,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats: Arc::clone(&stats),
-        session_stats: None,
-    };
+    let (producer, _queue) =
+        test_producer_with_queue(1, 1_000_000, Arc::clone(&stats), None);
     producer.submit(sample_entry("one"));
     producer.submit(sample_entry("two"));
     assert_eq!(stats.accepted.load(Ordering::Relaxed), 1);
@@ -869,17 +876,8 @@ fn full_queue_drops_without_backpressure_and_counts_the_drop() {
 
 #[test]
 fn probe_submits_exactly_once_with_timing_and_usage() {
-    let (sender, receiver) = mpsc::sync_channel(4);
     let stats = Arc::new(RouteRequestLogStats::default());
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1_000_000,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats,
-        session_stats: None,
-    };
+    let (producer, queue) = test_producer_with_queue(4, 1_000_000, stats, None);
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "request-one",
@@ -927,7 +925,7 @@ fn probe_submits_exactly_once_with_timing_and_usage() {
     probe.finish_success();
     probe.finish_cancelled();
 
-    let queued = receiver.try_recv().unwrap();
+    let queued = queue.try_pop().unwrap();
     assert_eq!(queued.entry.request_id, "request-one");
     assert_eq!(queued.entry.status, RequestStatus::Succeeded);
     assert_eq!(queued.entry.route_decision.unwrap().settings_revision, 42);
@@ -966,21 +964,13 @@ fn probe_submits_exactly_once_with_timing_and_usage() {
             .as_str()
         )
     );
-    assert!(receiver.try_recv().is_err());
+    assert!(queue.try_pop().is_none());
 }
 
 #[test]
 fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
-    let (sender, receiver) = mpsc::sync_channel(2);
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1_000_000,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats: Arc::new(RouteRequestLogStats::default()),
-        session_stats: None,
-    };
+    let (producer, queue) =
+        test_producer_with_queue(2, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "deferred-finish",
@@ -999,7 +989,7 @@ fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
     let written_at = Instant::now();
     probe.finish_success();
     let completed_duration_ms = elapsed_millis(probe.shared.started_at);
-    assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    assert!(queue.try_pop().is_none());
     std::thread::sleep(Duration::from_millis(20));
     probe.mark_first_downstream_content_at(written_at);
     probe.observe_event(&serde_json::json!({
@@ -1008,7 +998,7 @@ fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
     }));
     drop(observer);
 
-    let entry = receiver.try_recv().unwrap().entry;
+    let entry = queue.try_pop().unwrap().entry;
     assert!(entry.total_duration_ms <= completed_duration_ms);
     assert_eq!(
         entry.downstream_first_content_ms,
@@ -1019,21 +1009,13 @@ fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
     assert_eq!(entry.status, RequestStatus::Succeeded);
     assert_eq!(entry.token_usage.total_tokens, Some(13));
     probe.finish_cancelled();
-    assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    assert!(queue.try_pop().is_none());
 }
 
 #[test]
 fn synthetic_response_created_does_not_set_ttft() {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1_000_000,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats: Arc::new(RouteRequestLogStats::default()),
-        session_stats: None,
-    };
+    let (producer, queue) =
+        test_producer_with_queue(1, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "synthetic-created",
@@ -1051,23 +1033,15 @@ fn synthetic_response_created_does_not_set_ttft() {
     probe.observe_event(&serde_json::json!({"type":"response.created"}));
     probe.finish_success();
 
-    let entry = receiver.try_recv().unwrap().entry;
+    let entry = queue.try_pop().unwrap().entry;
     assert_eq!(entry.ttft_ms, None);
     assert_eq!(entry.status_code, Some(200));
 }
 
 #[test]
 fn retry_updates_effective_transport_without_resetting_ttft_origin() {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1_000_000,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats: Arc::new(RouteRequestLogStats::default()),
-        session_stats: None,
-    };
+    let (producer, queue) =
+        test_producer_with_queue(1, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "transport-fallback",
@@ -1090,23 +1064,15 @@ fn retry_updates_effective_transport_without_resetting_ttft_origin() {
     );
     probe.finish_success();
 
-    let entry = receiver.try_recv().unwrap().entry;
+    let entry = queue.try_pop().unwrap().entry;
     assert_eq!(entry.upstream_transport, Some(UpstreamTransport::Http));
     assert_eq!(entry.status_code, Some(200));
 }
 
 #[test]
 fn unavailable_usage_has_an_explicit_reason() {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let producer = RouteRequestLogProducer {
-        sender: Some(sender),
-        accepting: Arc::new(AtomicBool::new(true)),
-        submitting: Arc::new(AtomicU64::new(0)),
-        sample_rate_per_million: 1_000_000,
-        sample_sequence: Arc::new(AtomicU64::new(0)),
-        stats: Arc::new(RouteRequestLogStats::default()),
-        session_stats: None,
-    };
+    let (producer, queue) =
+        test_producer_with_queue(1, 1_000_000, Arc::new(RouteRequestLogStats::default()), None);
     let probe = producer
         .begin(RouteRequestLogStart {
             request_id: "usage-unavailable",
@@ -1124,7 +1090,7 @@ fn unavailable_usage_has_an_explicit_reason() {
     probe.mark_usage_unavailable("observer_queue_full");
     probe.finish_success();
 
-    let entry = receiver.try_recv().unwrap().entry;
+    let entry = queue.try_pop().unwrap().entry;
     assert!(!entry.usage_reported);
     assert_eq!(
         entry.usage_unavailable_reason.as_deref(),
@@ -1147,7 +1113,7 @@ async fn shutdown_flush_timeout_is_bounded() {
     let runtime = RouteRequestLogRuntime {
         done: Mutex::new(Some(done_rx)),
         worker: Mutex::new(None),
-        shutdown: Mutex::new(Some(mpsc::channel().0)),
+        queue: Arc::new(LogWriterQueue::new(1)),
         accepting: Arc::new(AtomicBool::new(true)),
         shutdown_timeout: Duration::from_millis(20),
         stats: Arc::clone(&stats),

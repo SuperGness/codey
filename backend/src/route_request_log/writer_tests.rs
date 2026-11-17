@@ -646,3 +646,55 @@ fn sqlite_sink_prunes_expired_rows_during_normal_writes() {
         .unwrap();
     assert_eq!(ids, vec!["fresh"]);
 }
+
+#[test]
+fn full_queue_shuts_down_and_drains_promptly_without_polling() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::config::RouteRequestLogConfig {
+        enabled: true,
+        backend: RouteRequestLogBackend::Ndjson,
+        batch_size: 2,
+        queue_capacity: 3,
+        flush_interval_ms: 5_000,
+        ..Default::default()
+    };
+    let worker_config = super::WorkerConfig::new(&config, directory.path().to_path_buf());
+    let sink = BatchSink::open(&worker_config).unwrap();
+    let queue = Arc::new(super::LogWriterQueue::new(config.queue_capacity));
+    let accepting = Arc::new(AtomicBool::new(true));
+    let submitting = Arc::new(AtomicU64::new(0));
+    let stats = Arc::new(RouteRequestLogStats::default());
+
+    for id in ["r1", "r2", "r3"] {
+        assert!(queue.try_push(queued(sample_entry(id))).is_ok());
+    }
+    assert!(matches!(
+        queue.try_push(queued(sample_entry("r4"))),
+        Err(super::TryPushError::Full)
+    ));
+
+    let worker_queue = Arc::clone(&queue);
+    let worker_accepting = Arc::clone(&accepting);
+    let worker_submitting = Arc::clone(&submitting);
+    let worker_stats = Arc::clone(&stats);
+    let handle = thread::spawn(move || {
+        super::writer_loop(
+            worker_queue,
+            sink,
+            worker_config,
+            &worker_accepting,
+            &worker_submitting,
+            &worker_stats,
+        );
+    });
+
+    queue.request_shutdown();
+    handle.join().unwrap();
+    assert_eq!(stats.entries_written.load(Ordering::Relaxed), 3);
+    assert!(matches!(
+        queue.try_push(queued(sample_entry("r5"))),
+        Err(super::TryPushError::Shutdown)
+    ));
+}

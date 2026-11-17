@@ -1,11 +1,12 @@
 //! 有界队列排空、批量写入与 NDJSON/SQLite 存储维护。
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,8 +27,70 @@ const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 
 const SQLITE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-pub(super) enum WriterControl {
+pub(super) enum TryPushError {
+    Full,
     Shutdown,
+}
+
+struct LogQueueState {
+    entries: VecDeque<QueuedEntry>,
+    shutdown: bool,
+}
+
+pub(super) struct LogWriterQueue {
+    capacity: usize,
+    state: Mutex<LogQueueState>,
+    available: Condvar,
+}
+
+impl LogWriterQueue {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            state: Mutex::new(LogQueueState {
+                entries: VecDeque::new(),
+                shutdown: false,
+            }),
+            available: Condvar::new(),
+        }
+    }
+
+    pub(super) fn try_push(&self, entry: QueuedEntry) -> Result<(), TryPushError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.shutdown {
+            return Err(TryPushError::Shutdown);
+        }
+        if state.entries.len() >= self.capacity {
+            return Err(TryPushError::Full);
+        }
+        state.entries.push_back(entry);
+        drop(state);
+        self.available.notify_one();
+        Ok(())
+    }
+
+    pub(super) fn request_shutdown(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.shutdown = true;
+        drop(state);
+        self.available.notify_all();
+    }
+
+    pub(super) fn drain_remaining(&self) -> usize {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let dropped = state.entries.len();
+        state.entries.clear();
+        dropped
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_pop(&self) -> Option<QueuedEntry> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .pop_front()
+    }
 }
 
 #[derive(Clone)]
@@ -56,8 +119,7 @@ impl WorkerConfig {
 }
 
 pub(super) fn writer_loop(
-    receiver: Receiver<QueuedEntry>,
-    control: Receiver<WriterControl>,
+    queue: Arc<LogWriterQueue>,
     mut sink: BatchSink,
     config: WorkerConfig,
     accepting: &AtomicBool,
@@ -65,63 +127,85 @@ pub(super) fn writer_loop(
     stats: &RouteRequestLogStats,
 ) {
     let mut batch = Vec::with_capacity(config.batch_size);
-    let mut deadline = Instant::now() + config.flush_interval;
+    let mut flush_deadline: Option<Instant> = None;
     let mut consecutive_failures = 0_u32;
     loop {
-        if control.try_recv().is_ok() {
-            drain_writer_for_shutdown(
-                &receiver,
-                &mut sink,
-                &mut batch,
-                submitting,
-                stats,
-                &mut consecutive_failures,
-            );
+        let mut state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            while batch.len() < config.batch_size {
+                let Some(entry) = state.entries.pop_front() else {
+                    break;
+                };
+                if flush_deadline.is_none() {
+                    flush_deadline = Some(Instant::now() + config.flush_interval);
+                }
+                batch.push(entry);
+            }
+            if state.shutdown {
+                drop(state);
+                drain_writer_for_shutdown(
+                    &queue,
+                    &mut sink,
+                    &mut batch,
+                    submitting,
+                    stats,
+                    &mut consecutive_failures,
+                );
+                return;
+            }
+            if batch.len() >= config.batch_size {
+                break;
+            }
+            if let Some(deadline) = flush_deadline {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (next_state, _) = queue
+                    .available
+                    .wait_timeout(state, deadline.saturating_duration_since(now))
+                    .unwrap_or_else(PoisonError::into_inner);
+                state = next_state;
+            } else if let Some(prune_at) = sink.next_prune_at() {
+                let now = Instant::now();
+                if now >= prune_at {
+                    drop(state);
+                    sink.prune_if_due();
+                    state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+                } else {
+                    let (next_state, _) = queue
+                        .available
+                        .wait_timeout(state, prune_at.saturating_duration_since(now))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    state = next_state;
+                }
+            } else {
+                // Ndjson 后端无定期维护任务；队列空闲时无限期阻塞，消除空闲唤醒。
+                state = queue
+                    .available
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+        drop(state);
+
+        if !batch.is_empty()
+            && !flush_batch(&mut sink, &mut batch, stats, &mut consecutive_failures)
+        {
+            queue.request_shutdown();
+            accepting.store(false, Ordering::Release);
+            stats
+                .write_dropped
+                .fetch_add(queue.drain_remaining() as u64, Ordering::Relaxed);
             return;
         }
-        let wait = deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(50));
-        match receiver.recv_timeout(wait) {
-            Ok(entry) => {
-                batch.push(entry);
-                while batch.len() < config.batch_size {
-                    match receiver.try_recv() {
-                        Ok(entry) => batch.push(entry),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if !batch.is_empty() {
-                    let _ = flush_batch(&mut sink, &mut batch, stats, &mut consecutive_failures);
-                }
-                let _ = sink.finish();
-                return;
-            }
-        }
-        if batch.len() >= config.batch_size || Instant::now() >= deadline {
-            if !batch.is_empty()
-                && !flush_batch(&mut sink, &mut batch, stats, &mut consecutive_failures)
-            {
-                accepting.store(false, Ordering::Release);
-                stats
-                    .write_dropped
-                    .fetch_add(receiver.try_iter().count() as u64, Ordering::Relaxed);
-                return;
-            }
-            deadline = Instant::now() + config.flush_interval;
-        }
-        if let BatchSink::Sqlite(sqlite) = &mut sink {
-            sqlite.prune_if_due();
-        }
+        flush_deadline = None;
+        sink.prune_if_due();
     }
 }
 
 fn drain_writer_for_shutdown(
-    receiver: &Receiver<QueuedEntry>,
+    queue: &LogWriterQueue,
     sink: &mut BatchSink,
     batch: &mut Vec<QueuedEntry>,
     submitting: &AtomicU64,
@@ -129,29 +213,45 @@ fn drain_writer_for_shutdown(
     consecutive_failures: &mut u32,
 ) {
     loop {
-        while batch.len() < batch.capacity() {
-            match receiver.try_recv() {
-                Ok(entry) => batch.push(entry),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        {
+            let mut state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+            while batch.len() < batch.capacity() {
+                let Some(entry) = state.entries.pop_front() else {
+                    break;
+                };
+                batch.push(entry);
             }
         }
         if !batch.is_empty() && !flush_batch(sink, batch, stats, consecutive_failures) {
             break;
         }
-        if submitting.load(Ordering::Acquire) == 0 {
-            match receiver.try_recv() {
-                Ok(entry) => {
-                    batch.push(entry);
-                    continue;
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        let empty_after_flush = queue
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .is_empty();
+        if empty_after_flush && submitting.load(Ordering::Acquire) == 0 {
+            let mut state = queue.state.lock().unwrap_or_else(PoisonError::into_inner);
+            while batch.len() < batch.capacity() {
+                let Some(entry) = state.entries.pop_front() else {
+                    break;
+                };
+                batch.push(entry);
             }
+            if batch.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if !empty_after_flush {
+            continue;
         }
         thread::yield_now();
     }
     stats
         .write_dropped
-        .fetch_add(receiver.try_iter().count() as u64, Ordering::Relaxed);
+        .fetch_add(queue.drain_remaining() as u64, Ordering::Relaxed);
     let _ = sink.finish();
 }
 
@@ -236,6 +336,19 @@ impl BatchSink {
         match self {
             Self::Ndjson(sink) => sink.finish(),
             Self::Sqlite(sink) => sink.finish(),
+        }
+    }
+
+    fn next_prune_at(&self) -> Option<Instant> {
+        match self {
+            Self::Ndjson(_) => None,
+            Self::Sqlite(sqlite) => Some(sqlite.next_prune_at),
+        }
+    }
+
+    fn prune_if_due(&mut self) {
+        if let Self::Sqlite(sqlite) = self {
+            sqlite.prune_if_due();
         }
     }
 }
