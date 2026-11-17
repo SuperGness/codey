@@ -1,5 +1,8 @@
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
+#[cfg(any(windows, target_os = "macos", test))]
+mod stdio_relay;
+
 use anyhow::Result;
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -9,6 +12,10 @@ use anyhow::Context;
 use std::ffi::{OsStr, OsString};
 #[cfg(any(windows, target_os = "macos", test))]
 use std::io::Write;
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) use stdio_relay::app_server_input_relay_required;
+#[cfg(any(windows, target_os = "macos", test))]
+use stdio_relay::*;
 
 /// 单次启动尝试等待 CLI 包装器确认的上限。进程退出、明确失败或确认成功都会提前结束；
 /// Windows 最多两次尝试，清理后重新计时。须盖住 app-server 冷启动——Codex 先显示
@@ -25,6 +32,21 @@ pub(crate) const CLI_WRAPPER_SOURCE_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SOURCE"
 pub(crate) const CLI_WRAPPER_OVERRIDES_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_OVERRIDES";
 #[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_MISC_MODEL_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MISC_MODEL";
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const CLI_WRAPPER_MISC_MODEL_FILE_ENV: &str = "CODEY_CODEX_CLI_MISC_MODEL_FILE";
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn runtime_misc_model_file_path() -> std::path::PathBuf {
+    codey_runtime_core::paths::default_app_state_dir().join("runtime-misc-model")
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn write_runtime_misc_model(misc_model: Option<&str>) -> Result<std::path::PathBuf> {
+    let path = runtime_misc_model_file_path();
+    let content = misc_model.unwrap_or_default().trim();
+    crate::fs_util::atomic_write_private_with_parent(&path, content.as_bytes())?;
+    Ok(path)
+}
 /// 本次启动具备 stdin relay 的包装器路径，供主进程核对实际启动入口。
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_STDIN_RELAY_ENV: &str = "CODEY_CODEX_CLI_STDIN_RELAY";
@@ -216,8 +238,92 @@ fn cli_wrapper_target(
     Ok(Some(target))
 }
 
+#[cfg(target_os = "macos")]
+fn run_macos_stdio_relay_helper() -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut input_fd: Option<i32> = None;
+    let mut output_fd: Option<i32> = None;
+    let mut args = std::env::args().skip(2);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--input-fd" => {
+                let value = args.next().context("缺少 --input-fd 参数")?;
+                let fd: i32 = value.parse().context("--input-fd 参数无效")?;
+                anyhow::ensure!(fd > 2, "--input-fd 不能使用标准句柄");
+                input_fd = Some(fd);
+            }
+            "--output-fd" => {
+                let value = args.next().context("缺少 --output-fd 参数")?;
+                let fd: i32 = value.parse().context("--output-fd 参数无效")?;
+                anyhow::ensure!(fd > 2, "--output-fd 不能使用标准句柄");
+                output_fd = Some(fd);
+            }
+            other => anyhow::bail!("未知参数：{other}"),
+        }
+    }
+    anyhow::ensure!(
+        input_fd.is_some() || output_fd.is_some(),
+        "--codey-stdio-relay 至少需要一个管道句柄"
+    );
+    let overrides = if input_fd.is_some() {
+        let raw =
+            std::env::var(CLI_WRAPPER_OVERRIDES_ENV).context("Codex 请求转发缺少运行时配置")?;
+        serde_json::from_str::<Vec<String>>(&raw).context("解析 Codex 请求转发配置失败")?
+    } else {
+        Vec::new()
+    };
+    let misc_model = std::env::var(CLI_WRAPPER_MISC_MODEL_ENV).ok();
+    let adopt_pipe = |fd: i32| -> Result<std::fs::File> {
+        // SAFETY: 父进程通过 `pre_exec` 清除 FD_CLOEXEC 并保留该独立管道句柄供本辅助进程独占接管。
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let raw = file.as_raw_fd();
+        let _ = unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) };
+        Ok(file)
+    };
+    let input_pair = input_fd
+        .map(adopt_pipe)
+        .transpose()?
+        .map(|writer| {
+            let input: Box<dyn std::io::BufRead + Send> =
+                Box::new(std::io::BufReader::new(std::io::stdin()));
+            let output: Box<dyn std::io::Write + Send> = Box::new(writer);
+            (input, output)
+        });
+    let output_pair = output_fd
+        .map(adopt_pipe)
+        .transpose()?
+        .map(|reader| {
+            let input: Box<dyn std::io::Read + Send> = Box::new(reader);
+            let output: Box<dyn std::io::Write + Send> = Box::new(std::io::stdout());
+            (input, output)
+        });
+    let relays = InProcessStdioRelays::spawn_with_streams(
+        input_pair,
+        output_pair,
+        crate::codex_config::codex_home().to_path_buf(),
+        overrides,
+        misc_model,
+    )?;
+    relays.wait_until_finished();
+    Ok(())
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 pub fn run_cli_wrapper_if_requested() -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--codey-stdio-relay")) {
+        if let Err(error) = run_macos_stdio_relay_helper() {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+            {
+                return Ok(true);
+            }
+            return Err(error);
+        }
+        return Ok(true);
+    }
     if std::env::args_os().nth(1).as_deref()
         == Some(OsStr::new("--codey-observe-app-server-output"))
     {
@@ -276,8 +382,10 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         == 1;
     // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
     let readiness = (app_server && managed_launch).then(CliWrapperReadiness::begin);
-    let mut input_router: Option<std::process::Child> = None;
-    let mut output_observer: Option<std::process::Child> = None;
+    #[cfg(target_os = "macos")]
+    let mut stdio_relay: Option<std::process::Child> = None;
+    #[cfg(windows)]
+    let mut in_process_relays: Option<InProcessStdioRelays> = None;
     let launch = (|| -> Result<std::process::Child> {
         anyhow::ensure!(
             target.is_absolute(),
@@ -319,6 +427,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             CLI_WRAPPER_SOURCE_ENV,
             CLI_WRAPPER_OVERRIDES_ENV,
             CLI_WRAPPER_MISC_MODEL_ENV,
+            CLI_WRAPPER_MISC_MODEL_FILE_ENV,
             CLI_WRAPPER_STDIN_RELAY_ENV,
             CLI_WRAPPER_SUBAGENT_ENV,
             CLI_WRAPPER_PORT_ENV,
@@ -347,38 +456,66 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             }
         }
         let misc_model = std::env::var(CLI_WRAPPER_MISC_MODEL_ENV).ok();
-        if app_server && app_server_input_relay_required(&runtime_overrides, misc_model.as_deref())
-        {
-            // Keep macOS exec/PID semantics. The helper owns only the input pipe;
-            // Desktop closing stdin ends it, including when app-server restarts.
-            let mut relay = std::process::Command::new(std::env::current_exe()?);
-            relay
-                .arg("--codey-route-app-server-input")
-                .stdout(std::process::Stdio::piped());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                relay.creation_flags(codey_runtime_core::windows_create_no_window());
-            }
-            let relay = input_router.insert(relay.spawn().context("启动 Codex 请求转发失败")?);
-            command.stdin(relay.stdout.take().context("Codex 请求管道不可用")?);
-        }
-        if app_server && local_router_runtime_enabled(&runtime_overrides) {
-            let mut observer = std::process::Command::new(std::env::current_exe()?);
-            observer
-                .arg("--codey-observe-app-server-output")
-                .stdin(std::process::Stdio::piped());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                observer.creation_flags(codey_runtime_core::windows_create_no_window());
-            }
-            let observer =
-                output_observer.insert(observer.spawn().context("启动 Codex 会话响应转发失败")?);
-            command.stdout(observer.stdin.take().context("Codex 会话响应管道不可用")?);
-        }
         #[cfg(target_os = "macos")]
         {
+            let relay_input = app_server
+                && app_server_input_relay_required(&runtime_overrides, misc_model.as_deref());
+            let observe_output = app_server && local_router_runtime_enabled(&runtime_overrides);
+            if relay_input || observe_output {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::process::CommandExt;
+
+                // Keep macOS exec/PID semantics while merging input routing and
+                // output observation into a single helper child process.
+                let mut relay_cmd = std::process::Command::new(std::env::current_exe()?);
+                relay_cmd.arg("--codey-stdio-relay");
+                let mut helper_in_write = None;
+                let mut helper_out_read = None;
+                let mut inherited_fds = Vec::new();
+                if relay_input {
+                    let (codex_stdin, writer) =
+                        std::io::pipe().context("创建 Codex 请求转发管道失败")?;
+                    let fd = writer.as_raw_fd();
+                    relay_cmd.args(["--input-fd", &fd.to_string()]);
+                    inherited_fds.push(fd);
+                    helper_in_write = Some(writer);
+                    command.stdin(std::process::Stdio::from(codex_stdin));
+                } else {
+                    relay_cmd.stdin(std::process::Stdio::null());
+                }
+                if observe_output {
+                    let (reader, codex_stdout) =
+                        std::io::pipe().context("创建 Codex 会话响应观察管道失败")?;
+                    let fd = reader.as_raw_fd();
+                    relay_cmd.args(["--output-fd", &fd.to_string()]);
+                    inherited_fds.push(fd);
+                    helper_out_read = Some(reader);
+                    command.stdout(std::process::Stdio::from(codex_stdout));
+                } else {
+                    relay_cmd.stdout(std::process::Stdio::null());
+                }
+                // SAFETY: `pre_exec` 仅对上面创建的管道句柄调用异步信号安全的 `fcntl` 清除 FD_CLOEXEC。
+                unsafe {
+                    relay_cmd.pre_exec(move || {
+                        for &fd in &inherited_fds {
+                            let flags = libc::fcntl(fd, libc::F_GETFD);
+                            if flags == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+                let spawned = relay_cmd
+                    .spawn()
+                    .context("启动 Codex 请求与响应转发失败")?;
+                stdio_relay = Some(spawned);
+                drop(helper_in_write);
+                drop(helper_out_read);
+            }
             use std::os::unix::process::CommandExt;
             // exec 成功后不再有机会写文件：先记录已执行，exec 失败时随后改写为失败。
             if let Some(readiness) = readiness.as_ref() {
@@ -390,6 +527,18 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         }
         #[cfg(windows)]
         {
+            let relay_input = app_server
+                && app_server_input_relay_required(&runtime_overrides, misc_model.as_deref());
+            let observe_output = app_server && local_router_runtime_enabled(&runtime_overrides);
+            if relay_input || observe_output {
+                in_process_relays = Some(InProcessStdioRelays::start(
+                    &mut command,
+                    relay_input,
+                    observe_output,
+                    runtime_overrides,
+                    misc_model,
+                )?);
+            }
             use std::os::windows::process::CommandExt;
             command.creation_flags(codey_runtime_core::windows_create_no_window());
             command
@@ -400,11 +549,14 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     let mut child = match launch {
         Ok(child) => child,
         Err(error) => {
-            finish_cli_wrapper_helpers(
-                &mut input_router,
-                &mut output_observer,
-                std::time::Duration::ZERO,
-            );
+            #[cfg(target_os = "macos")]
+            if let Some(mut relay) = stdio_relay.take() {
+                terminate_cli_child(&mut relay, "stdio 转发器");
+            }
+            #[cfg(windows)]
+            if let Some(relays) = in_process_relays.take() {
+                relays.finish(std::time::Duration::ZERO);
+            }
             if let Some(readiness) = readiness {
                 // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
                 readiness.fail(&CliWrapperFailure {
@@ -425,520 +577,24 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     if status.is_err() {
         terminate_cli_child(&mut child, "Codex CLI");
     }
-    finish_cli_wrapper_helpers(
-        &mut input_router,
-        &mut output_observer,
-        if status.is_ok() {
-            CLI_WRAPPER_OUTPUT_DRAIN_TIMEOUT
-        } else {
-            std::time::Duration::ZERO
-        },
-    );
+    let drain_timeout = if status.is_ok() {
+        CLI_WRAPPER_OUTPUT_DRAIN_TIMEOUT
+    } else {
+        std::time::Duration::ZERO
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(mut relay) = stdio_relay.take() {
+        let _ = wait_for_cli_child_exit(&mut relay, drain_timeout);
+        terminate_cli_child(&mut relay, "stdio 转发器");
+    }
+    #[cfg(windows)]
+    if let Some(relays) = in_process_relays.take() {
+        relays.finish(drain_timeout);
+    }
     let status =
         status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
     let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
     std::process::exit(status.code().unwrap_or(1));
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn wait_for_cli_child_exit(
-    child: &mut std::process::Child,
-    timeout: std::time::Duration,
-) -> std::io::Result<bool> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return Ok(true),
-            Ok(None) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-        std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
-    }
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn terminate_cli_child(child: &mut std::process::Child, role: &str) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-    let termination = child.kill();
-    // Windows 的终止请求是异步的；回收同样有时限，避免清理失败阻塞包装器退出。
-    match wait_for_cli_child_exit(child, std::time::Duration::from_secs(1)) {
-        Ok(true) => {}
-        result => eprintln!(
-            "Codey 回收 {role} 失败（PID {}）：终止结果 {termination:?}，等待结果 {result:?}",
-            child.id()
-        ),
-    }
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn finish_cli_wrapper_helpers(
-    input_router: &mut Option<std::process::Child>,
-    output_observer: &mut Option<std::process::Child>,
-    drain_timeout: std::time::Duration,
-) {
-    // CLI 已结束，不再需要输入；先清理，避免输出管道未关闭时连带保留输入进程。
-    if let Some(relay) = input_router {
-        terminate_cli_child(relay, "输入转发器");
-    }
-    if let Some(observer) = output_observer {
-        // 保留末尾通知的排空时间，但后代继承 stdout 时不能无限等待 EOF。
-        if !matches!(wait_for_cli_child_exit(observer, drain_timeout), Ok(true)) {
-            terminate_cli_child(observer, "输出观察器");
-        }
-    }
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn observe_local_app_server_output(
-    mut input: impl std::io::Read,
-    mut output: impl std::io::Write,
-    home: &std::path::Path,
-) -> std::io::Result<()> {
-    let mut buffer = [0; 8192];
-    let mut line = Vec::new();
-    let mut oversized = false;
-    // 小行等到换行才转发以便改写；超过暂存上限后剩余字节随读随转发。
-    let mut streaming = false;
-    loop {
-        let count = input.read(&mut buffer)?;
-        if count == 0 {
-            if !streaming {
-                output.write_all(&line)?;
-                output.flush()?;
-            }
-            if !oversized && !line.is_empty() {
-                remember_app_server_settings(&line, home);
-            }
-            return Ok(());
-        }
-        let mut start = 0;
-        for (index, &byte) in buffer[..count].iter().enumerate() {
-            if byte == b'\n' {
-                if !oversized {
-                    remember_app_server_settings(&line, home);
-                }
-                if streaming {
-                    output.write_all(&buffer[start..=index])?;
-                } else {
-                    match rewrite_prediction_resume_response(&line) {
-                        Some(rewritten) => output.write_all(&rewritten)?,
-                        None => output.write_all(&line)?,
-                    }
-                    output.write_all(b"\n")?;
-                }
-                start = index + 1;
-                line.clear();
-                oversized = false;
-                streaming = false;
-            } else if !oversized {
-                // 大型响应仍原样转发，但无需为观察小型设置通知保留完整副本。
-                if line.len() == 1024 * 1024 {
-                    line.clear();
-                    oversized = true;
-                } else {
-                    line.push(byte);
-                    if !streaming && line.len() > PREDICTION_RESUME_LINE_LIMIT {
-                        output.write_all(&line)?;
-                        streaming = true;
-                        start = index + 1;
-                    }
-                }
-            }
-        }
-        if streaming {
-            output.write_all(&buffer[start..count])?;
-        }
-        output.flush()?;
-    }
-}
-
-/// 预测前的会话设置回复不含历史轮次，远小于此上限。
-#[cfg(any(windows, target_os = "macos", test))]
-const PREDICTION_RESUME_LINE_LIMIT: usize = 256 * 1024;
-
-/// Codex 主进程只为 openai provider 的会话生成输入框预测，预测前会读取会话设置。
-/// 主进程与页面的请求均使用 `thread/resume:<uuid>`，不能据此区分来源。
-/// 官方账号线路兼容预测时改报 openai，同时用 codeyRuntimeModelProvider 保留真实
-/// provider，供页面恢复运行时状态；预测的 thread/fork 仍走本地路由。
-#[cfg(any(windows, target_os = "macos", test))]
-fn rewrite_prediction_resume_response(line: &[u8]) -> Option<Vec<u8>> {
-    const RESUME_ID_PREFIX: &str = "thread/resume:";
-    if !line
-        .windows(RESUME_ID_PREFIX.len() + 1)
-        .any(|window| window[0] == b'"' && &window[1..] == RESUME_ID_PREFIX.as_bytes())
-    {
-        return None;
-    }
-    let mut message = serde_json::from_slice::<serde_json::Value>(line).ok()?;
-    if !message.get("id")?.as_str()?.starts_with(RESUME_ID_PREFIX) {
-        return None;
-    }
-    let result = message.get_mut("result")?.as_object_mut()?;
-    let official = result.get("modelProvider")?.as_str()?
-        == crate::local_router::ROUTER_PROVIDER_ID
-        && crate::model_id::parse_alias(result.get("model")?.as_str()?)
-            .is_some_and(|alias| crate::config::is_official_profile_id(alias.provider_key));
-    if !official {
-        return None;
-    }
-    let runtime_provider = result.get("modelProvider")?.clone();
-    result.insert("codeyRuntimeModelProvider".into(), runtime_provider);
-    result.insert("modelProvider".into(), "openai".into());
-    serde_json::to_vec(&message).ok()
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn remember_app_server_settings(line: &[u8], home: &std::path::Path) {
-    let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
-        return;
-    };
-    if message.get("method").and_then(serde_json::Value::as_str) != Some("thread/settings/updated")
-        || message.get("id").is_some()
-    {
-        return;
-    }
-    let Some(thread_id) = message
-        .pointer("/params/threadId")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return;
-    };
-    let Some(model) = message
-        .pointer("/params/threadSettings/model")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    else {
-        return;
-    };
-    let provider = message
-        .pointer("/params/threadSettings/modelProvider")
-        .and_then(serde_json::Value::as_str);
-    let selected_at_ms = message
-        .get("emittedAtMs")
-        .and_then(serde_json::Value::as_i64);
-    let effort = message
-        .pointer("/params/threadSettings/effort")
-        .or_else(|| {
-            message.pointer("/params/threadSettings/collaborationMode/settings/reasoning_effort")
-        });
-    if let Err(error) = crate::session_model::remember_settings(
-        home,
-        thread_id,
-        model,
-        provider,
-        selected_at_ms,
-        effort,
-    ) {
-        eprintln!("Codey 保存会话模型失败：{error:#}");
-    }
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn forward_app_server_input(
-    mut input: impl std::io::BufRead,
-    mut output: impl std::io::Write,
-    runtime_overrides: &[String],
-    codex_home: Option<&std::path::Path>,
-    local_router_enabled: bool,
-    misc_model: Option<&str>,
-) -> std::io::Result<()> {
-    let mut line = Vec::new();
-    let mut live_threads = std::collections::HashSet::<String>::new();
-    loop {
-        line.clear();
-        if input.read_until(b'\n', &mut line)? == 0 {
-            return Ok(());
-        }
-        let mut parsed = serde_json::from_slice::<serde_json::Value>(&line).ok();
-        let mut changed = parsed.as_mut().is_some_and(|message| {
-            rewrite_title_generation_request(message, runtime_overrides, misc_model)
-        });
-        if let Some(message) = parsed.as_ref()
-            && matches!(
-                message.get("method").and_then(serde_json::Value::as_str),
-                Some("thread/unsubscribe" | "thread/archive")
-            )
-            && let Some(thread_id) = message
-                .pointer("/params/threadId")
-                .and_then(serde_json::Value::as_str)
-        {
-            live_threads.remove(thread_id);
-        }
-        if let Some(message) = parsed.as_ref()
-            && matches!(
-                message.get("method").and_then(serde_json::Value::as_str),
-                Some("thread/settings/update" | "turn/start")
-            )
-            && let Some(thread_id) = message
-                .pointer("/params/threadId")
-                .and_then(serde_json::Value::as_str)
-        {
-            // 活跃会话的选择保留在原生进程内，磁盘上的最后一轮可能更旧。
-            live_threads.insert(thread_id.to_owned());
-        }
-        if let Some(message) = parsed.as_mut()
-            && local_router_enabled
-            && matches!(
-                message.get("method").and_then(serde_json::Value::as_str),
-                Some("thread/start" | "thread/resume" | "thread/fork")
-            )
-        {
-            let method = message["method"].as_str().unwrap().to_string();
-            if message.get("params").is_none_or(serde_json::Value::is_null) {
-                message["params"] = serde_json::json!({});
-            }
-            if let Some(params) = message
-                .get_mut("params")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                if method == "thread/resume"
-                    && params
-                        .get("model")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|model| !model.trim().is_empty())
-                    && let Some(thread_id) =
-                        params.get("threadId").and_then(serde_json::Value::as_str)
-                {
-                    live_threads.insert(thread_id.to_owned());
-                }
-                if method == "thread/resume"
-                    && params.get("model").is_none_or(|model| {
-                        model.is_null()
-                            || model.as_str().is_some_and(|model| model.trim().is_empty())
-                    })
-                    && let Some(home) = codex_home
-                    && let Some(thread_id) =
-                        params.get("threadId").and_then(serde_json::Value::as_str)
-                    && !live_threads.contains(thread_id)
-                {
-                    match restored_resume_settings(home, thread_id, runtime_overrides) {
-                        Ok(Some((model, effort))) => {
-                            params.insert("model".into(), model.into());
-                            if let Some(effort) = effort {
-                                if effort.is_null() {
-                                    if let Some(config) = params
-                                        .get_mut("config")
-                                        .and_then(serde_json::Value::as_object_mut)
-                                    {
-                                        config.remove("model_reasoning_effort");
-                                    }
-                                } else if params
-                                    .get("config")
-                                    .is_none_or(serde_json::Value::is_null)
-                                {
-                                    params.insert(
-                                        "config".into(),
-                                        serde_json::json!({"model_reasoning_effort":effort}),
-                                    );
-                                } else if let Some(config) = params
-                                    .get_mut("config")
-                                    .and_then(serde_json::Value::as_object_mut)
-                                {
-                                    config.insert("model_reasoning_effort".into(), effort);
-                                }
-                            }
-                        }
-                        Ok(None) => {}
-                        // 单向转发器无法发送 RPC 错误响应；保留请求和后续消息，错误仅写 stderr。
-                        Err(error) => eprintln!("Codey 恢复会话模型失败：{error:#}"),
-                    }
-                }
-                let provider = router_provider_for_params(&method, params, runtime_overrides);
-                params.insert("modelProvider".into(), provider.into());
-                params.remove("model_provider");
-                if let Some(config) = params
-                    .get_mut("config")
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    config.retain(|key, _| {
-                        key != "model_provider"
-                            && !key.starts_with("model_provider.")
-                            && key != "model_providers"
-                            && !key.starts_with("model_providers.")
-                    });
-                }
-                changed = true;
-            }
-        }
-        if changed {
-            line = serde_json::to_vec(&parsed.unwrap()).map_err(std::io::Error::other)?;
-            line.push(b'\n');
-        }
-        output.write_all(&line)?;
-        output.flush()?;
-    }
-}
-
-#[cfg(test)]
-fn route_local_app_server_input(
-    input: impl std::io::BufRead,
-    output: impl std::io::Write,
-    runtime_overrides: &[String],
-    codex_home: Option<&std::path::Path>,
-) -> std::io::Result<()> {
-    forward_app_server_input(input, output, runtime_overrides, codex_home, true, None)
-}
-
-/// Desktop 用来源和临时会话标记识别标题任务，也可能从已有会话分支。
-/// 后续标题 turn/start 传 model:null，沿用临时会话的模型。
-#[cfg(any(windows, target_os = "macos", test))]
-fn rewrite_title_generation_request(
-    message: &mut serde_json::Value,
-    runtime_overrides: &[String],
-    misc_model: Option<&str>,
-) -> bool {
-    if !matches!(
-        message.get("method").and_then(serde_json::Value::as_str),
-        Some("thread/start" | "thread/fork")
-    ) {
-        return false;
-    }
-    let Some(params) = message
-        .get_mut("params")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return false;
-    };
-    if params.get("ephemeral").and_then(serde_json::Value::as_bool) != Some(true)
-        || params
-            .get("threadSource")
-            .and_then(serde_json::Value::as_str)
-            != Some("thread_title")
-    {
-        return false;
-    }
-    let mut changed = false;
-    if let Some(model) = misc_model.map(str::trim).filter(|model| !model.is_empty()) {
-        params.insert("model".into(), model.into());
-        changed = true;
-    }
-    // Desktop 用 {enabled:false} 禁用 MCP。CLI 注入的 FastCtx 传输字段在
-    // 此覆盖层缺失时会使配置解析失败；补齐禁用条目的 command，不启动服务。
-    if let Some(server) = params
-        .get_mut("config")
-        .and_then(|config| config.get_mut("mcp_servers"))
-        .and_then(|servers| servers.get_mut("codey_fastctx"))
-        .and_then(serde_json::Value::as_object_mut)
-        && server.get("enabled").and_then(serde_json::Value::as_bool) == Some(false)
-        && !server.contains_key("command")
-        && !server.contains_key("url")
-        && let Some(command) =
-            runtime_override_string(runtime_overrides, "mcp_servers.codey_fastctx.command")
-                .filter(|command| !command.trim().is_empty())
-    {
-        server.insert("command".into(), command.into());
-        changed = true;
-    }
-    changed
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-pub(crate) fn app_server_input_relay_required(
-    overrides: &[String],
-    misc_model: Option<&str>,
-) -> bool {
-    local_router_runtime_enabled(overrides)
-        || misc_model.is_some_and(|model| !model.trim().is_empty())
-        || runtime_override_string(overrides, "mcp_servers.codey_fastctx.command").is_some()
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn restored_resume_settings(
-    home: &std::path::Path,
-    thread_id: &str,
-    overrides: &[String],
-) -> Result<Option<(String, Option<serde_json::Value>)>> {
-    let saved = crate::session_model::read(home, thread_id)?;
-    let model = resolve_resume_model(&saved, overrides)?;
-    Ok(model.map(|model| (model, saved.get("reasoningEffort").cloned())))
-}
-
-#[cfg(test)]
-fn restored_resume_model(
-    home: &std::path::Path,
-    thread_id: &str,
-    overrides: &[String],
-) -> Result<Option<String>> {
-    Ok(restored_resume_settings(home, thread_id, overrides)?.map(|(model, _)| model))
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn cached_catalog_slugs(catalog_path: &str) -> Result<Vec<String>> {
-    type CatalogCache = (String, Vec<u8>, Vec<String>);
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CatalogCache>>> =
-        std::sync::OnceLock::new();
-    let bytes = std::fs::read(catalog_path)?;
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(guard) = cache.lock()
-        && let Some((cached_path, cached_bytes, cached_slugs)) = guard.as_ref()
-        && cached_path == catalog_path
-        && *cached_bytes == bytes
-    {
-        return Ok(cached_slugs.clone());
-    }
-    let catalog: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let models = catalog
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .context("模型目录缺少 models")?;
-    let slugs = models
-        .iter()
-        .filter_map(|entry| entry.get("slug")?.as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((catalog_path.to_owned(), bytes, slugs.clone()));
-    }
-    Ok(slugs)
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Result<Option<String>> {
-    let Some(model) = saved.get("model").and_then(serde_json::Value::as_str) else {
-        return Ok(None);
-    };
-    let Some(catalog_path) = runtime_override_string(overrides, "model_catalog_json") else {
-        return Ok(None);
-    };
-    let slugs = cached_catalog_slugs(&catalog_path)?;
-    // 当前稳定 ID 优先，不把包含斜杠的上游型号误解为失效的线路 ID。
-    if let Some(slug) = slugs
-        .iter()
-        .find(|slug| crate::model_id::equal(slug, model))
-    {
-        return Ok(Some(slug.clone()));
-    }
-    let provider = saved
-        .get("modelProvider")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty());
-    if let Some(provider) =
-        provider.filter(|provider| !crate::local_router::is_router_provider(provider))
-    {
-        let alias = crate::model_id::model_alias(provider, model);
-        return Ok(slugs
-            .iter()
-            .find(|slug| crate::model_id::equal(slug, &alias))
-            .cloned());
-    }
-    let mut matches = slugs.iter().filter(|slug| {
-        crate::model_id::parse_alias(slug)
-            .is_some_and(|alias| crate::model_id::equal(alias.upstream_model, model))
-    });
-    let first = matches.next();
-    Ok(if matches.next().is_none() {
-        first.cloned()
-    } else {
-        None
-    })
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]

@@ -1266,6 +1266,12 @@ async fn prepare_cli_wrapper(
             marker_path.to_string_lossy().to_string(),
         ),
     ];
+    if let Ok(misc_model_path) = crate::codex_startup_patch::write_runtime_misc_model(misc_model) {
+        environment.push((
+            crate::codex_startup_patch::CLI_WRAPPER_MISC_MODEL_FILE_ENV.to_string(),
+            misc_model_path.to_string_lossy().to_string(),
+        ));
+    }
     let input_relay_required = crate::codex_startup_patch::app_server_input_relay_required(
         runtime_config_overrides,
         misc_model,

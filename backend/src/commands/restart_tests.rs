@@ -1215,3 +1215,26 @@ fn codex_launch_proxy_change_requires_restart() {
         false, &applied, &current
     ));
 }
+
+#[test]
+fn misc_model_hot_reloads_when_input_relay_was_installed_at_launch() {
+    let mut applied = CodeyConfig::default();
+    let provider_id = applied.current_provider_id().unwrap().to_string();
+    applied
+        .selected_models_by_provider
+        .insert(provider_id.clone(), vec!["m1".into(), "m2".into()]);
+    applied.misc_model = format!("{provider_id}/m1");
+    let mut changed = applied.clone();
+    changed.misc_model = format!("{provider_id}/m2");
+    assert!(!config_requires_restart(&applied, &changed));
+    changed.misc_model.clear();
+    assert!(!config_requires_restart(&applied, &changed));
+
+    let mut direct_no_relay = applied;
+    direct_no_relay.local_router_enabled = false;
+    direct_no_relay.fast_context_tools = false;
+    direct_no_relay.misc_model.clear();
+    let mut direct_set = direct_no_relay.clone();
+    direct_set.misc_model = format!("{provider_id}/m1");
+    assert!(config_requires_restart(&direct_no_relay, &direct_set));
+}

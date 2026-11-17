@@ -121,6 +121,11 @@ async fn apply(state: &Arc<AppState>, config: &CodeyConfig, reconcile: bool) -> 
     };
     runtime.set_crashpad_pending_protection(config.protect_crashpad_pending);
     let models = models::hot_reload_runtime_models_locked(state, true).await;
+    if models.error.is_none() {
+        let _ = crate::codex_startup_patch::write_runtime_misc_model(
+            config.misc_model_catalog_id().as_deref(),
+        );
+    }
     let logs = hot_reload_runtime_request_log_locked(state, config).await;
     let subagents = if config.subagent_optimization
         && (reconcile || !runtime.applied_subagent_config().await.matches(config))

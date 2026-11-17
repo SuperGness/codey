@@ -3140,6 +3140,28 @@ fn config_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool
     )
 }
 
+fn misc_model_change_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool {
+    if applied
+        .misc_model
+        .trim()
+        .eq_ignore_ascii_case(current.misc_model.trim())
+    {
+        return false;
+    }
+    let launch_had_input_relay = applied.local_router_enabled
+        || applied.fast_context_tools
+        || applied.misc_model_catalog_id().is_some();
+    if !launch_had_input_relay {
+        return true;
+    }
+    // 未安装自定义目录（纯内置官方目录）时，杂事模型若指向带 `/` 的第三方别名则无法免重启识别。
+    applied.uses_builtin_official_model_catalog()
+        && current
+            .misc_model_catalog_id()
+            .as_deref()
+            .is_some_and(|model| model.contains('/'))
+}
+
 /// 仅比较当前进程无法热更新的配置；尚未送达的目录和角色配置由应用结果处理。
 pub(super) fn config_requires_restart_with_route_status(
     provider_route_restart_required: bool,
@@ -3156,10 +3178,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
         || applied.scope_guard != current.scope_guard
-        || !applied
-            .misc_model
-            .trim()
-            .eq_ignore_ascii_case(current.misc_model.trim())
+        || misc_model_change_requires_restart(applied, current)
 }
 
 pub(super) fn provider_route_restart_required_for_runtime(
