@@ -12,7 +12,7 @@ impl std::fmt::Display for MissingResponseHistory {
 impl std::error::Error for MissingResponseHistory {}
 
 const NATIVE_HISTORY_CACHE_BYTES: usize = 16 * 1024 * 1024;
-const NATIVE_HISTORY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const NATIVE_HISTORY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 // Entries hold whole session snapshots, so this bound counts conversations
 // rather than history items inside one request.
 const NATIVE_HISTORY_CACHE_ENTRIES: usize = 64;

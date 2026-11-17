@@ -128,17 +128,26 @@ pub(crate) async fn snapshot_with_history(
     registry: Option<Arc<ConversationStatsRegistry>>,
 ) -> Option<ConversationStatsSnapshot> {
     tokio::task::spawn_blocking(move || {
-        let history = cached_history(&home, &session_id);
+        let canonical_home = home.canonicalize().ok();
+        let history = canonical_home
+            .as_deref()
+            .and_then(|canonical| cached_history_with_canonical(canonical, &session_id));
         let last_turn = history
             .as_ref()
             .and_then(|snapshot| snapshot.last_turn.clone());
         let runtime =
             registry.and_then(|registry| registry.snapshot_with_turn(&session_id, last_turn));
         let mut snapshot = merge(history, runtime)?;
-        if let Some(turn) = &snapshot.last_turn
+        if let Some(canonical) = canonical_home.as_deref()
+            && let Some(turn) = &snapshot.last_turn
             && let Some(window) = TurnWindow::from_snapshot(turn)
         {
-            let recorded = cached_turn(&home, &session_id, &window, turn.runtime_boundary.as_ref());
+            let recorded = cached_turn_with_canonical(
+                canonical,
+                &session_id,
+                &window,
+                turn.runtime_boundary.as_ref(),
+            );
             apply_recorded_turn(&mut snapshot, recorded);
         }
         Some(snapshot)
@@ -182,8 +191,8 @@ impl CachedTurn {
 type TurnCache = HashMap<(PathBuf, PathBuf, String), Arc<Mutex<CachedTurn>>>;
 static TURN_CACHE: OnceLock<Mutex<TurnCache>> = OnceLock::new();
 
-fn cached_turn(
-    home: &Path,
+fn cached_turn_with_canonical(
+    canonical_home: &Path,
     session_id: &str,
     window: &TurnWindow,
     boundary: Option<&RuntimeHistoryBoundary>,
@@ -192,7 +201,7 @@ fn cached_turn(
     uuid::Uuid::parse_str(session_id).ok()?;
     let root = codey_runtime_core::paths::default_app_state_dir();
     let key = (
-        home.canonicalize().ok()?,
+        canonical_home.to_path_buf(),
         root.clone(),
         session_id.to_owned(),
     );
@@ -300,12 +309,20 @@ fn merge(
     Some(history)
 }
 
+#[cfg(test)]
 fn cached_history(home: &Path, session_id: &str) -> Option<ConversationStatsSnapshot> {
+    let canonical = home.canonicalize().ok()?;
+    cached_history_with_canonical(&canonical, session_id)
+}
+
+fn cached_history_with_canonical(
+    home: &Path,
+    session_id: &str,
+) -> Option<ConversationStatsSnapshot> {
     let session_id = normalize_session_id(session_id);
     // 原生会话使用 UUID，拒绝路径形态及非本地会话标识。
     uuid::Uuid::parse_str(session_id).ok()?;
-    let home = home.canonicalize().ok()?;
-    let key = (home.clone(), session_id.to_string());
+    let key = (home.to_path_buf(), session_id.to_string());
     let entry = {
         let mut cache = lock_unpoisoned(CACHE.get_or_init(Default::default));
         if cache.len() >= 128 && !cache.contains_key(&key) {
