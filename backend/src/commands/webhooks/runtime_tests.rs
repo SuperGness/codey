@@ -252,7 +252,7 @@ async fn native_enqueue_wait_allows_slow_durable_storage() {
 #[tokio::test(start_paused = true)]
 async fn native_enqueue_deadline_bounds_a_blocked_state_read() {
     let started = tokio::time::Instant::now();
-    let result = wait_for_new_session_enqueue(1, || std::future::pending()).await;
+    let result = wait_for_new_session_enqueue(1, std::future::pending).await;
     assert!(result.unwrap_err().contains("within 10 s"));
     assert_eq!(started.elapsed(), Duration::from_secs(10));
 }
