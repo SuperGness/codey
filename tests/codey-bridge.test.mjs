@@ -1063,3 +1063,86 @@ test("fetch interceptors share one stable wrapper and unregister independently",
   assert.equal(runtime.window.fetch, nativeFetch);
   assert.equal(shared.fetchSnapshot().installed, false);
 });
+
+test("mutation dispatcher exposes snapshot filter/oldValue and createScopedObserver", () => {
+  const observedTargets = [];
+  const runtime = createRuntime();
+  class TrackingObserver extends runtime.context.MutationObserver {
+    observe(target, options) {
+      observedTargets.push({ observer: this, target, options });
+      super.observe(target, options);
+    }
+  }
+  runtime.context.MutationObserver = TrackingObserver;
+  const dispatcher = runtime.window.__codeyMutationDispatcher;
+
+  const plainSnapshot = () => {
+    const snap = dispatcher.snapshot();
+    return {
+      attributeFilter: snap.attributeFilter ? [...snap.attributeFilter] : null,
+      attributeOldValue: snap.attributeOldValue,
+      observerInstalled: snap.observerInstalled,
+      subscriberCount: snap.subscriberCount,
+    };
+  };
+
+  assert.deepEqual(plainSnapshot(), {
+    attributeFilter: null,
+    attributeOldValue: false,
+    observerInstalled: false,
+    subscriberCount: 0,
+  });
+
+  const unsub1 = dispatcher.subscribe(() => {}, {
+    attributes: true,
+    attributeFilter: ["aria-hidden", "disabled"],
+    childList: true,
+  });
+  const unsub2 = dispatcher.subscribe(() => {}, {
+    attributes: true,
+    attributeOldValue: true,
+    attributeFilter: ["role", "disabled"],
+  });
+  assert.deepEqual(plainSnapshot(), {
+    attributeFilter: ["aria-hidden", "disabled", "role"],
+    attributeOldValue: true,
+    observerInstalled: true,
+    subscriberCount: 2,
+  });
+  unsub2();
+  assert.deepEqual(plainSnapshot(), {
+    attributeFilter: ["aria-hidden", "disabled"],
+    attributeOldValue: false,
+    observerInstalled: true,
+    subscriberCount: 1,
+  });
+  unsub1();
+
+  observedTargets.length = 0;
+  const calls = [];
+  const scoped = dispatcher.createScopedObserver((records) => calls.push(records), {
+    attributes: true,
+    attributeFilter: ["class"],
+    subtree: true,
+  });
+  const targetA = new runtime.FakeHTMLElement();
+  const targetB = new runtime.FakeHTMLElement();
+
+  assert.equal(scoped.currentTarget(), null);
+  assert.equal(scoped.observe(targetA), true);
+  assert.equal(scoped.currentTarget(), targetA);
+  assert.equal(observedTargets.length, 1);
+  // 同一目标重复挂载保持幂等，不触发 disconnect 或重绑。
+  assert.equal(scoped.observe(targetA), true);
+  assert.equal(observedTargets.length, 1);
+  assert.equal(observedTargets[0].observer.disconnects, 0);
+
+  assert.equal(scoped.observe(targetB), true);
+  assert.equal(scoped.currentTarget(), targetB);
+  assert.equal(observedTargets.length, 2);
+  assert.equal(observedTargets[0].observer.disconnects, 1);
+
+  assert.equal(scoped.observe(null), false);
+  assert.equal(scoped.currentTarget(), null);
+  assert.equal(observedTargets[0].observer.disconnects, 2);
+});

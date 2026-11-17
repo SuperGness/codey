@@ -662,3 +662,103 @@ test("adjacent message rows are collected from live sibling collections", async 
     rows.slice(3, 22).map((row) => Number(row.dataset.row)),
   );
 });
+
+test("integrated scripts keep global mutation dispatcher free of class, style, attributeOldValue and characterData", async () => {
+  const { FakeElementCore } = await import("./helpers/fake-element.mjs");
+  const { loadInjectAppIconDataUrl } = await import("../scripts/build-output.mjs");
+  const [bridgeSource, rendererSource, sessionToolsSource, promptOptimizeSource] = await Promise.all([
+    readSource("public/codey-bridge.js"),
+    readSource("public/renderer-inject.js"),
+    readSource("public/codey-inject.js"),
+    readSource("public/prompt-optimize.js"),
+  ]);
+
+  const iconUrl = loadInjectAppIconDataUrl(process.cwd());
+  const pngBytes = Buffer.from(iconUrl.replace(/^data:image\/png;base64,/, ""), "base64");
+  assert.ok(iconUrl.startsWith("data:image/png;base64,"));
+  assert.ok(pngBytes.length > 0 && pngBytes.length < 8192);
+  assert.equal(pngBytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+
+  class FakeHTMLElement extends FakeElementCore {}
+  const documentElement = new FakeHTMLElement("html");
+  const rootObserveCalls = [];
+  class RecordingMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+    }
+
+    disconnect() {}
+
+    observe(target, options) {
+      if (target === documentElement) {
+        rootObserveCalls.push(options);
+      }
+    }
+  }
+  const document = {
+    body: new FakeHTMLElement("body"),
+    documentElement,
+    head: new FakeHTMLElement("head"),
+    visibilityState: "visible",
+    addEventListener() {},
+    createElement: (tag) => new FakeHTMLElement(tag),
+    getElementById: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    removeEventListener() {},
+  };
+  const window = {
+    addEventListener() {},
+    clearInterval() {},
+    clearTimeout() {},
+    dispatchEvent() {},
+    getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
+    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
+    removeEventListener() {},
+    setInterval: () => 1,
+    setTimeout: () => 1,
+  };
+  window.window = window;
+  const context = vm.createContext({
+    clearInterval() {},
+    clearTimeout() {},
+    console,
+    CustomEvent: class {},
+    document,
+    HTMLElement: FakeHTMLElement,
+    location: { pathname: "/", search: "" },
+    MutationObserver: RecordingMutationObserver,
+    Node: { ELEMENT_NODE: 1, TEXT_NODE: 3 },
+    setInterval: () => 1,
+    setTimeout: () => 1,
+    URLSearchParams,
+    window,
+  });
+  vm.runInContext(bridgeSource, context);
+  vm.runInContext(rendererSource, context);
+  vm.runInContext(sessionToolsSource, context);
+  vm.runInContext(
+    promptOptimizeSource.replace(
+      'const defaultEnabled = "__CODEY_PROMPT_OPTIMIZE_ENABLED__" === "true";',
+      "const defaultEnabled = true;",
+    ),
+    context,
+  );
+
+  const snapshot = window.__codeyMutationDispatcher.snapshot();
+  assert.equal(snapshot.observerInstalled, true);
+  assert.equal(snapshot.attributeOldValue, false);
+  assert.ok(Array.isArray(snapshot.attributeFilter));
+  assert.equal(snapshot.attributeFilter.includes("class"), false);
+  assert.equal(snapshot.attributeFilter.includes("style"), false);
+  assert.ok(rootObserveCalls.length > 0);
+  assert.equal(
+    rootObserveCalls.some((options) => options.characterData === true),
+    false,
+  );
+  assert.equal(
+    rootObserveCalls.some((options) => options.attributeOldValue === true),
+    false,
+  );
+  window.__codeySessionToolsInstall?.dispose?.();
+});

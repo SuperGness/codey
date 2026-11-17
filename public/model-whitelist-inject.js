@@ -1950,8 +1950,8 @@
     return { hasContext, menuContext, menus, nodes, visits };
   };
 
-  const probeAddedMutationNodes = (nodes, target) => {
-    if (!turnAncestor(target)) return null;
+  const probeAddedMutationNodes = (nodes, target, targetTurn = turnAncestor(target)) => {
+    if (!targetTurn) return null;
     const roots = Array.from(nodes || [])
       .filter((node) => node?.nodeType !== 3)
       .map(groupedMenuElement)
@@ -1972,9 +1972,9 @@
 
   const turnAncestor = (target) => target?.closest?.("[data-turn-key]") || null;
 
-  const isStreamingMutationInsideTurn = (mutation, target) => (
+  const isStreamingMutationInsideTurn = (mutation, target, targetTurn = turnAncestor(target)) => (
     mutation.type === "childList"
-    && Boolean(turnAncestor(target))
+    && Boolean(targetTurn)
   );
 
   const stopGroupedMenuTextObserver = (container) => {
@@ -2038,8 +2038,9 @@
     let relevant = false;
     for (const mutation of mutations) {
       const target = groupedMenuElement(mutation.target);
-      const turnProbe = probeAddedMutationNodes(mutation.addedNodes || [], mutation.target);
-      if (isStreamingMutationInsideTurn(mutation, target)) {
+      const targetTurn = turnAncestor(target);
+      const turnProbe = probeAddedMutationNodes(mutation.addedNodes || [], mutation.target, targetTurn);
+      if (isStreamingMutationInsideTurn(mutation, target, targetTurn)) {
         if (turnProbe?.hasContext) {
           relevant = true;
           if (!nativeSelectionOnly && turnProbe.menuContext) {

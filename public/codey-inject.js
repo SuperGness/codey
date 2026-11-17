@@ -4105,6 +4105,7 @@
     installThreadUpdatedTimes(root);
     recoverHiddenRunningThreads(root);
     installMessageSelection(root);
+    syncSidebarClassObserver(root);
     if (syncTitles) syncSidebarTitles(root);
   };
 
@@ -5129,6 +5130,50 @@
     subtree: true,
   };
   const mutationDispatcher = window.__codeyMutationDispatcher;
+  // 通过共享分发器接入时，将 class 与 oldValue 收敛到侧栏容器，避免流式输出全局唤醒。
+  const globalSessionToolMutationOptions = {
+    attributes: true,
+    attributeFilter: sessionToolMutationOptions.attributeFilter.filter((attribute) => attribute !== "class"),
+    childList: true,
+    subtree: true,
+  };
+  const sidebarClassMutationOptions = {
+    attributes: true,
+    attributeOldValue: true,
+    attributeFilter: ["class"],
+    subtree: true,
+  };
+  const sidebarClassContainerSelector = [
+    sidebarProjectListSelector,
+    "[data-app-action-sidebar-section]",
+    sidebarThreadRowSelector,
+  ].join(", ");
+  let usingMutationDispatcher = false;
+  let sidebarClassObserver = null;
+  let observedSidebarRoots = new WeakSet();
+  const resolveSidebarClassTarget = (node) => {
+    if (!(node instanceof HTMLElement)) return null;
+    const shell = node.closest?.("aside, nav");
+    if (shell && !shell.closest?.("[data-turn-key]") && !shell.querySelector?.("[data-turn-key]")) {
+      return shell;
+    }
+    return node.closest?.(`${sidebarProjectListSelector}, [data-app-action-sidebar-section]`) || node;
+  };
+  function syncSidebarClassObserver(root = document) {
+    if (!usingMutationDispatcher || disposed || typeof MutationObserver !== "function") return;
+    const matches = queryWithin(root, sidebarClassContainerSelector);
+    if (root instanceof HTMLElement && root.matches?.(sidebarClassContainerSelector)) {
+      matches.unshift(root);
+    }
+    if (!matches.length) return;
+    for (const node of matches) {
+      const target = resolveSidebarClassTarget(node);
+      if (!target || observedSidebarRoots.has(target)) continue;
+      observedSidebarRoots.add(target);
+      sidebarClassObserver ||= new MutationObserver(handleSessionToolMutations);
+      sidebarClassObserver.observe(target, sidebarClassMutationOptions);
+    }
+  }
   let sessionToolObserver = null;
   const installedIntervals = [];
   const installedListeners = [];
@@ -5136,6 +5181,10 @@
     if (disposed) return;
     disposed = true;
     try { sessionToolObserver?.disconnect?.(); } catch {}
+    try { sidebarClassObserver?.disconnect?.(); } catch {}
+    sidebarClassObserver = null;
+    observedSidebarRoots = new WeakSet();
+    usingMutationDispatcher = false;
     for (const [target, type, handler, options] of installedListeners) {
       try { target.removeEventListener?.(type, handler, options); } catch {}
     }
@@ -5196,10 +5245,13 @@
   if (typeof mutationDispatcher?.subscribe === "function") {
     const unsubscribe = mutationDispatcher.subscribe(
       handleSessionToolMutations,
-      sessionToolMutationOptions,
+      globalSessionToolMutationOptions,
     );
     sessionToolObserver = { disconnect: unsubscribe };
-    if (!mutationDispatcher.snapshot?.().observerInstalled) {
+    if (mutationDispatcher.snapshot?.().observerInstalled) {
+      usingMutationDispatcher = true;
+      syncSidebarClassObserver(document);
+    } else {
       unsubscribe?.();
       sessionToolObserver = null;
     }

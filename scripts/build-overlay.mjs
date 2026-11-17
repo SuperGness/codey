@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import { build, transformWithEsbuild } from "vite";
-import { writeBuildOutputs } from "./build-output.mjs";
+import { loadInjectAppIconDataUrl, writeBuildOutputs } from "./build-output.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const result = await build({
@@ -21,8 +21,8 @@ const outputs = new Map(
 // Codex 渲染进程内求值。这里统一压缩到 dist-overlay/inject/，cdp.rs 只嵌入
 // 压缩产物。
 const publicDir = join(root, "public");
-// 与控制台共用应用图标，内嵌后无需从宿主页面请求额外资源。
-const appIconDataUrl = `data:image/png;base64,${readFileSync(join(root, "backend/icons/favicon.png")).toString("base64")}`;
+// 与控制台共用应用图标的 32x32 帧，缩小内联注入脚本体积且无需从宿主页面请求额外资源。
+const appIconDataUrl = loadInjectAppIconDataUrl(root);
 let rawTotal = 0;
 let minifiedTotal = 0;
 for (const name of readdirSync(publicDir).filter((entry) => entry.endsWith(".js"))) {

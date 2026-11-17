@@ -194,6 +194,7 @@
 
   const mutationSubscribers = new Map();
   let mutationObserver = null;
+  let installedMutationOptions = null;
   let nextMutationSubscriberId = 1;
   const pendingMutationBatches = [];
   let mutationDispatchRunning = false;
@@ -378,6 +379,7 @@
     const stopObserving = () => {
       mutationObserver?.disconnect();
       mutationObserver = null;
+      installedMutationOptions = null;
     };
     if (
       !mutationSubscribers.size
@@ -417,6 +419,34 @@
     // 对同一节点重新 observe 只替换选项；disconnect 会丢掉尚未投递的记录。
     mutationObserver ||= new MutationObserver(dispatchMutations);
     mutationObserver.observe(document.documentElement, options);
+    installedMutationOptions = options;
+  };
+
+  const createScopedObserver = (callback, options = {}) => {
+    let scopedObserver = null;
+    let observedTarget = null;
+    const disconnect = () => {
+      scopedObserver?.disconnect();
+      observedTarget = null;
+    };
+    const observe = (target) => {
+      if (!target || typeof target !== "object") {
+        disconnect();
+        return false;
+      }
+      if (target === observedTarget && scopedObserver) return true;
+      if (typeof MutationObserver !== "function") return false;
+      scopedObserver?.disconnect();
+      scopedObserver ||= new MutationObserver(callback);
+      scopedObserver.observe(target, options);
+      observedTarget = target;
+      return true;
+    };
+    return Object.freeze({
+      currentTarget: () => observedTarget,
+      disconnect,
+      observe,
+    });
   };
 
   const subscribeMutations = (callback, options = {}) => {
@@ -750,8 +780,13 @@
   window.__codeyMutationDispatcher = Object.freeze({
     controlDescriptor,
     controlsWithin,
+    createScopedObserver,
     createShieldLifecycle,
     snapshot: () => Object.freeze({
+      attributeFilter: installedMutationOptions?.attributeFilter
+        ? [...installedMutationOptions.attributeFilter]
+        : null,
+      attributeOldValue: Boolean(installedMutationOptions?.attributeOldValue),
       observerInstalled: mutationObserver !== null,
       subscriberCount: mutationSubscribers.size,
     }),
