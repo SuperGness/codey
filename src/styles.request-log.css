@@ -138,6 +138,10 @@
 .request-log-rate.is-bad { color: var(--danger); }
 .request-log-rate { font-weight: 600; }
 
+/* 统计刷新中沿用上一次结果，调暗提示数据待更新。 */
+.request-log-summary.is-stale,
+.request-log-stale { opacity: .6; transition: opacity .15s ease; }
+
 /* 卡片头：标题说明在左，卡片级操作在右。 */
 .request-log-card-head {
   display: flex;
@@ -155,7 +159,8 @@
 .request-log-insight-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .request-log-insight-head h3 { margin: 0; font-size: 13px; font-weight: 700; color: var(--foreground); }
 .request-log-insight-head span { font-size: 11.5px; color: var(--muted); }
-.request-log-insight-scroll { max-height: 260px; overflow: auto; }
+/* 固定高度：筛选后分组行数变化不改变卡片高度，避免页面滚动位置跳动。 */
+.request-log-insight-scroll { height: 260px; overflow: auto; }
 .request-log-insight-label { display: block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-log-insight-empty { display: block; padding: 16px 0; text-align: center; font-size: 12px; color: var(--muted); }
 

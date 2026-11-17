@@ -1,6 +1,6 @@
 import type React from "react";
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, Card, Chip, CloseButton, Pagination, Spinner, Table, Tabs, Tag, TagGroup } from "@heroui/react";
+import { Alert, Card, Chip, CloseButton, Pagination, Spinner, Table, Tabs } from "@heroui/react";
 import {
   IconActivity,
   IconArchive,
@@ -1363,39 +1363,29 @@ export function RequestLogDialog({
   useEffect(() => {
     if (!opened) return;
     let active = true;
-    setStats(null);
+    // 刷新期间保留上一次统计：统计卡片若先卸载再出现，表格上方高度来回变化会让页面滚动位置跳动。
     setStatsError("");
     setStatsLoading(validRange);
-    if (!validRange) return;
+    if (!validRange) {
+      setStats(null);
+      return;
+    }
     statsTask.current = statsTask.current.then(async () => {
       if (!active) return;
       try {
         const nextStats = await invoke<LogAnalytics>("query_route_request_log_stats", { ...filters, groupBy });
         if (active) setStats(nextStats.queryable ? nextStats : null);
       } catch (nextError) {
-        if (active) setStatsError(errorText(nextError));
+        if (active) {
+          setStats(null);
+          setStatsError(errorText(nextError));
+        }
       } finally {
         if (active) setStatsLoading(false);
       }
     });
     return () => { active = false; };
   }, [opened, filters, groupBy, validRange, refreshRevision]);
-
-  const resetFilters = () => {
-    setSearchInput("");
-    setSearch("");
-    setProvider("all");
-    setOfficialAccount("all");
-    setModel("all");
-    setStatus("all");
-    setProtocol("all");
-    setRequestKind("all");
-    setSearchMode("contains");
-    setTimeRange("24h");
-    setCustomFrom("");
-    setCustomTo("");
-    resetPagination();
-  };
 
   const clearRequestLogs = async () => {
     if (clearInFlight.current) return;
@@ -1453,18 +1443,6 @@ export function RequestLogDialog({
       timeRange !== "24h",
   );
 
-  const activeFilterCount = useMemo(() => {
-    let count = 0;
-    if (search) count += 1;
-    if (provider !== "all") count += 1;
-    if (officialAccount !== "all") count += 1;
-    if (model !== "all") count += 1;
-    if (status !== "all") count += 1;
-    if (protocol !== "all") count += 1;
-    if (requestKind !== "all") count += 1;
-    if (timeRange !== "24h") count += 1;
-    return count;
-  }, [search, provider, officialAccount, model, status, protocol, requestKind, timeRange]);
   // React Aria 集合以 item.id 作为行 React key；RequestLogRow 是包装组件拿不到 id，
   // 这里显式包装一份带稳定 id 的 items，避免筛选/翻页时 index key 复用导致
   // "Cannot change the id of an item" 崩溃。
@@ -1484,93 +1462,6 @@ export function RequestLogDialog({
     setPageJumpInput(String(nextPage));
     setPage(nextPage);
   };
-
-  const searchModeLabel = searchMode === "requestId" ? "请求 ID" : searchMode === "sessionId" ? "会话 ID" : "关键词";
-  const filterChips: Array<{ key: string; label: string; onRemove: () => void }> = [];
-  if (search) {
-    filterChips.push({
-      key: "search",
-      label: `${searchModeLabel}：${search}`,
-      onRemove: () => {
-        setSearchInput("");
-        setSearch("");
-        resetPagination();
-      },
-    });
-  }
-  if (timeRange !== "24h") {
-    const timeLabel = timeRange === "custom"
-      ? "自定义"
-      : timeRange === "7d" ? "最近 7 天" : "最近 30 天";
-    filterChips.push({
-      key: "time",
-      label: `时间：${timeLabel}`,
-      onRemove: () => {
-        setTimeRange("24h");
-        resetPagination();
-      },
-    });
-  }
-  if (provider !== "all") {
-    filterChips.push({
-      key: "provider",
-      label: `供应商：${providerOptions.find((option) => option.value === provider)?.label ?? provider}`,
-      onRemove: () => {
-        setProvider("all");
-        resetPagination();
-      },
-    });
-  }
-  if (officialAccount !== "all") {
-    filterChips.push({
-      key: "officialAccount",
-      label: `官方账号：${officialAccountLabel(officialAccount)}`,
-      onRemove: () => {
-        setOfficialAccount("all");
-        resetPagination();
-      },
-    });
-  }
-  if (model !== "all") {
-    filterChips.push({
-      key: "model",
-      label: `模型：${displayRequestLogModelName(model, modelLabels)}`,
-      onRemove: () => {
-        setModel("all");
-        resetPagination();
-      },
-    });
-  }
-  if (status !== "all") {
-    filterChips.push({
-      key: "status",
-      label: `状态：${statusPresentation[status]?.label ?? status}`,
-      onRemove: () => {
-        setStatus("all");
-        resetPagination();
-      },
-    });
-  }
-  if (protocol !== "all") {
-    filterChips.push({
-      key: "protocol",
-      label: `协议：${protocolOptions.find((option) => option.value === protocol)?.label ?? protocol}`,
-      onRemove: () => {
-        setProtocol("all");
-        resetPagination();
-      },
-    });
-  }
-  if (requestKind !== "all") {
-    filterChips.push({
-      key: "requestKind",
-      label: `类型：${requestKindLabels[requestKind] ?? requestKind}`,
-      onRemove: () => {
-        setRequestKind("all");
-        resetPagination();
-      },
-    });
-  }
 
   if (!opened) return null;
 
@@ -1704,7 +1595,7 @@ export function RequestLogDialog({
           </Alert>
         ) : null}
 
-        <section className="request-log-summary" aria-label="范围概览" aria-busy={statsLoading}>
+        <section className={`request-log-summary${statsLoading && stats ? " is-stale" : ""}`} aria-label="范围概览" aria-busy={statsLoading}>
           <Card>
             <div className="request-log-stat">
               <span className="request-log-stat-icon is-blue"><IconActivity aria-hidden="true" /></span>
@@ -1794,7 +1685,7 @@ export function RequestLogDialog({
         </section>
 
         {stats ? (
-          <Card>
+          <Card className={statsLoading ? "request-log-stale" : undefined} aria-busy={statsLoading}>
             <div className="request-log-card-head">
               <Card.Header>
                 <Card.Title>趋势与分组统计</Card.Title>
@@ -2097,34 +1988,7 @@ export function RequestLogDialog({
                   }}
                 />
 
-                {hasFilters ? (
-                  <Button size="sm" variant="ghost" onClick={resetFilters}>
-                    <IconX aria-hidden="true" />
-                    清除筛选{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
-                  </Button>
-                ) : null}
               </div>
-
-              {filterChips.length > 0 ? (
-                <TagGroup
-                  aria-label="当前生效的筛选条件"
-                  size="sm"
-                  onRemove={(keys) => {
-                    for (const key of keys) {
-                      filterChips.find((chip) => chip.key === key)?.onRemove();
-                    }
-                  }}
-                >
-                  <TagGroup.List items={filterChips}>
-                    {(chip) => (
-                      <Tag id={chip.key} textValue={chip.label}>
-                        {chip.label}
-                        <Tag.RemoveButton aria-label={`移除筛选：${chip.label}`} />
-                      </Tag>
-                    )}
-                  </TagGroup.List>
-                </TagGroup>
-              ) : null}
 
               <div className="request-log-results">
                 {loading && result ? <div className="request-log-progress" role="progressbar" aria-label="正在刷新请求日志" /> : null}
