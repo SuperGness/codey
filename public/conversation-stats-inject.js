@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 18;
+  const VERSION = 19;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -43,10 +43,15 @@
   const SUBMIT_WATCH_MS = 15_000;
   const RESCAN_DEBOUNCE_MS = 120;
   const LOADING_CLEAR_DELAY_MS = 20;
+  const COMPACT_MAX_WIDTH = 459;
+  const MINIMAL_MAX_WIDTH = 309;
   const compositionKeys = ["cachedInputTokens", "uncachedInputTokens", "outputTokens"];
 
   let statsElement = null;
   let composerHost = null;
+  let observedHost = null;
+  let hostResizeObserver = null;
+  let currentDensity = "full";
   let dockedBottom = 10;
   let resizePending = false;
   let currentSessionId = "";
@@ -194,10 +199,10 @@
       #${barId} { position: fixed; left: 0; bottom: 10px; z-index: 20; pointer-events: none !important; }
       ${styleScope} *, ${styleScope} *::before, ${styleScope} *::after { box-sizing: border-box; }
       ${styleScope}[hidden], ${styleScope} [hidden] { display: none !important; }
-      ${styleScope} .codey-cs-groups { pointer-events: auto !important; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px; width: fit-content; max-width: 100%; margin: 0 auto; padding: 2px; border-radius: 999px; background: var(--cs-fill); box-shadow: inset 0 0 0 .5px var(--cs-line), inset 0 .5px 0 var(--cs-shine); }
-      ${styleScope} .codey-cs-divider { width: .5px; height: 11px; margin: 0 1px; background: var(--cs-line-strong); }
+      ${styleScope} .codey-cs-groups { pointer-events: auto !important; display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 2px; width: fit-content; max-width: 100%; overflow: hidden; margin: 0 auto; padding: 2px; border-radius: 999px; background: var(--cs-fill); box-shadow: inset 0 0 0 .5px var(--cs-line), inset 0 .5px 0 var(--cs-shine); }
+      ${styleScope} .codey-cs-divider { flex: none; width: .5px; height: 11px; margin: 0 1px; background: var(--cs-line-strong); }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
-      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 11px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; transition: background-color .18s cubic-bezier(.32, .72, 0, 1), color .18s cubic-bezier(.32, .72, 0, 1), box-shadow .18s cubic-bezier(.32, .72, 0, 1), opacity .2s ease; }
+      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: nowrap; flex: 0 1 auto; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 11px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; white-space: nowrap; overflow: hidden; transition: background-color .18s cubic-bezier(.32, .72, 0, 1), color .18s cubic-bezier(.32, .72, 0, 1), box-shadow .18s cubic-bezier(.32, .72, 0, 1), opacity .2s ease; }
       ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[data-codey-expanded="true"] { background: color-mix(in srgb, var(--bg-primary, Canvas) 88%, var(--cs-text) 6%); color: var(--cs-text); box-shadow: 0 1px 3px #0000001f, inset 0 .5px 0 var(--cs-shine); }
       #${barId}[data-running="true"] .codey-cs-activity-summary { background: color-mix(in srgb, var(--cs-live) 9%, transparent); color: var(--cs-soft); }
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-accent); outline-offset: 2px; }
@@ -205,15 +210,24 @@
       ${styleScope} .codey-cs-activity-summary:is(:hover, [data-codey-expanded="true"]) .codey-cs-icon { color: var(--cs-accent); }
       ${styleScope} .codey-cs-tokens-summary:is(:hover, [data-codey-expanded="true"]) .codey-cs-icon { color: var(--cs-violet); }
       #${barId}[data-running="true"] .codey-cs-activity-summary .codey-cs-icon { color: var(--cs-live); }
-      ${styleScope} .codey-cs-metric { display: inline-block; white-space: nowrap; text-align: center; }
-      ${styleScope} .codey-cs-activity { min-width: 4.8em; }
-      ${styleScope} .codey-cs-sep { opacity: .38; }
+      ${styleScope} .codey-cs-metric { display: inline-block; min-width: 0; white-space: nowrap; text-align: center; overflow: hidden; text-overflow: ellipsis; }
+      ${styleScope} .codey-cs-activity { min-width: 4.5em; }
+      ${styleScope} .codey-cs-sep { flex: none; opacity: .38; }
       ${styleScope} .codey-cs-speed, ${styleScope} .codey-cs-total { color: var(--cs-text); font-weight: 600; letter-spacing: -.01em; }
-      ${styleScope} .codey-cs-speed { min-width: 6.4em; }
-      ${styleScope} .codey-cs-total { min-width: 8.4em; }
-      ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4.5px; }
+      ${styleScope} .codey-cs-speed { min-width: 6em; }
+      ${styleScope} .codey-cs-total { min-width: 7.8em; }
+      ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4.5px; flex: none; overflow: visible; }
       ${styleScope} .codey-cs-cache-rate { display: inline-block; min-width: 2.4em; text-align: center; color: var(--cs-soft); font-weight: 560; }
       ${styleScope} .codey-cs-ring { --cs-rate: 0; width: 12px; height: 12px; flex: none; border-radius: 50%; background: conic-gradient(var(--cs-cyan) calc(var(--cs-rate) * 1%), var(--cs-line-strong) 0); mask: radial-gradient(circle, transparent 3.4px, #000 3.9px); }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-groups { gap: 1px; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-summary { gap: 4.5px; padding-inline: 8.5px; font-size: 11.5px; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-icon { width: 12.5px; height: 12.5px; flex-basis: 12.5px; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) :is(.codey-cs-activity, .codey-cs-speed, .codey-cs-total, .codey-cs-cache-rate) { min-width: 0; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-cache { gap: 3.5px; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-cache-label { display: none; }
+      #${barId}[data-density="minimal"] .codey-cs-summary { gap: 4px; padding-inline: 7.5px; font-size: 11px; }
+      #${barId}[data-density="minimal"] :is(.codey-cs-activity, .codey-cs-activity-summary .codey-cs-sep, .codey-cs-cache-rate) { display: none; }
+      #${barId}[data-density="minimal"] .codey-cs-ring { width: 11px; height: 11px; mask: radial-gradient(circle, transparent 3px, #000 3.5px); }
       ${styleScope} .codey-cs-live { position: relative; display: none; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--cs-live); }
       ${styleScope} .codey-cs-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; animation: codey-cs-pulse 1.8s cubic-bezier(.22, 1, .36, 1) infinite; }
       #${barId}[data-running="true"] .codey-cs-live { display: inline-block; }
@@ -263,21 +277,53 @@
       ${styleScope} .codey-cs-detail-row[data-key="cacheRate"] dd { color: var(--cs-cyan); font-weight: 650; }
       ${styleScope} .codey-cs-note { margin: 8px 3px 0; color: var(--cs-muted); font-size: 10.5px; line-height: 1.5; }
       ${styleScope} .codey-cs-note:empty { display: none; }
-      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-divider { display: none; } ${styleScope} .codey-cs-summary { padding-inline: 8px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 11px; } }
+      @media (max-width: 480px) { ${styleScope} .codey-cs-details { padding: 11px; } }
       @media (max-width: 360px) { ${styleScope} .codey-cs-kpis { grid-template-columns: 1fr; } ${styleScope} .codey-cs-detail-row[data-tier="primary"] + .codey-cs-detail-row[data-tier="primary"] { border-left: 0; border-top: .5px solid var(--cs-line); } }
     `;
     document.documentElement.appendChild(style);
   };
 
+  const resolveDensity = (width) => (
+    !(width > 0) ? "full"
+      : width <= MINIMAL_MAX_WIDTH ? "minimal"
+      : width <= COMPACT_MAX_WIDTH ? "compact"
+      : "full"
+  );
+
+  const syncHostObserver = (host) => {
+    const nextHost = host?.isConnected !== false ? host || null : null;
+    if (observedHost === nextHost) return;
+    if (observedHost && hostResizeObserver) hostResizeObserver.unobserve?.(observedHost);
+    observedHost = nextHost;
+    if (!observedHost) return;
+    const Observer = typeof ResizeObserver === "function" ? ResizeObserver : window.ResizeObserver;
+    if (typeof Observer !== "function") return;
+    hostResizeObserver ||= new Observer(() => {
+      if (disposed || !statsElement || statsElement.hidden) return;
+      resizePending = true;
+      schedulePanelPosition();
+    });
+    hostResizeObserver.observe(observedHost);
+  };
+
   // 状态条常驻挂载在根节点并固定在会话底部，避免随会话切换反复从旧
   // composer 容器卸载并重新插入新容器；水平范围跟随当前可见 composer。
   const positionBar = (host = composerHost?.isConnected ? composerHost : findVisibleComposerAnchor()?.parentElement, anchor = null) => {
-    if (!statsElement || !host) return;
+    if (!statsElement || !host) {
+      syncHostObserver(null);
+      return false;
+    }
     composerHost = host;
+    syncHostObserver(host);
     const rect = host.getBoundingClientRect?.();
-    if (!rect || rect.width <= 0) return;
+    if (!rect || rect.width <= 0) return false;
+    const width = Math.round(rect.width);
+    const nextDensity = resolveDensity(width);
+    const densityChanged = nextDensity !== currentDensity;
+    currentDensity = nextDensity;
+    setValue(statsElement.dataset, "density", nextDensity);
     setStyle(statsElement, "left", `${Math.round(rect.left)}px`);
-    setStyle(statsElement, "width", `${Math.round(rect.width)}px`);
+    setStyle(statsElement, "width", `${width}px`);
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
     const card = host.lastElementChild;
     const slotBottom = card && card !== anchor
@@ -288,6 +334,7 @@
       dockedBottom = Math.round(bottomGap);
     }
     setStyle(statsElement, "bottom", `${dockedBottom}px`);
+    return densityChanged;
   };
 
   const ensureBar = (anchor = findVisibleComposerAnchor()) => {
@@ -355,7 +402,7 @@
           const cache = make("span", "codey-cs-metric codey-cs-cache", "", button);
           cache.title = "缓存命中率：缓存读取占输入总量的比例";
           refs.ring = decorative("codey-cs-ring", cache);
-          make("span", "", "缓存", cache);
+          make("span", "codey-cs-cache-label", "缓存", cache);
           refs["cache-rate"] = make("span", "codey-cs-cache-rate", "—", cache);
         }
         const panel = make("section", `codey-cs-details codey-cs-${kind}-details`, "", overlay);
@@ -502,15 +549,17 @@
       const shouldPositionBar = resizePending;
       resizePending = false;
       if (disposed) return;
-      if (shouldPositionBar) positionBar();
+      const densityChanged = shouldPositionBar ? positionBar() : false;
+      if (densityChanged && statsElement && !clearTimer) syncSummaryText(statsElement);
       if (statsElement?.__codeyCs?.active) positionPanel();
     });
   };
 
   const setExpanded = (expanded, restoreFocus = false, kind = null) => {
-    if (positionFrame) window.cancelAnimationFrame(positionFrame);
-    positionFrame = 0;
-    resizePending = false;
+    if (positionFrame && !resizePending) {
+      window.cancelAnimationFrame(positionFrame);
+      positionFrame = 0;
+    }
     const refs = statsElement?.__codeyCs;
     if (!refs) return;
     const active = kind || refs.active || "activity";
@@ -566,11 +615,22 @@
     render(anchor);
   };
 
-  const formatSpeed = (value) => (
+  const formatSpeedNumber = (value) => (
     value == null || !Number.isFinite(value) || value < 0
       ? null
-      : `${value >= 100 ? Math.round(value) : value.toFixed(1)} Token/s`
+      : `${value >= 100 ? Math.round(value) : value.toFixed(1)}`
   );
+
+  const formatSummarySpeed = ({ speedNum, speedPrefix, running, stale, speedState }, density) => {
+    if (speedNum != null) {
+      const unit = density === "minimal" ? "/s" : density === "compact" ? " tok/s" : " Token/s";
+      return `${speedPrefix}${speedNum}${unit}`;
+    }
+    if (!running) return "—";
+    if (stale) return density === "full" ? "更新暂停" : "暂停";
+    if (speedState === "waiting") return density === "full" ? "等待输出" : "等待";
+    return density === "minimal" ? "生成" : "生成中";
+  };
 
   // 与请求日志同一口径：缓存读占输入总量的百分比；上游未回报缓存字段时
   // 返回 null，状态条显示未知值而不是显示 0%。
@@ -605,12 +665,33 @@
     element.style.setProperty?.(name, value);
   };
 
+  const syncSummaryText = (bar) => {
+    const refs = bar?.__codeyCs;
+    const summaryData = refs?.summaryData;
+    if (!summaryData) return false;
+    const speedChanged = setText(refs.speed, formatSummarySpeed(summaryData, currentDensity));
+    const activityChanged = setText(
+      refs.activity,
+      currentDensity === "full" ? `本轮 ${summaryData.stepText} 步` : `${summaryData.stepText} 步`,
+    );
+    const totalChanged = setText(
+      refs.total,
+      summaryData.totalFormatted == null
+        ? "—"
+        : currentDensity === "full"
+          ? `总计 ${summaryData.totalFormatted} Tokens`
+          : summaryData.totalFormatted,
+    );
+    return speedChanged || activityChanged || totalChanged;
+  };
+
   const render = (anchor) => {
     if (disposed) return;
     clearTimeout(clearTimer);
     clearTimer = 0;
     const bar = ensureBar(anchor);
     if (!bar) {
+      syncHostObserver(null);
       // 输入框不可见（例如离开会话页）时，若旧宿主仍在隐藏会话里，显式
       // 隐藏状态条，避免恢复可见时短暂展示过期数据。
       if (statsElement) { setValue(statsElement, "hidden", true); setExpanded(false); }
@@ -634,10 +715,14 @@
       if (!Number.isSafeInteger(data[key]) || data[key] < 0) data[key] = null;
     }
     if (!Number.isSafeInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
-    const formattedSpeed = formatSpeed(running && stale ? null : turn?.averageOutputTokensPerSecond);
-    const speedKnown = formattedSpeed != null;
+    const speedNum = formatSpeedNumber(running && stale ? null : turn?.averageOutputTokensPerSecond);
+    const speedKnown = speedNum != null;
     const estimatedSpeed = turn?.speedIsEstimate === true;
-    const speedText = speedKnown ? `${estimatedSpeed ? "≈" : ""}${formattedSpeed}` : running ? stale ? "更新暂停" : turn.speedState === "waiting" ? "等待输出" : "生成中" : "—";
+    const speedPrefix = estimatedSpeed && speedKnown ? "≈" : "";
+    const speedText = formatSummarySpeed(
+      { speedNum, speedPrefix, running, stale, speedState: turn?.speedState },
+      "full",
+    );
     const coverageLabel = ({
       runtime: "本次运行",
       recorded: "会话记录",
@@ -655,9 +740,6 @@
     const rateValue = cacheRatePercent(data.inputTokens, data.cachedInputTokens);
     const rate = rateValue == null ? "—" : `${rateValue}%`;
     const refs = bar.__codeyCs;
-    let panelContentChanged = setText(refs.speed, speedText);
-    setValue(refs.speed, "title", speedNote);
-    panelContentChanged = setText(refs["cache-rate"], rate) || panelContentChanged;
     const finite = value => Number.isFinite(value) && value >= 0;
     const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("zh-CN") : "—";
     const duration = (value, state = "") => {
@@ -669,7 +751,20 @@
       const remainder = Math.floor(seconds % 60);
       return [hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", remainder ? `${remainder}秒` : ""].filter(Boolean).join(" ");
     };
-    panelContentChanged = setText(refs.activity, `本轮 ${count(turn?.stepCount)} 步`) || panelContentChanged;
+    const stepText = count(turn?.stepCount);
+    const totalFormatted = data.totalTokens != null ? formatTokenCount(data.totalTokens) : null;
+    refs.summaryData = {
+      stepText,
+      speedNum,
+      speedPrefix,
+      running,
+      stale,
+      speedState: turn?.speedState,
+      totalFormatted,
+    };
+    let panelContentChanged = syncSummaryText(bar);
+    setValue(refs.speed, "title", speedNote);
+    panelContentChanged = setText(refs["cache-rate"], rate) || panelContentChanged;
     const hasData = stats && (turn || hasRuntimeRequest || [data.turnCount, data.totalTokens, data.inputTokens, data.outputTokens].some(finite));
     const unknownUsage = data.usageSource === "unknown" || data.usageScope === "unknown";
     const scopeLabel = !stats || unknownUsage ? "统计范围未知" : sessionUsage ? "会话累计" : "本次运行";
@@ -681,8 +776,6 @@
     setValue(bar.dataset, "status", status);
     const tokenValue = value => finite(value) ? `${count(value)} Tokens` : "—";
     data.uncachedInputTokens = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
-    const headline = data.totalTokens != null ? `总计 ${formatTokenCount(data.totalTokens)} Tokens` : "—";
-    panelContentChanged = setText(refs.total, headline) || panelContentChanged;
     setValue(refs.total, "title", data.totalTokens == null ? `${scopeLabel} Token 用量未知。`
       : `${scopeLabel} Token 总量 ${tokenValue(data.totalTokens)}，包含缓存读取。`);
     for (const [key, element] of Object.entries(refs.fields)) {
@@ -935,6 +1028,7 @@
         anchorFound: Boolean(findVisibleComposerAnchor()),
         mounted: statsElement?.isConnected === true,
         hidden: statsElement?.hidden !== false,
+        density: currentDensity,
         stats,
         lastFetchOk,
         lastResult,
@@ -947,7 +1041,15 @@
         clearTimeout(pollTimer);
         clearTimeout(rescanTimer);
         clearTimeout(clearTimer);
+        if (positionFrame) {
+          window.cancelAnimationFrame?.(positionFrame);
+          positionFrame = 0;
+        }
+        resizePending = false;
         setExpanded(false);
+        hostResizeObserver?.disconnect?.();
+        hostResizeObserver = null;
+        observedHost = null;
         window.__codeyConversationStatsObserver?.disconnect?.();
         delete window.__codeyConversationStatsObserver;
         listeners.splice(0).forEach(remove => remove());

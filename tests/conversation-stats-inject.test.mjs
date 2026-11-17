@@ -158,12 +158,14 @@ const createEnvironment = (options = {}) => {
     timer.unref?.();
     return timer;
   };
+  if (options.ResizeObserver) window.ResizeObserver = options.ResizeObserver;
   const sandbox = {
     document,
     window,
     location,
     URLSearchParams,
     MutationObserver: FakeMutationObserver,
+    ResizeObserver: options.ResizeObserver,
     HTMLElement: FakeElement,
     setTimeout: testSetTimeout,
     clearTimeout,
@@ -1614,5 +1616,106 @@ test("polls soon after the composer submits and keeps fast polling while the tur
     assert.equal(delays.includes(300), false, "the stats buttons themselves do not count as a submit");
   } finally {
     env.dispose();
+  }
+});
+
+test("keeps a single-row pill and adapts summary density as the composer host narrows", async () => {
+  const observers = [];
+  class FakeResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = new Set();
+      this.disconnected = false;
+      observers.push(this);
+    }
+    observe(target) { this.targets.add(target); }
+    unobserve(target) { this.targets.delete(target); }
+    disconnect() {
+      this.disconnected = true;
+      this.targets.clear();
+    }
+  }
+
+  const env = createEnvironment({
+    ResizeObserver: FakeResizeObserver,
+    statsBySession: { "conversation-1": STATS },
+  });
+  try {
+    await flushTimers(30);
+    const styles = env.document.getElementById("codey-conversation-stats-styles").textContent;
+    assert.match(styles, /\.codey-cs-groups\s*\{[^}]*flex-wrap:\s*nowrap/);
+    assert.match(styles, /\.codey-cs-summary\s*\{[^}]*flex-wrap:\s*nowrap/);
+    assert.match(styles, /\.codey-cs-cache-label\s*\{\s*display:\s*none;\s*\}/);
+    assert.equal(observers.length, 1);
+    assert.equal(observers[0].targets.has(env.scope), true);
+    assert.equal(env.bar().dataset.density, "full");
+    assert.equal(env.snapshot().density, "full");
+    assert.equal(env.bar().querySelector(".codey-cs-cache-label").textContent, "缓存");
+
+    let hostRect = { bottom: 780, height: 80, left: 0, right: 380, top: 700, width: 380 };
+    env.scope.getBoundingClientRect = () => hostRect;
+    panel(env).getBoundingClientRect = () => ({ width: 320, height: 200 });
+    summary(env).getBoundingClientRect = () => ({ left: 40, top: 700, width: 140, height: 28 });
+    click(summary(env));
+
+    // 打开右侧栏仅缩小 composer 容器，不触发 window.resize：由 ResizeObserver 合并到下一帧更新。
+    observers[0].callback([{ target: env.scope }]);
+    assert.equal(env.bar().dataset.density, "full", "ResizeObserver 回调内不同步测量布局");
+    assert.equal(env.animationFrames.size, 1);
+    env.runAnimationFrames();
+    assert.equal(env.bar().dataset.density, "compact");
+    assert.equal(env.snapshot().density, "compact");
+    assert.equal(env.bar().style.getPropertyValue("width"), "380px");
+    assert.equal(metric(env.bar(), "activity"), "2 步");
+    assert.equal(metric(env.bar(), "speed"), "188 tok/s");
+    assert.equal(metric(env.bar(), "total"), "132k");
+    assert.equal(metric(env.bar(), "cache-rate"), "93%");
+    assert.equal(field(env.bar(), "speed"), "188 Token/s", "详情浮层保持完整文案");
+    assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
+    assert.match(summary(env).getAttribute("aria-label"), /本轮 2 步，平均生成速度 188 Token\/s/);
+
+    // 收起浮层时若存在待处理的容器尺寸更新，不得丢弃状态条重排帧。
+    hostRect = { ...hostRect, right: 280, width: 280 };
+    observers[0].callback([{ target: env.scope }]);
+    env.document.dispatchEvent({ type: "pointerdown", target: env.textarea });
+    assertExpanded(env, false);
+    assert.equal(env.animationFrames.size, 1, "收起浮层不能取消待执行的容器缩放测量");
+    env.runAnimationFrames();
+    assert.equal(env.bar().dataset.density, "minimal");
+    assert.equal(env.bar().style.getPropertyValue("width"), "280px");
+    assert.equal(metric(env.bar(), "speed"), "188/s");
+    assert.equal(metric(env.bar(), "total"), "132k");
+
+    // 运行期等待、流式生成和失败暂停在窄栏下同步使用精简状态词，详情仍保留完整状态词。
+    for (const [turnPatch, compactSpeed, minimalSpeed, fullSpeed] of [
+      [{ status: "running", speedState: "waiting", averageOutputTokensPerSecond: null }, "等待", "等待", "等待输出"],
+      [{ status: "running", speedState: "streaming", averageOutputTokensPerSecond: null }, "生成中", "生成", "生成中"],
+      [{ status: "running", speedIsEstimate: true, averageOutputTokensPerSecond: 2.94 }, "≈2.9 tok/s", "≈2.9/s", "≈2.9 Token/s"],
+    ]) {
+      env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, ...turnPatch } });
+      hostRect = { ...hostRect, right: 280, width: 280 };
+      env.refresh();
+      await flushTimers(30);
+      assert.equal(metric(env.bar(), "speed"), minimalSpeed);
+      assert.equal(field(env.bar(), "speed"), fullSpeed);
+
+      hostRect = { ...hostRect, right: 380, width: 380 };
+      observers[0].callback([{ target: env.scope }]);
+      env.runAnimationFrames();
+      assert.equal(metric(env.bar(), "speed"), compactSpeed);
+      assert.equal(field(env.bar(), "speed"), fullSpeed);
+    }
+
+    // 关闭右侧栏恢复宽屏时自动回到完整态。
+    hostRect = { ...hostRect, right: 640, width: 640 };
+    observers[0].callback([{ target: env.scope }]);
+    env.runAnimationFrames();
+    assert.equal(env.bar().dataset.density, "full");
+    assert.equal(metric(env.bar(), "activity"), "本轮 2 步");
+    assert.equal(metric(env.bar(), "speed"), "≈2.9 Token/s");
+    assert.equal(metric(env.bar(), "total"), "总计 132k Tokens");
+  } finally {
+    env.dispose();
+    assert.equal(observers[0].disconnected, true);
   }
 });
