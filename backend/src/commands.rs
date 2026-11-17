@@ -3197,13 +3197,19 @@ fn runtime_requires_restart(
     pending_subagent: Option<&RuntimeSubagentConfig>,
     current: &CodeyConfig,
 ) -> bool {
-    config_requires_restart_with_route_status(
-        provider_route_restart_required_for_runtime(&runtime.applied_config, current)
-            || runtime.subagent_routes_require_restart(current),
-        &runtime.applied_config,
-        current,
-    ) || (current.subagent_optimization
-        && pending_subagent.is_some_and(|pending| pending.matches(current)))
+    let proxy_websocket_drift = current.local_router_enabled
+        && runtime
+            .router_endpoint()
+            .is_some_and(|endpoint| endpoint.supports_websockets != current.runtime_supports_websockets());
+    proxy_websocket_drift
+        || config_requires_restart_with_route_status(
+            provider_route_restart_required_for_runtime(&runtime.applied_config, current)
+                || runtime.subagent_routes_require_restart(current),
+            &runtime.applied_config,
+            current,
+        )
+        || (current.subagent_optimization
+            && pending_subagent.is_some_and(|pending| pending.matches(current)))
 }
 
 async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyConfig) -> bool {

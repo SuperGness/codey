@@ -1979,12 +1979,18 @@ fn pending_websocket_switch_still_delivers_added_model_membership() {
     let delivered = config_with_launch_pinned_transport(&applied, &current);
     assert!(!delivered.profiles[0].supports_websockets);
 
-    // 协议切换同样只随重启生效，否则本地路由会和已启动的 app-server 能力不一致。
+    // 协议切换改变启动期能力时，必须连同 base_url / api_key / 请求头一起固定，避免旧协议请求新端点。
     let mut websocket_applied = applied.clone();
     websocket_applied.profiles[0].supports_websockets = true;
+    websocket_applied.profiles[0]
+        .model_request_headers
+        .insert("x-old".into(), "1".into());
     let mut switched_protocol = websocket_applied.clone();
     switched_protocol.profiles[0].upstream_protocol =
         crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    switched_protocol.profiles[0].base_url = "https://chat-new.example/v1".into();
+    switched_protocol.profiles[0].api_key = "chat-new-key".into();
+    switched_protocol.profiles[0].model_request_headers.clear();
     assert!(!runtime_supports_current_routes_for_hot_reload(
         &websocket_applied,
         &switched_protocol
@@ -1995,7 +2001,43 @@ fn pending_websocket_switch_still_delivers_added_model_membership() {
         pinned_protocol.profiles[0].upstream_protocol,
         crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES
     );
+    assert_eq!(
+        pinned_protocol.profiles[0].base_url,
+        websocket_applied.profiles[0].base_url
+    );
+    assert_eq!(
+        pinned_protocol.profiles[0].api_key,
+        websocket_applied.profiles[0].api_key
+    );
+    assert_eq!(
+        pinned_protocol.profiles[0].model_request_headers,
+        websocket_applied.profiles[0].model_request_headers
+    );
     assert!(pinned_protocol.profiles[0].supports_websockets);
+
+    // 不影响启动期能力（WebSocket / 原生搜索均关闭）的协议切换随新凭据一起热更新生效。
+    let mut http_applied = applied.clone();
+    http_applied.profiles[0].upstream_protocol =
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    let mut http_switched = http_applied.clone();
+    http_switched.profiles[0].upstream_protocol =
+        crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES.into();
+    http_switched.profiles[0].base_url = "https://anthropic.example/v1".into();
+    http_switched.profiles[0].api_key = "anthropic-key".into();
+    assert!(runtime_supports_current_routes_for_hot_reload(
+        &http_applied,
+        &http_switched
+    ));
+    let hot_reloaded = config_with_launch_pinned_transport(&http_applied, &http_switched);
+    assert_eq!(
+        hot_reloaded.profiles[0].upstream_protocol,
+        crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES
+    );
+    assert_eq!(
+        hot_reloaded.profiles[0].base_url,
+        "https://anthropic.example/v1"
+    );
+    assert_eq!(hot_reloaded.profiles[0].api_key, "anthropic-key");
     let model_state = model_catalog::ModelSelectionState {
         third_party_models: vec!["gpt-5.6-luna".into(), "gpt-6-astra".into()],
         default_model: "gpt-5.6-luna".into(),

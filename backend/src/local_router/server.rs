@@ -370,37 +370,51 @@ pub(super) async fn verify_router_endpoint(
     wait: Duration,
 ) -> Result<()> {
     tokio::time::timeout(wait, async {
-        // 本地探测不使用系统代理，不跟随重定向，也不访问任何上游线路。
-        let client = tokio::task::spawn_blocking(|| {
-            reqwest::Client::builder()
-                .no_proxy()
-                // 仅访问回环 HTTP，无需读取系统 TLS 证书。
-                .tls_built_in_root_certs(false)
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-        })
-        .await
-        .context("创建本地路由就绪检查任务失败")?
-        .context("创建本地路由就绪检查客户端失败")?;
-        let response = client
-            .get(format!(
-                "{}/codey/concurrency",
-                endpoint.base_url.trim_end_matches("/v1"),
-            ))
-            .header(ROUTER_AUTH_HEADER, &endpoint.token)
-            .send()
+        let host_port = endpoint
+            .base_url
+            .trim_end_matches("/v1")
+            .strip_prefix("http://")
+            .context("本地路由监听地址格式无效")?;
+        let mut stream = TcpStream::connect(host_port)
             .await
             .context("本地路由尚未响应就绪检查")?;
-        anyhow::ensure!(
-            response.status() == reqwest::StatusCode::OK,
-            "本地路由就绪检查返回状态 {}",
-            response.status(),
+        let _ = stream.set_nodelay(true);
+        let request = format!(
+            "GET /codey/concurrency HTTP/1.1\r\nHost: {host_port}\r\n{ROUTER_AUTH_HEADER}: {}\r\nConnection: close\r\n\r\n",
+            endpoint.token
         );
-        let body = response
-            .json::<Value>()
+        stream
+            .write_all(request.as_bytes())
             .await
+            .context("发送本地路由就绪检查请求失败")?;
+        let mut response = Vec::with_capacity(1024);
+        let mut buf = [0_u8; 4096];
+        loop {
+            let read = stream
+                .read(&mut buf)
+                .await
+                .context("读取本地路由就绪检查响应失败")?;
+            if read == 0 {
+                break;
+            }
+            anyhow::ensure!(
+                response.len().saturating_add(read) <= 64 * 1024,
+                "本地路由就绪检查响应超出预期"
+            );
+            response.extend_from_slice(&buf[..read]);
+        }
+        let header_end =
+            find_header_end(&response).context("本地路由就绪检查响应头无效")?;
+        let status_line = std::str::from_utf8(&response[..header_end])
+            .context("本地路由就绪检查响应头不是 UTF-8")?
+            .lines()
+            .next()
+            .unwrap_or_default();
+        let status = status_line.split_whitespace().nth(1).unwrap_or_default();
+        anyhow::ensure!(status == "200", "本地路由就绪检查返回状态 {status_line}");
+        let body: Value = serde_json::from_slice(&response[header_end + 4..])
             .context("本地路由就绪检查响应无效")?;
-        anyhow::ensure!(body.is_array(), "本地路由就绪检查未返回并发状态",);
+        anyhow::ensure!(body.is_array(), "本地路由就绪检查未返回并发状态");
         Ok(())
     })
     .await
@@ -872,7 +886,7 @@ pub(crate) fn accept_retry_delay(consecutive_failures: u32) -> Duration {
         .min(ACCEPT_RETRY_MAX_DELAY)
 }
 
-fn enable_downstream_keepalive(stream: &TcpStream) {
+pub(crate) fn enable_downstream_keepalive(stream: &TcpStream) {
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(UPSTREAM_TCP_KEEPALIVE_IDLE)
         .with_interval(UPSTREAM_TCP_KEEPALIVE_INTERVAL)

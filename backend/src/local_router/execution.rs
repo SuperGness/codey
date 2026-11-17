@@ -268,6 +268,8 @@ impl HttpExecution<'_> {
             };
             let head = HttpResponseHead::capture(&response, downstream.request_log_probe());
             if response.status().is_success() {
+                retryable_encoded.take();
+                admission.take();
                 head.record(downstream.request_log_probe());
                 return Ok(Some(ReceivedHttpResponse::Success(response)));
             }

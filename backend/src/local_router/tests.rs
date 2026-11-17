@@ -1046,8 +1046,8 @@ async fn upstream_websocket_idle_read_is_reported_as_an_upstream_timeout() {
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         socket.next().await.unwrap().unwrap();
         received_sender.send(()).unwrap();
-        // 连接保持打开，但不再发送任何事件。
-        let _ = socket.next().await;
+        // 持有连接但不读取也不回复 Pong，模拟静默断链或无响应对端。
+        std::future::pending::<()>().await;
     });
 
     let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
@@ -1065,11 +1065,102 @@ async fn upstream_websocket_idle_read_is_reported_as_an_upstream_timeout() {
         _ = received => {}
     }
     tokio::time::pause();
+    let start = tokio::time::Instant::now();
     let error = proxy.await.unwrap_err();
 
     assert!(error.is::<UpstreamReadIdleTimeout>(), "{error:#}");
     assert!(is_upstream_timeout_error(&error));
+    assert!(
+        start.elapsed()
+            <= UPSTREAM_WEBSOCKET_HEARTBEAT_INTERVAL
+                + UPSTREAM_WEBSOCKET_PONG_TIMEOUT
+                + Duration::from_secs(1)
+    );
     upstream_task.abort();
+}
+
+#[tokio::test]
+async fn upstream_websocket_in_turn_heartbeat_sends_ping_accepts_pong_and_completes() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+        let first = socket.next().await.unwrap().unwrap();
+        assert!(matches!(first, WebSocketMessage::Text(_)));
+        socket
+            .send(WebSocketMessage::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": { "id": "resp_1", "status": "completed", "output": [] }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let second = socket.next().await.unwrap().unwrap();
+        assert!(matches!(second, WebSocketMessage::Text(_)));
+        let heartbeat = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("client should send in-turn Ping when heartbeat interval is due")
+            .unwrap()
+            .unwrap();
+        let WebSocketMessage::Ping(payload) = heartbeat else {
+            panic!("expected in-turn WebSocket Ping, got {heartbeat:?}");
+        };
+        socket.send(WebSocketMessage::Pong(payload)).await.unwrap();
+        socket
+            .send(WebSocketMessage::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": { "id": "resp_2", "status": "completed", "output": [] }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+
+    let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    config.profiles[0].supports_websockets = true;
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = Arc::clone(&snapshot.routes[&provider_id]);
+    let (downstream_socket, _downstream_peer) = local_websocket_pair().await;
+    let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
+    let headers = HeaderMap::new();
+
+    let mut body1 = json!({"model":model,"input":"turn 1"});
+    let first_attempt = downstream
+        .proxy_upstream_websocket(&route, &headers, &mut body1, false, None)
+        .await
+        .unwrap();
+    assert!(matches!(first_attempt, UpstreamWebSocketAttempt::Completed));
+    assert!(downstream.upstream.is_some());
+
+    downstream.upstream.as_mut().unwrap().liveness = UpstreamWebSocketLiveness::new(
+        tokio::time::Instant::now().into_std() - UPSTREAM_WEBSOCKET_HEARTBEAT_INTERVAL,
+    );
+
+    let mut body2 = json!({"model":model,"input":"turn 2"});
+    let second_attempt = downstream
+        .proxy_upstream_websocket(&route, &headers, &mut body2, false, None)
+        .await
+        .unwrap();
+    assert!(matches!(second_attempt, UpstreamWebSocketAttempt::Completed));
+    assert!(
+        downstream
+            .upstream
+            .as_ref()
+            .unwrap()
+            .liveness
+            .heartbeat_sent_at
+            .is_none()
+    );
+    upstream_task.await.unwrap();
 }
 
 #[test]

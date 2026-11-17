@@ -10,14 +10,15 @@ fn client_config(roots: RootCertStore) -> ClientConfig {
 }
 
 pub(crate) fn shared_client_config() -> Arc<ClientConfig> {
-    // Keep the same Mozilla roots and TLS defaults as tungstenite. Sharing the
-    // config retains rustls's bounded, server-name-scoped session ticket cache.
+    // 加载 Mozilla 内置根证书并合并系统根证书，以兼容企业代理/自定义 CA，同时
+    // 复用 rustls 有界、按服务端主机隔离的会话票据缓存。
     // Early data remains disabled: Responses requests must never use TLS 0-RTT.
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     Arc::clone(CONFIG.get_or_init(|| {
-        Arc::new(client_config(RootCertStore::from_iter(
-            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-        )))
+        let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let native = rustls_native_certs::load_native_certs();
+        let _ = roots.add_parsable_certificates(native.certs);
+        Arc::new(client_config(roots))
     }))
 }
 

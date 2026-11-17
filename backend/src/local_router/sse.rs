@@ -204,6 +204,28 @@ pub(crate) struct ResponsesSseRewriter<'a> {
     budget: RetainedMemoryBudget,
 }
 
+fn is_passthrough_responses_sse_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "response.output_text.delta"
+            | "response.output_text.done"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_text.done"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.content_part.added"
+            | "response.content_part.done"
+            | "response.refusal.delta"
+            | "response.refusal.done"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+            | "response.rate_limits.updated"
+            | "keepalive"
+    )
+}
+
 impl<'a> ResponsesSseRewriter<'a> {
     pub(crate) fn new(
         response_fix: Option<&'a NativeResponseFix>,
@@ -262,16 +284,18 @@ impl<'a> ResponsesSseRewriter<'a> {
         if data.trim() == "[DONE]" {
             return passthrough();
         }
+        if !self.normalize_failures && self.response_fix.is_none() {
+            return passthrough();
+        }
+        let Ok(event_kind) = serde_json::from_str::<ResponsesEventKind<'_>>(&data) else {
+            return passthrough();
+        };
         if self.response_fix.is_none() {
-            if !self.normalize_failures {
+            if !matches!(event_kind.kind.as_ref(), "error" | "response.failed") {
                 return passthrough();
             }
-            let Ok(event) = serde_json::from_str::<ResponsesEventKind<'_>>(&data) else {
-                return passthrough();
-            };
-            if !matches!(event.kind.as_ref(), "error" | "response.failed") {
-                return passthrough();
-            }
+        } else if is_passthrough_responses_sse_event(event_kind.kind.as_ref()) {
+            return passthrough();
         }
         let Ok(mut event) = serde_json::from_str::<Value>(&data) else {
             return passthrough();
@@ -392,6 +416,9 @@ pub(crate) fn compact_sse_buffer(buffer: &mut Vec<u8>, cursor: &mut SseCursor) {
     }
     if cursor.consumed == buffer.len() {
         buffer.clear();
+        if buffer.capacity() > 64 * 1024 {
+            buffer.shrink_to(64 * 1024);
+        }
         cursor.consumed = 0;
         cursor.scanned = 0;
         return;
@@ -649,5 +676,19 @@ mod tests {
         let second = take_next_sse_frame(input, &mut cursor).unwrap();
         assert_eq!(sse_frame_data(second).unwrap().as_deref(), Some("two"));
         assert!(take_next_sse_frame(input, &mut cursor).is_none());
+    }
+
+    #[test]
+    fn responses_rewriter_skips_delta_frames_while_applying_response_fix_to_function_calls() {
+        let fix = NativeResponseFix::from(XaiResponseFix::default());
+        let mut rewriter = ResponsesSseRewriter::new(Some(&fix), true, None);
+        let delta = b": keep\ndata: { \"type\" : \"response.output_text.delta\" , \"delta\" : \"hi\" }\n\n";
+        assert_eq!(rewriter.push(delta).unwrap(), delta);
+
+        let fn_done = b"data: {\"type\":\"response.function_call_arguments.done\",\"name\":\"tool\",\"arguments\":\"{\\\"n\\\":1.0}\"}\n\n";
+        let rewritten = rewriter.push(fn_done).unwrap();
+        let event = rewritten_event(&rewritten);
+        assert_eq!(event["type"], "response.function_call_arguments.done");
+        assert_eq!(event["arguments"], "{\"n\":1}");
     }
 }

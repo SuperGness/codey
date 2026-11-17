@@ -193,9 +193,9 @@ pub(crate) fn config_with_launch_pinned_transport(
         };
         profile.supports_websockets = previous.supports_websockets;
         profile.supports_native_web_search = previous.supports_native_web_search;
-        // 协议影响 WebSocket 和网页搜索能力，保持启动时的状态。
-        profile.upstream_protocol = previous.upstream_protocol.clone();
         if profile.official_account && previous.official_account {
+            // 官方线路始终维持 Responses 协议；认证等启动期字段改变时一并固定地址。
+            profile.upstream_protocol = previous.upstream_protocol.clone();
             let launch_scoped_official_change = profile.api_key != previous.api_key
                 || profile.auth_mode != previous.auth_mode
                 || profile.model_request_headers != previous.model_request_headers
@@ -208,6 +208,22 @@ pub(crate) fn config_with_launch_pinned_transport(
             profile.api_key = previous.api_key.clone();
             profile.auth_mode = previous.auth_mode.clone();
             profile.model_request_headers = previous.model_request_headers.clone();
+        } else if profile.upstream_protocol != previous.upstream_protocol {
+            // 协议切换只有改变启动期 WebSocket / 原生搜索能力时才固定回旧协议，
+            // 并连带固定地址、密钥与请求头，避免旧协议请求新凭据造成脑裂。
+            let mut candidate = previous.clone();
+            candidate.upstream_protocol = profile.upstream_protocol.clone();
+            let protocol_changes_launch_capabilities = applied
+                .route_supports_websockets_this_launch(previous)
+                != applied.route_supports_websockets_this_launch(&candidate)
+                || applied.route_supports_native_web_search_this_launch(previous)
+                    != applied.route_supports_native_web_search_this_launch(&candidate);
+            if protocol_changes_launch_capabilities {
+                profile.upstream_protocol = previous.upstream_protocol.clone();
+                profile.base_url = previous.base_url.clone();
+                profile.api_key = previous.api_key.clone();
+                profile.model_request_headers = previous.model_request_headers.clone();
+            }
         }
     }
     pinned

@@ -2196,6 +2196,10 @@ fn spawn_runtime_watchers(inputs: RuntimeWatcherInputs) -> RuntimeWatchers {
 }
 
 impl CodeyRuntime {
+    pub(crate) fn router_endpoint(&self) -> Option<crate::local_router::RuntimeRouterEndpoint> {
+        self.local_router.as_ref().map(LocalRouter::endpoint)
+    }
+
     pub async fn renderer_websocket_url(&self) -> Arc<str> {
         self.injection_websocket_url.read().await.clone()
     }

@@ -383,7 +383,8 @@ impl WebSocketResponsesDownstream {
             if !self.pending_messages.is_empty()
                 && self.upstream.as_ref().is_none_or(|upstream| {
                     upstream.liveness.heartbeat_sent_at.is_none()
-                        && upstream.liveness.maintenance_deadline() > Instant::now()
+                        && upstream.liveness.maintenance_deadline()
+                            > tokio::time::Instant::now().into_std()
                 })
             {
                 return Ok(self.pending_messages.pop_front());
@@ -403,6 +404,8 @@ impl WebSocketResponsesDownstream {
                 continue;
             };
             let maintenance_deadline = upstream.liveness.maintenance_deadline();
+            let entered_monotonic = std::time::Instant::now();
+            let entered_wall = std::time::SystemTime::now();
             let event = {
                 let downstream_socket = &mut self.socket;
                 let upstream_socket = &mut self
@@ -425,6 +428,21 @@ impl WebSocketResponsesDownstream {
                     message = downstream_socket.next(), if self.pending_messages.is_empty() => IdleWebSocketEvent::Downstream(message),
                 }
             };
+            let wake_clock_jumped = entered_wall
+                .elapsed()
+                .unwrap_or_default()
+                > entered_monotonic.elapsed().saturating_add(Duration::from_secs(15));
+            if wake_clock_jumped {
+                // 系统休眠/唤醒后 NAT 映射可能已失效，先丢弃缓存上游连接，
+                // 避免新请求踩中半开套接字或在不完整状态下做 Ping。
+                self.upstream.take();
+                if matches!(
+                    event,
+                    IdleWebSocketEvent::MaintainUpstream | IdleWebSocketEvent::Upstream(_)
+                ) {
+                    continue;
+                }
+            }
 
             match event {
                 IdleWebSocketEvent::Evicted => {
@@ -466,7 +484,7 @@ impl WebSocketResponsesDownstream {
                             .as_mut()
                             .expect("cached upstream must exist after Pong write")
                             .liveness
-                            .record_activity(Instant::now()),
+                            .record_activity(tokio::time::Instant::now().into_std()),
                         Ok(Err(_)) | Err(_) => {
                             self.upstream.take();
                         }
@@ -477,7 +495,7 @@ impl WebSocketResponsesDownstream {
                         .as_mut()
                         .expect("cached upstream must exist after Pong read")
                         .liveness
-                        .record_pong(Instant::now());
+                        .record_pong(tokio::time::Instant::now().into_std());
                 }
                 IdleWebSocketEvent::Upstream(Some(Ok(_)))
                 | IdleWebSocketEvent::Upstream(Some(Err(_)))
@@ -488,7 +506,7 @@ impl WebSocketResponsesDownstream {
                     self.upstream.take();
                 }
                 IdleWebSocketEvent::MaintainUpstream => {
-                    let now = Instant::now();
+                    let now = tokio::time::Instant::now().into_std();
                     let action = self
                         .upstream
                         .as_ref()
@@ -596,6 +614,38 @@ impl WebSocketResponsesDownstream {
         result
     }
 
+    async fn forward_pending_interrupt(
+        &mut self,
+        upstream: &mut CachedUpstreamWebSocket,
+        backoff_key: &UpstreamWebSocketBackoffKey,
+    ) -> Result<()> {
+        let interrupt = self
+            .take_response_interrupt()
+            .context("Responses WebSocket 缺少待发送的中断事件")?;
+        let message = serde_json::to_string(
+            interrupt
+                .body()
+                .expect("admitted interrupt must contain JSON"),
+        )
+        .context("序列化 Responses WebSocket 中断事件失败")?;
+        match tokio::time::timeout(
+            DOWNSTREAM_WRITE_TIMEOUT,
+            upstream.socket.send(WebSocketMessage::Text(message.into())),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                record_upstream_websocket_failure(&self.websocket_backoffs, backoff_key);
+                Err(error).context("发送 Responses WebSocket 中断事件失败")
+            }
+            Err(_) => {
+                record_upstream_websocket_failure(&self.websocket_backoffs, backoff_key);
+                anyhow::bail!("发送 Responses WebSocket 中断事件超时")
+            }
+        }
+    }
+
     async fn proxy_upstream_websocket_impl(
         &mut self,
         route: &RouteTarget,
@@ -614,7 +664,7 @@ impl WebSocketResponsesDownstream {
             .upstream_websocket_url
             .as_ref()
             .map_err(|error| anyhow::anyhow!(error.clone()))?;
-        let now = Instant::now();
+        let now = tokio::time::Instant::now().into_std();
         let previous_response_id = responses_previous_response_id(body);
         let previous_response_key: Option<[u8; 32]> =
             previous_response_id.map(|id| Sha256::digest(id.as_bytes()).into());
@@ -724,7 +774,7 @@ impl WebSocketResponsesDownstream {
                     auth_identity,
                     response_ids: VecDeque::new(),
                     config_identity: route.websocket_config,
-                    liveness: UpstreamWebSocketLiveness::new(Instant::now()),
+                    liveness: UpstreamWebSocketLiveness::new(tokio::time::Instant::now().into_std()),
                     socket,
                 },
                 Err(error) => {
@@ -850,6 +900,7 @@ impl WebSocketResponsesDownstream {
 
         let mut produced_response_id = None;
         let response_deadline = tokio::time::Instant::now() + UPSTREAM_RESPONSE_TIMEOUT;
+        let mut read_idle_deadline = tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
         let mut response_bytes = 0_usize;
         loop {
             if tokio::time::Instant::now() >= response_deadline {
@@ -862,72 +913,109 @@ impl WebSocketResponsesDownstream {
                 return Err(anyhow::Error::new(UpstreamResponseDeadline));
             }
             let next = loop {
+                let maintenance_deadline =
+                    tokio::time::Instant::from_std(upstream.liveness.maintenance_deadline());
+                let step_deadline = std::cmp::min(
+                    std::cmp::min(response_deadline, read_idle_deadline),
+                    maintenance_deadline,
+                );
                 let waited = self
                     .wait_for_upstream(tokio::time::timeout_at(
-                        std::cmp::min(
-                            response_deadline,
-                            tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT,
-                        ),
+                        step_deadline,
                         upstream.socket.next(),
                     ))
                     .await;
                 let next = match waited {
                     Ok(Ok(next)) => next,
                     Ok(Err(_)) => {
-                        if let Some(probe) = probe {
-                            probe.finish_upstream_attempt(
-                                crate::route_request_log::AttemptOutcome::TimedOut,
-                                crate::route_request_log::AttemptPhase::ResponseBody,
-                            );
-                        }
-                        // 等待上限取总期限与空闲期限的较小值；总期限耗尽不代表线路
-                        // 不支持 WebSocket，和帧间检查一样不记退避。
-                        if tokio::time::Instant::now() >= response_deadline {
+                        let tokio_now = tokio::time::Instant::now();
+                        // 等待上限取总期限、空闲期限与心跳探活期限的较小值；总期限
+                        // 耗尽不代表线路不支持 WebSocket，和帧间检查一样不记退避。
+                        if tokio_now >= response_deadline {
+                            if let Some(probe) = probe {
+                                probe.finish_upstream_attempt(
+                                    crate::route_request_log::AttemptOutcome::TimedOut,
+                                    crate::route_request_log::AttemptPhase::ResponseBody,
+                                );
+                            }
                             return Err(anyhow::Error::new(UpstreamResponseDeadline));
                         }
-                        record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
-                        return Err(anyhow::Error::new(UpstreamReadIdleTimeout {
-                            operation: "读取 Responses WebSocket 上游事件",
-                        }));
+                        let std_now = tokio_now.into_std();
+                        let action = upstream.liveness.maintenance_action(std_now);
+                        if tokio_now >= read_idle_deadline
+                            || action == UpstreamWebSocketMaintenanceAction::Drop
+                        {
+                            if let Some(probe) = probe {
+                                probe.finish_upstream_attempt(
+                                    crate::route_request_log::AttemptOutcome::TimedOut,
+                                    crate::route_request_log::AttemptPhase::ResponseBody,
+                                );
+                            }
+                            record_upstream_websocket_failure(
+                                &self.websocket_backoffs,
+                                &backoff_key,
+                            );
+                            return Err(anyhow::Error::new(UpstreamReadIdleTimeout {
+                                operation: "读取 Responses WebSocket 上游事件",
+                            }));
+                        }
+                        if action == UpstreamWebSocketMaintenanceAction::SendPing {
+                            match self
+                                .wait_for_upstream(tokio::time::timeout(
+                                    UPSTREAM_WEBSOCKET_PONG_TIMEOUT,
+                                    upstream
+                                        .socket
+                                        .send(WebSocketMessage::Ping(Default::default())),
+                                ))
+                                .await
+                            {
+                                Ok(Ok(Ok(()))) => {
+                                    upstream
+                                        .liveness
+                                        .record_heartbeat_sent(tokio::time::Instant::now().into_std());
+                                    continue;
+                                }
+                                Ok(Ok(Err(_)) | Err(_)) => {
+                                    if let Some(probe) = probe {
+                                        probe.finish_upstream_attempt(
+                                            crate::route_request_log::AttemptOutcome::TimedOut,
+                                            crate::route_request_log::AttemptPhase::ResponseBody,
+                                        );
+                                    }
+                                    record_upstream_websocket_failure(
+                                        &self.websocket_backoffs,
+                                        &backoff_key,
+                                    );
+                                    return Err(anyhow::Error::new(UpstreamReadIdleTimeout {
+                                        operation: "发送 Responses WebSocket 上游心跳 Ping",
+                                    }));
+                                }
+                                Err(error)
+                                    if error
+                                        .downcast_ref::<DownstreamResponseInterrupt>()
+                                        .is_some() =>
+                                {
+                                    can_recover_persisted_context = false;
+                                    can_retry_rejected_reasoning = false;
+                                    self.forward_pending_interrupt(&mut upstream, &backoff_key)
+                                        .await?;
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        continue;
                     }
                     Err(error)
                         if error
                             .downcast_ref::<DownstreamResponseInterrupt>()
                             .is_some() =>
                     {
-                        let interrupt = self
-                            .take_response_interrupt()
-                            .context("Responses WebSocket 缺少待发送的中断事件")?;
-                        let message = serde_json::to_string(
-                            interrupt
-                                .body()
-                                .expect("admitted interrupt must contain JSON"),
-                        )
-                        .context("序列化 Responses WebSocket 中断事件失败")?;
                         can_recover_persisted_context = false;
                         can_retry_rejected_reasoning = false;
-                        match tokio::time::timeout(
-                            DOWNSTREAM_WRITE_TIMEOUT,
-                            upstream.socket.send(WebSocketMessage::Text(message.into())),
-                        )
-                        .await
-                        {
-                            Ok(Ok(())) => continue,
-                            Ok(Err(error)) => {
-                                record_upstream_websocket_failure(
-                                    &self.websocket_backoffs,
-                                    &backoff_key,
-                                );
-                                return Err(error).context("发送 Responses WebSocket 中断事件失败");
-                            }
-                            Err(_) => {
-                                record_upstream_websocket_failure(
-                                    &self.websocket_backoffs,
-                                    &backoff_key,
-                                );
-                                anyhow::bail!("发送 Responses WebSocket 中断事件超时");
-                            }
-                        }
+                        self.forward_pending_interrupt(&mut upstream, &backoff_key)
+                            .await?;
+                        continue;
                     }
                     Err(error) => return Err(error),
                 };
@@ -955,7 +1043,11 @@ impl WebSocketResponsesDownstream {
                     {
                         probe.mark_first_upstream_data(FirstByteSource::UpstreamWebSocketEvent);
                     }
-                    upstream.liveness.record_activity(Instant::now());
+                    upstream
+                        .liveness
+                        .record_activity(tokio::time::Instant::now().into_std());
+                    read_idle_deadline =
+                        tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
                     let (single_event, events, raw_json_text) =
                         match serde_json::from_str::<Value>(text.as_str()) {
                             Ok(event) => (Some(event), Vec::new(), Some(text)),
@@ -1177,9 +1269,15 @@ impl WebSocketResponsesDownstream {
                             anyhow::bail!("回复 Responses WebSocket 上游 Ping 超时");
                         }
                     }
-                    upstream.liveness.record_activity(Instant::now());
+                    upstream
+                        .liveness
+                        .record_activity(tokio::time::Instant::now().into_std());
+                    read_idle_deadline =
+                        tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
                 }
-                WebSocketMessage::Pong(_) => upstream.liveness.record_pong(Instant::now()),
+                WebSocketMessage::Pong(_) => upstream
+                    .liveness
+                    .record_pong(tokio::time::Instant::now().into_std()),
                 WebSocketMessage::Close(_) => {
                     record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                     anyhow::bail!("Responses WebSocket 上游在终态事件前关闭连接");
@@ -1447,6 +1545,15 @@ pub(crate) async fn connect_upstream_responses_websocket(
     .await
     .context("连接 Responses WebSocket 上游超时")?
     .context("连接 Responses WebSocket 上游失败")?;
+    let tcp_stream = match socket.get_ref() {
+        MaybeTlsStream::Plain(stream) => Some(stream),
+        MaybeTlsStream::Rustls(stream) => Some(stream.get_ref().0),
+        _ => None,
+    };
+    if let Some(stream) = tcp_stream {
+        let _ = stream.set_nodelay(true);
+        enable_downstream_keepalive(stream);
+    }
     if let Some(probe) = probe {
         probe.set_upstream_response_headers(&super::responses::format_upstream_response_headers(
             response.headers(),
