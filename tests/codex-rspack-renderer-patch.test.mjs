@@ -387,12 +387,12 @@ test("rspack Statsig startup gates bound post-login bootstrap, skip remote ident
   const { logs, patch } = await installPatch();
   const url = "app://-/assets/async/907538.0572f09d40.js";
 
-  // 1. Post-login bootstrap timeout: 62500ms deadline -> 5000ms (5e3), 1e4 attempt timeout -> 4500ms.
+  // 1. Post-login bootstrap timeout: 62500ms deadline -> 12000ms (12e3), 1e4 attempt timeout -> 8000ms (8e3).
   const bootstrapSource =
     'async function runBootstrap(){let n,r={auth:0,request:0},i=new AbortController,a=setTimeout(()=>{i.abort(new Ny("req_failed",Error("Reached the post-login Statsig bootstrap deadline")))},62500);try{return await async function(u){let d,h=new AbortController,_=u?AbortSignal.any([h.signal,u]):h.signal;function m(){clearTimeout(d),d=setTimeout(()=>{h.abort(Error("Timed out while fetching post-login Statsig bootstrap"))},1e4)}return m(),_.aborted}(i.signal)}finally{clearTimeout(n),clearTimeout(a)}}';
   const patchedBootstrap = patch(bootstrapSource, url);
-  assert.ok(patchedBootstrap?.includes("/*codey-statsig-bootstrap-deadline*/5e3"));
-  assert.ok(patchedBootstrap?.includes("/*codey-statsig-bootstrap-attempt*/4500"));
+  assert.ok(patchedBootstrap?.includes("/*codey-statsig-bootstrap-deadline*/12e3"));
+  assert.ok(patchedBootstrap?.includes("/*codey-statsig-bootstrap-attempt*/8e3"));
   assert.equal(patch(patchedBootstrap, url), null, "bootstrap timeout patch is idempotent");
   const recordedDelays = [];
   await Function(
@@ -410,7 +410,7 @@ test("rspack Statsig startup gates bound post-login bootstrap, skip remote ident
     },
     () => {},
   );
-  assert.deepEqual(recordedDelays, [5000, 4500]);
+  assert.deepEqual(recordedDelays, [12000, 8000]);
 
   // 2. Fallback identity non-blocking: skips remote accounts/check wait while keeping local token wait.
   const identitySource =
@@ -455,7 +455,7 @@ test("rspack Statsig startup gates bound post-login bootstrap, skip remote ident
   assert.deepEqual(remoteStalled.props.currentAccount, { id: "cached-account" });
   assert.equal(remoteStalled.props.children, "routes");
 
-  // 3. Fallback async Statsig client init cap: fast init finishes cleanly; stalled init finalizes Ready at 1500ms.
+  // 3. Fallback async Statsig client init cap: fast init finishes cleanly; stalled init finalizes Ready at 3000ms.
   const asyncInitSource =
     'const t={};t.useStatsigInternalClientFactoryAsync=function(e,t){let n=(0,i.useMemo)(()=>{var n;return null!=(n=(0,r._getInstance)(t.sdkKey))?n:e(t)},[]),[a,s]=(0,i.useState)("Ready"!==n.loadingStatus);return(0,i.useMemo)(()=>{"Ready"!==n.loadingStatus&&n.initializeAsync().catch(r.Log.error).finally(()=>s(!1))},[]),{client:n,isLoading:a}}';
   const patchedAsync = patch(asyncInitSource, url);
@@ -530,7 +530,7 @@ test("rspack Statsig startup gates bound post-login bootstrap, skip remote ident
   assert.deepEqual(fast.clearedTimers, [1]);
 
   const stalled = runAsyncFactory({ resolveImmediately: false });
-  assert.equal(stalled.timers.get(1)?.ms, 1500);
+  assert.equal(stalled.timers.get(1)?.ms, 3000);
   assert.deepEqual(stalled.finalizedWith, []);
   assert.deepEqual(stalled.loadingChanges, []);
   stalled.timers.get(1).fn();

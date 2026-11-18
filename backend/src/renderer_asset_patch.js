@@ -801,7 +801,7 @@
         patched,
         /(Error\([`"]Reached the post-login Statsig bootstrap deadline[`"]\)\)\)\},)(?:[1-9]\d{4,}|[1-9]\d*e[4-9])(\);[\s\S]{0,600}?Error\([`"]Timed out while fetching post-login Statsig bootstrap[`"]\)\)\},)(?:[1-9]\d{3,}|[1-9]\d*e[4-9])(\)\})/g,
         (_match, deadlinePrefix, attemptPrefix, suffix) =>
-          `${deadlinePrefix}/*codey-statsig-bootstrap-deadline*/5e3${attemptPrefix}/*codey-statsig-bootstrap-attempt*/4500${suffix}`,
+          `${deadlinePrefix}/*codey-statsig-bootstrap-deadline*/12e3${attemptPrefix}/*codey-statsig-bootstrap-attempt*/8e3${suffix}`,
         "statsig post-login bootstrap timeout",
       );
     }
@@ -828,7 +828,7 @@
         patched,
         /(\buseStatsigInternalClientFactoryAsync=function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{let ([$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.useMemo\)\([\s\S]{0,240}?\[[$A-Z_a-z][$\w]*,([$A-Z_a-z][$\w]*)\]=\(0,[$A-Z_a-z][$\w]*\.useState\)\([`"]Ready[`"]!==\2\.loadingStatus\);return\(0,[$A-Z_a-z][$\w]*\.useMemo\)\(\(\)=>\{)[`"]Ready[`"]!==\2\.loadingStatus&&\2\.initializeAsync\(\)\.catch\(([$A-Z_a-z][$\w]*\.Log\.error)\)\.finally\(\(\)=>\3\(!1\)\)(\},\[\]\),\{client:\2,isLoading:[$A-Z_a-z][$\w]*\}\})/g,
         (_match, prefix, clientName, setLoadingName, logErrorExpr, suffix) =>
-          `${prefix}"Ready"!==${clientName}.loadingStatus&&(()=>{/*codey-statsig-async-init-cap*/let __codeyDone=!1,__codeyFinish=()=>{__codeyDone||(__codeyDone=!0,clearTimeout(__codeyTimer),"Loading"===${clientName}.loadingStatus&&typeof ${clientName}._finalizeUpdate==="function"&&${clientName}._finalizeUpdate(null),${setLoadingName}(!1))},__codeyTimer=setTimeout(__codeyFinish,1500);${clientName}.initializeAsync().catch(${logErrorExpr}).finally(__codeyFinish)})()${suffix}`,
+          `${prefix}"Ready"!==${clientName}.loadingStatus&&(()=>{/*codey-statsig-async-init-cap*/let __codeyDone=!1,__codeyFinish=()=>{__codeyDone||(__codeyDone=!0,clearTimeout(__codeyTimer),"Loading"===${clientName}.loadingStatus&&typeof ${clientName}._finalizeUpdate==="function"&&${clientName}._finalizeUpdate(null),${setLoadingName}(!1))},__codeyTimer=setTimeout(__codeyFinish,3000);${clientName}.initializeAsync().catch(${logErrorExpr}).finally(__codeyFinish)})()${suffix}`,
         "statsig async client init cap",
       );
     }
