@@ -132,6 +132,10 @@
     if (document.getElementById(styleId)) return;
     const style = document.createElement("style");
     style.id = styleId;
+    const reducedMotion = `
+      :is(#${buttonId}, #${accountUsageId}), :is(#${buttonId}, #${accountUsageId}) * {
+        animation: none !important; transition: none !important;
+      }`;
     style.textContent = `
       /* Codex 原生小按钮：28×28、圆角 12.5px、图标继承按钮前景色，
          Codey 入口按同一套数值对齐，保证与相邻原生按钮同色同尺寸。 */
@@ -228,11 +232,8 @@
         #${accountUsageId}[data-window-count="2"] .codey-usage-value { font-size: 24px; }
         #${accountUsageId}[data-window-count="2"] .codey-usage-reset { font-size: 10.5px; }
       }
-      @media (prefers-reduced-motion: reduce) {
-        #${buttonId}, #${buttonId} *, #${accountUsageId}, #${accountUsageId} * { animation: none !important; transition: none !important; }
-        /* 预警灯保留仅透明度的慢速呼吸，不带位移和光环。 */
-        #${accountUsageId} .codey-usage-credit-dot { animation: codey-usage-breathe 3.2s ease-in-out infinite !important; transform: none !important; box-shadow: none !important; }
-      }
+      :root[data-reduced-motion="true"] { ${reducedMotion} }
+      @media (prefers-reduced-motion: reduce) { ${reducedMotion} }
     `;
     document.documentElement.appendChild(style);
   };

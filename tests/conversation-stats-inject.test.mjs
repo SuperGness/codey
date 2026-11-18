@@ -199,7 +199,6 @@ const createEnvironment = (options = {}) => {
     },
     rerun: () => vm.runInContext(source, context),
     dispose: () => context.window.__codeyConversationStats.dispose(),
-    markPreviousVersion: () => { context.window.__codeyConversationStats.version = 3; },
     animationFrames,
     runAnimationFrames: () => {
       const callbacks = [...animationFrames.values()];
@@ -1053,14 +1052,17 @@ test("dispose removes portal, listeners and pending response without resurrectin
   assert.equal(env.calls.length, 1);
 });
 
-test("version replacement disposes previous ownership before installing one new portal", async () => {
+test("upgrading from version 19 replaces the style and installs one new portal", async () => {
   const env = createEnvironment();
   await flushTimers(30);
   const originalBar = env.bar();
-  env.markPreviousVersion();
+  const styleId = "codey-conversation-stats-styles";
+  env.document.getElementById(styleId).textContent = "";
+  env.window.__codeyConversationStats.version = 19;
   env.rerun();
   await flushTimers(30);
   assert.notEqual(env.bar(), originalBar);
+  assert.match(env.document.getElementById(styleId).textContent, /:root\[data-reduced-motion="true"\]/);
   assert.equal(env.document.querySelectorAll("#codey-conversation-stats-overlay").length, 1);
   assert.equal(env.document.listeners.get("pointerdown").length, 1);
   click(summary(env));

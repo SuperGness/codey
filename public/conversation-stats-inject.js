@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 19;
+  const VERSION = 20;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -193,6 +193,9 @@
     if (document.getElementById(styleId)) return;
     const style = document.createElement("style");
     style.id = styleId;
+    const reducedMotion = `
+      ${styleScope} .codey-cs-live::after { animation: none; }
+      ${styleScope} .codey-cs-summary, ${styleScope} .codey-cs-icon { transition: none; }`;
     style.textContent = `
       [${conversationAttribute}] ~ :last-child { margin-bottom: 34px !important; }
       ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 58%, transparent); --cs-soft: color-mix(in srgb, var(--cs-text) 84%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 9%, transparent); --cs-line-strong: color-mix(in srgb, var(--cs-text) 14%, transparent); --cs-fill: color-mix(in srgb, var(--cs-text) 5%, transparent); --cs-platter: light-dark(color-mix(in srgb, var(--cs-text) 4.2%, #ffffff80), color-mix(in srgb, var(--cs-text) 5.5%, #ffffff05)); --cs-shine: light-dark(#ffffffb3, #ffffff1f); --cs-surface: light-dark(color-mix(in srgb, var(--bg-primary, Canvas) 82%, #ffffff), color-mix(in srgb, var(--bg-primary, Canvas) 80%, #242428)); --cs-live: light-dark(#248a3d, #30d158); --cs-accent: light-dark(#007aff, #0a84ff); --cs-cyan: light-dark(#0088a3, #32ade6); --cs-violet: light-dark(#8944ab, #bf5af2); --cs-amber: light-dark(#c46a00, #ff9f0a); --cs-seg-cached: color-mix(in srgb, var(--cs-text) 24%, transparent); --cs-seg-input: var(--cs-accent); --cs-seg-output: var(--cs-violet); --cs-seg-write: var(--cs-amber); --cs-seg-model: var(--cs-accent); --cs-seg-tool: var(--cs-cyan); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 6px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
@@ -233,7 +236,8 @@
       #${barId}[data-running="true"] .codey-cs-live { display: inline-block; }
       #${barId}[data-codey-state="stale"] .codey-cs-summary { opacity: .55; }
       @keyframes codey-cs-pulse { from { transform: scale(1); opacity: .6; } to { transform: scale(2.8); opacity: 0; } }
-      @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-live::after { animation: none; } ${styleScope} .codey-cs-summary, ${styleScope} .codey-cs-icon { transition: none; } }
+      :root[data-reduced-motion="true"] { ${reducedMotion} }
+      @media (prefers-reduced-motion: reduce) { ${reducedMotion} }
       ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(384px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 13px; color: var(--cs-text); background: var(--cs-surface); backdrop-filter: saturate(190%) blur(32px); -webkit-backdrop-filter: saturate(190%) blur(32px); border: .5px solid var(--cs-line-strong); border-radius: 20px; box-shadow: 0 18px 44px -12px #0000004d, 0 3px 10px #00000014, inset 0 .5px 0 var(--cs-shine); user-select: text; }
       ${styleScope} .codey-cs-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 1px 3px 10px; }
       ${styleScope} .codey-cs-titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; line-height: 1.25; }
