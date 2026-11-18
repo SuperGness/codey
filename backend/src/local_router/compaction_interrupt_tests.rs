@@ -28,7 +28,7 @@ async fn write_compact_request(client: &mut TcpStream, router: &LocalRouter, mod
     let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
     let body = serde_json::to_vec(&json!({"model":model,"input":"context"})).unwrap();
     let headers = format!(
-        "POST {}/responses/compact HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nthread-id: {THREAD}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {}/responses/compact HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nthread-id: {THREAD}\r\nsession-id: {THREAD}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         url.path().trim_end_matches('/'),
         endpoint.token,
         body.len()
@@ -447,7 +447,7 @@ async fn interrupt_leaves_another_active_thread_with_a_shared_session_running() 
         assert!(!bindings.compacting.contains(&format!("thread-id:{THREAD}")));
         assert!(bindings.compacting.contains("thread-id:other"));
         assert!(
-            bindings
+            !bindings
                 .compacting
                 .contains(&format!("session-id:{THREAD}"))
         );

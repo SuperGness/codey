@@ -1235,3 +1235,265 @@ async fn gateway_compaction_cancelled_errors_return_without_logging_or_writing()
         assert_eq!(returned.is::<DownstreamResponseInterrupt>(), !closed);
     }
 }
+
+#[tokio::test]
+async fn concurrent_compaction_across_parent_and_subagents_with_shared_session_succeeds() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (mut config, provider, model) =
+        router_config(format!("http://{}/v1", upstream.local_addr().unwrap()));
+    config.profiles[0].supports_remote_compaction = true;
+    config.profiles[0].normalize();
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let alias = model_alias(&provider, &model);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let v2_body = json!({
+        "model": alias,
+        "stream": false,
+        "input": [{"role":"user","content":"context"},{"type":"compaction_trigger"}]
+    });
+    let compact_body = json!({"model": alias, "input": "context"});
+
+    let parent_http = tokio::spawn({
+        let client = client.clone();
+        let base = endpoint.base_url.clone();
+        let token = endpoint.token.clone();
+        let body = v2_body.clone();
+        async move {
+            client
+                .post(format!("{base}/responses"))
+                .bearer_auth(&token)
+                .header("thread-id", "parent")
+                .header("session-id", "parent")
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let child_http = tokio::spawn({
+        let client = client.clone();
+        let base = endpoint.base_url.clone();
+        let token = endpoint.token.clone();
+        let body = v2_body.clone();
+        async move {
+            client
+                .post(format!("{base}/responses"))
+                .bearer_auth(&token)
+                .header("thread-id", "child-1")
+                .header("session-id", "parent")
+                .header("x-codex-parent-thread-id", "parent")
+                .header("x-openai-subagent", "collab_spawn")
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let child_compact = tokio::spawn({
+        let client = client.clone();
+        let base = endpoint.base_url.clone();
+        let token = endpoint.token.clone();
+        let body = compact_body.clone();
+        async move {
+            client
+                .post(format!("{base}/responses/compact"))
+                .bearer_auth(&token)
+                .header("thread-id", "child-3")
+                .header("session-id", "parent")
+                .header("x-codex-parent-thread-id", "parent")
+                .header("x-openai-subagent", "collab_spawn")
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let mut child_ws = super::tests::connect_router_websocket_with_headers(
+        &endpoint,
+        &[
+            ("thread-id", "child-2"),
+            ("session-id", "parent"),
+            ("x-codex-parent-thread-id", "parent"),
+            ("x-openai-subagent", "collab_spawn"),
+        ],
+    )
+    .await;
+    child_ws
+        .send(WebSocketMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": alias,
+                "stream_id": "child-2-compact",
+                "input": [{"role":"user","content":"ws context"},{"type":"compaction_trigger"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), upstream.accept())
+            .await
+            .expect("concurrent compactions across parent and subagents must reach upstream")
+            .unwrap();
+        let request = read_http_request(&mut socket).await.unwrap();
+        let thread = incoming_header(&request, "thread-id").unwrap().to_string();
+        held.push((thread, socket));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), upstream.accept())
+            .await
+            .is_err()
+    );
+
+    // Same thread (including session-only parent) must still reject concurrent compaction with 409.
+    for headers in [
+        vec![("thread-id", "parent"), ("session-id", "parent")],
+        vec![("session-id", "parent")],
+        vec![("thread-id", "child-1"), ("session-id", "parent")],
+    ] {
+        let mut builder = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&v2_body);
+        for (name, value) in &headers {
+            builder = builder.header(*name, *value);
+        }
+        let duplicate = builder.send().await.unwrap();
+        assert_eq!(duplicate.status().as_u16(), 409, "{headers:?}");
+        assert_eq!(
+            duplicate.json::<Value>().await.unwrap()["error"]["code"],
+            "compaction_in_progress",
+            "{headers:?}"
+        );
+    }
+
+    let success = json!({
+        "id": "resp_compact_ok",
+        "object": "response",
+        "status": "completed",
+        "output": [{"type":"compaction","encrypted_content":"opaque-window"}]
+    });
+    for (_, mut socket) in held {
+        write_json_response(&mut socket, 200, &success)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(parent_http.await.unwrap().status().as_u16(), 200);
+    assert_eq!(child_http.await.unwrap().status().as_u16(), 200);
+    assert_eq!(child_compact.await.unwrap().status().as_u16(), 200);
+    let ws_terminal = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(message) = child_ws.next().await {
+            if let WebSocketMessage::Text(text) = message.unwrap() {
+                let event: Value = serde_json::from_str(text.as_ref()).unwrap();
+                if responses_event_is_terminal(&event) {
+                    return event;
+                }
+            }
+        }
+        panic!("missing child WebSocket compaction terminal event")
+    })
+    .await
+    .unwrap();
+    assert_eq!(ws_terminal["type"], "response.completed");
+    assert_eq!(ws_terminal["stream_id"], "child-2-compact");
+    child_ws.close(None).await.unwrap();
+
+    assert!(router.bindings.lock().unwrap().compacting.is_empty());
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn subagent_compaction_does_not_block_parent_portable_compaction_prepare() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (mut config, source, model) =
+        router_config(format!("http://{}/v1", upstream.local_addr().unwrap()));
+    config.profiles[0].supports_remote_compaction = true;
+    config.profiles[0].normalize();
+    let mut target = config.profiles[0].clone();
+    target.id = "target".into();
+    let target_id = target.provider_id().to_string();
+    config.profiles.push(target);
+    config
+        .selected_models_by_provider
+        .insert(target_id.clone(), vec!["target-model".into()]);
+    let router = LocalRouter::start(&config).await.unwrap();
+
+    let resolved = router
+        .snapshot
+        .read()
+        .unwrap()
+        .target_for_request(&model, Some(&source), None)
+        .unwrap();
+    router.bindings.lock().unwrap().remember_resolved(
+        &["thread-id:parent".into(), "session-id:parent".into()],
+        &resolved,
+        true,
+        false,
+        Some(false),
+    );
+
+    let endpoint = router.endpoint();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let child_compact = tokio::spawn({
+        let client = client.clone();
+        let base = endpoint.base_url.clone();
+        let token = endpoint.token.clone();
+        let model_name = model_alias(&source, &model);
+        async move {
+            client
+                .post(format!("{base}/responses/compact"))
+                .bearer_auth(&token)
+                .header("thread-id", "child-1")
+                .header("session-id", "parent")
+                .header("x-codex-parent-thread-id", "parent")
+                .header("x-openai-subagent", "collab_spawn")
+                .json(&json!({"model": model_name, "input": "child context"}))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let (mut socket, _) = upstream.accept().await.unwrap();
+    read_http_request(&mut socket).await.unwrap();
+
+    let prepare_payload = json!({
+        "threadId": "parent",
+        "targetProviderId": target_id,
+        "targetModel": "target-model"
+    });
+    let prepared = router
+        .portable_compaction("prepare", &prepare_payload)
+        .expect("idle parent portable compaction prepare must not be blocked by active subagent");
+    assert_eq!(prepared["required"], true);
+    router
+        .portable_compaction(
+            "cancel",
+            &json!({"threadId": "parent", "token": prepared["token"]}),
+        )
+        .unwrap();
+
+    write_json_response(
+        &mut socket,
+        200,
+        &json!({"status":"completed","output":[{"type":"compaction","encrypted_content":"opaque"}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(child_compact.await.unwrap().status().as_u16(), 200);
+    assert!(router.bindings.lock().unwrap().compacting.is_empty());
+    router.stop().await.unwrap();
+}

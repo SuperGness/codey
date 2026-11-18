@@ -1069,6 +1069,21 @@ async fn finish_compaction_event_stream<D: ResponsesDownstream + ?Sized>(
     let _ = tokio::time::timeout_at(deadline, finish).await;
 }
 
+pub(crate) fn compaction_exclusion_keys(
+    request: &HttpRequest,
+    body: &Value,
+) -> Result<Vec<String>> {
+    // 压缩互斥只锁定当前线程（含 session-only 主会话的 thread-id 别名），
+    // 不占用整棵会话树共享的 session-id，避免主子代理或并行子代理同时压缩时互相 409。
+    // 缺少自身 thread-id 的子代理或匿名请求退回按请求正文去重。
+    if let Some(key) = portable_request_key(request) {
+        return Ok(vec![key]);
+    }
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, body)?;
+    Ok(vec![format!("compact-input:{:x}", hasher.finalize())])
+}
+
 impl RouterServer {
     pub(crate) async fn proxy_with_compaction_budget<D: ResponsesDownstream + ?Sized>(
         &self,
@@ -1088,15 +1103,9 @@ impl RouterServer {
             ))
             .await;
         }
-        let keys = request_binding_keys(&request);
-        // ponytail: without a session identifier only identical requests can be
-        // deduplicated; a host revision is required for stronger idempotency.
-        let keys = if keys.is_empty() {
-            let bytes = serde_json::to_vec(&body)?;
-            vec![format!("compact-input:{:x}", Sha256::digest(bytes))]
-        } else {
-            keys
-        };
+        // ponytail: without a concrete thread identifier only identical requests
+        // can be deduplicated; a host revision is required for stronger idempotency.
+        let keys = compaction_exclusion_keys(&request, &body)?;
         let guard = match CompactionGuard::acquire(&self.bindings, keys) {
             Ok(guard) => guard,
             Err(error) => {
@@ -2016,6 +2025,76 @@ mod tests {
             }]
         });
         assert!(validate_cross_route_context(&body).is_err());
+    }
+
+    #[test]
+    fn compaction_exclusion_keys_isolate_shared_session_threads_and_subagent_fallbacks() {
+        let make_request = |headers: Vec<(&str, &str)>| HttpRequest {
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            body: Vec::new(),
+            _body_budget_permit: None,
+        };
+        let body = json!({"model":"gpt-5","input":[{"type":"compaction_trigger"}]});
+        let other_body = json!({"model":"gpt-5","input":[{"role":"user","content":"other"},{"type":"compaction_trigger"}]});
+
+        assert_eq!(
+            compaction_exclusion_keys(
+                &make_request(vec![("thread-id", "parent"), ("session-id", "parent")]),
+                &body,
+            )
+            .unwrap(),
+            vec!["thread-id:parent"]
+        );
+        assert_eq!(
+            compaction_exclusion_keys(
+                &make_request(vec![
+                    ("thread-id", "child"),
+                    ("session-id", "parent"),
+                    ("x-codex-parent-thread-id", "parent"),
+                    ("x-openai-subagent", "collab_spawn"),
+                ]),
+                &body,
+            )
+            .unwrap(),
+            vec!["thread-id:child"]
+        );
+        assert_eq!(
+            compaction_exclusion_keys(&make_request(vec![("session-id", "parent")]), &body)
+                .unwrap(),
+            vec!["thread-id:parent"]
+        );
+
+        let expected_hash = format!(
+            "compact-input:{:x}",
+            Sha256::digest(serde_json::to_vec(&body).unwrap())
+        );
+        for headers in [
+            vec![
+                ("session-id", "parent"),
+                ("x-openai-subagent", "collab_spawn"),
+            ],
+            vec![
+                ("session-id", "parent"),
+                ("x-codex-parent-thread-id", "parent"),
+            ],
+            vec![("thread-id", " "), ("session-id", "parent")],
+            vec![("thread-id", "child\ninvalid"), ("session-id", "parent")],
+        ] {
+            assert_eq!(
+                compaction_exclusion_keys(&make_request(headers.clone()), &body).unwrap(),
+                vec![expected_hash.clone()],
+                "{headers:?}"
+            );
+            assert_ne!(
+                compaction_exclusion_keys(&make_request(headers), &other_body).unwrap(),
+                vec![expected_hash.clone()]
+            );
+        }
     }
 
     #[test]
