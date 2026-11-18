@@ -82,6 +82,8 @@
     "submitDisabledReasons:",
     "checkout-webview-presentation-changed",
     "totalASTLRUCacheSize:",
+    "thread.userMessageNavigation.ariaLabel",
+    "threadScroll.restore",
     "orbit-character-preloaded",
     "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
     "PerformanceObserver.supportedEntryTypes",
@@ -355,6 +357,8 @@
     "electron-app-state-snapshot-request",
     "activeInteractions=new Map",
     "totalASTLRUCacheSize:",
+    "thread.userMessageNavigation.ariaLabel",
+    "threadScroll.restore",
     "orbit-character-preloaded",
     "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
     "auto.ui.browser.metrics",
@@ -395,6 +399,8 @@
     { "allOf": ["electron-app-state-snapshot-request", "collectAppStateSnapshot("] },
     { "allOf": ["activeInteractions=new Map", "beginCpuSampling", "ensureHeartbeat("] },
     { "allOf": ["totalASTLRUCacheSize:", "poolSize:", "workerFactory:"] },
+    { "allOf": ["thread.userMessageNavigation.ariaLabel", "[data-thread-user-message-navigation-item-id=\""] },
+    { "allOf": ["threadScroll.restore", "threadScroll.initialRead", "previousViewportHeightPx:"] },
     { "allOf": ["orbit-character-preloaded", "allow-same-origin"] },
     { "allOf": ["\"general-settings\",\"appearance\",\"keyboard-shortcuts\""] },
     { "allOf": ["PerformanceObserver.supportedEntryTypes.includes(\"long-animation-frame\")", "auto.ui.browser.metrics"] },
@@ -512,7 +518,92 @@
     }
     return patched;
   };
+  // 这段函数会随资源补丁进入 Codex 模块。浏览器完成布局后再判断标记是否需要滚动。
+  function alignMessageMarker(align, rail, marker) {
+    if (!rail) return;
+    const focused = rail.contains(rail.ownerDocument.activeElement);
+    const previous = rail.__codeyPendingMessageMarker;
+    if (previous) {
+      if (previous.marker === marker && !focused) return;
+      previous.observer.disconnect();
+      delete rail.__codeyPendingMessageMarker;
+    }
+    if (!marker) return;
+    if (focused) {
+      align(rail, marker);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (rail.__codeyPendingMessageMarker?.observer !== observer) return;
+      observer.disconnect();
+      delete rail.__codeyPendingMessageMarker;
+      const { rootBounds, boundingClientRect } = entries.at(-1);
+      if (!marker.isConnected || !rail.contains(marker)) return;
+      // content-visibility 会让远处的标记暂时没有尺寸，这时仍要交给原生函数定位。
+      if (rootBounds && boundingClientRect.height > 0
+        && boundingClientRect.top >= rootBounds.top && boundingClientRect.bottom <= rootBounds.bottom) return;
+      // 标记等待布局期间，用户可能已经开始用键盘或指针操作导航条。
+      if (!rail.contains(rail.ownerDocument.activeElement) && !rail.querySelector('[data-scrub-target="true"]')) {
+        align(rail, marker);
+      }
+    }, { root: rail, threshold: 1 });
+    rail.__codeyPendingMessageMarker = { marker, observer };
+    observer.observe(marker);
+  }
+
+  const patchThreadScrollMeasurements = (patched, source) => {
+    if (!source.includes("threadScroll.restore") || !source.includes("threadScroll.initialRead")
+      || !source.includes("previousViewportHeightPx:")) return patched;
+
+    if (!source.includes("/*codey-scroll-restore-distance*/")) {
+      // 顶部和阅读锚点各有自己的恢复距离，先选分支可以省去即将被覆盖的尺寸读取。
+      const distance = new RegExp([
+        String.raw`,(?<distance>[$\w]+)=(?<saved>null==[$\w]+\?[$\w]+:Math\.max\(0,(?<rail>[$\w]+)\.scrollHeight-\k<rail>\.clientHeight-[$\w]+\));`,
+        String.raw`(?<top>"top"===[$\w]+)\?\k<distance>=(?<maximum>Math\.max\(0,\k<rail>\.scrollHeight-\k<rail>\.clientHeight\)):`,
+        String.raw`(?<anchored>[$\w]+&&null!=(?<anchor>[$\w]+\.current))&&\(\k<distance>=(?<anchoredValue>\k<anchor>\+\([$\w]+\(\)\?\.getHeightPx\(\)\?\?0\))\),`,
+        String.raw`(?=[$\w]+\(\k<distance>\),\(0,[$\w]+\.[$\w]+\)\("threadScroll\.restore")`,
+      ].join(""), "g");
+      patched = replaceUniqueRendererGate(patched, distance, (...args) => {
+        const { distance, top, maximum, anchored, anchoredValue, saved } = args.at(-1);
+        return `,${distance}=/*codey-scroll-restore-distance*/${top}?${maximum}:${anchored}?${anchoredValue}:${saved};`;
+      }, "thread scroll restoration distance");
+    }
+    if (!source.includes("__codeyViewportHeight")) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /let ([$\w]+)=([$\w]+)!==([$\w]+)\.clientHeight;if\(\2=\3\.clientHeight,\1&&0===\2\)/g,
+        (_match, changed, previous, viewport) =>
+          `let __codeyViewportHeight=${viewport}.clientHeight,${changed}=${previous}!==__codeyViewportHeight;${previous}=__codeyViewportHeight;if(${changed}&&0===${previous})`,
+        "thread resize viewport height",
+      );
+    }
+    if (!source.includes("/*codey-scroll-pinned-top*/")) {
+      // 顶部固定时直接按可滚动范围定位，不先读取只在其他分支使用的距底距离。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(let [$\w]+=\(0,[$\w]+\.IA\)\(([$\w]+)\);)(if\("top"===([$\w]+)&&[$\w]+\.current\[\4\]\)return void [$\w]+\(Math\.max\(0,\2\.scrollHeight-\2\.clientHeight\),"instant"\);)(?=if\("bottom"===\4&&)/g,
+        (_match, distanceRead, _viewport, pinnedTop) =>
+          `/*codey-scroll-pinned-top*/${pinnedTop}${distanceRead}`,
+        "thread resize pinned top",
+      );
+    }
+    return patched;
+  };
+
   const patchPerformanceAndPrewarmGates = (patched, source, allowPetSlim) => {
+    patched = patchThreadScrollMeasurements(patched, source);
+    if (source.includes("thread.userMessageNavigation.ariaLabel")
+      && source.includes('[data-thread-user-message-navigation-item-id="')
+      && !source.includes("__codeyPendingMessageMarker")) {
+      // 只替换函数体内的调用，原生滚动函数仍在每次定位时读取。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(function [$\w]+\(([$\w]+),[$\w]+\)\{var [$\w]+,[$\w]+;)\(0,([$\w]+\.[$\w]+)\)\((?=\2,\([$\w]+=\2,null==\([$\w]+=[\w$]+\)\|\|null==[$\w]+\?null:[$\w]+\.querySelector\(`\[data-thread-user-message-navigation-item-id=")/g,
+        (_match, declaration, _rail, align) =>
+          `${declaration}(${alignMessageMarker})(${align},`,
+        "thread message navigation alignment",
+      );
+    }
     if (
       allowPetSlim
       && source.includes("shouldPrewarmAvatarOverlay:")
