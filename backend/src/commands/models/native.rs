@@ -216,7 +216,7 @@ pub(crate) async fn model_state_for_route_async(
 
 pub(crate) fn current_renderer_model_catalog(config: &CodeyConfig) -> Result<Value, String> {
     let model_state = current_model_state(config)?;
-    Ok(renderer_model_catalog_value(config, &model_state))
+    renderer_model_catalog_value_at(config, &model_state, codex_home())
 }
 
 pub(crate) async fn current_renderer_model_catalog_async(

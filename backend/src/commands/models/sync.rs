@@ -118,18 +118,26 @@ pub(crate) async fn sync_native_current_provider_models(
     {
         return Err("只能同步当前 Codex 线路的模型".to_string());
     }
-    let official_account_models = if context.provider.official {
-        previous
-            .profiles
-            .iter()
-            .find(|profile| profile.official_account && profile.enabled)
-            .cloned()
-            .map(|profile| async move { fetch_official_route_models(state, &profile).await })
+    let default_account_id = if context.provider.official {
+        super::super::header_official_account_id(state).await
     } else {
         None
     };
-    let official_account_models = match official_account_models {
-        Some(fetch) => Some(fetch.await?),
+    let official_profile = if context.provider.official {
+        previous
+            .profiles
+            .iter()
+            .find(|profile| {
+                profile.official_account
+                    && profile.enabled
+                    && profile.official_account_id.as_deref() == default_account_id.as_deref()
+            })
+            .cloned()
+    } else {
+        None
+    };
+    let official_account_models = match official_profile.as_ref() {
+        Some(profile) => Some(fetch_official_route_models(state, profile).await?),
         None => None,
     };
     let catalog_context = model_catalog::CatalogContext::new(&previous.codex_app_path);
@@ -141,28 +149,26 @@ pub(crate) async fn sync_native_current_provider_models(
         )
         .map_err(|error| format!("保存官方模型目录快照失败：{error:#}"))?;
     }
-    let visible_fetched_models = if let Some(entries) = official_account_models.as_ref() {
-        regular_route_models(
-            entries
-                .iter()
-                .filter_map(|model| {
-                    model
-                        .get("slug")
-                        .or_else(|| model.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .collect(),
-        )
+    let fetched_catalog = if let Some(entries) = official_account_models.as_ref() {
+        Some(provider_models::ProviderModelCatalog::from_official_models(
+            entries,
+        ))
     } else if let Some(fetch_profile) = context.fetch_profile.clone() {
         fetch_profile.validate()?;
-        let fetched_models = fetch_provider_models(fetch_profile)
-            .await
-            .map_err(|error| error.to_string())?;
-        regular_route_models(fetched_models)
+        Some(
+            fetch_provider_model_catalog(fetch_profile)
+                .await
+                .map_err(|error| error.to_string())?,
+        )
     } else {
-        Vec::new()
+        None
     };
+    let visible_fetched_models = regular_route_models(
+        fetched_catalog
+            .as_ref()
+            .map(|catalog| catalog.models.clone())
+            .unwrap_or_default(),
+    );
 
     let current_provider = current_codex_provider().await?;
     if current_provider != context.provider {
@@ -190,6 +196,18 @@ pub(crate) async fn sync_native_current_provider_models(
     }
 
     let mut next = latest.clone();
+    if let Some(catalog) = fetched_catalog {
+        next.upstream_speed_tiers_by_provider
+            .insert(context.provider.id.clone(), catalog.speed_tiers.clone());
+        if let Some(profile) = official_profile.as_ref() {
+            next.upstream_speed_tiers_by_provider
+                .insert(profile.provider_id().to_string(), catalog.speed_tiers);
+            next.upstream_models_by_provider.insert(
+                profile.provider_id().to_string(),
+                visible_fetched_models.clone(),
+            );
+        }
+    }
     if context.provider.official && !visible_fetched_models.is_empty() {
         next.upstream_models_by_provider
             .insert(context.provider.id.clone(), visible_fetched_models.clone());
@@ -223,7 +241,11 @@ pub(crate) async fn sync_native_current_provider_models(
     if context.provider.official {
         // Persist the account-backed catalog on the route so configuration
         // normalization can recognize newly released official model IDs.
-        let account_models = model_state.official_model_ids.clone();
+        let account_models = if official_account_models.is_some() {
+            visible_fetched_models.clone()
+        } else {
+            model_state.official_model_ids.clone()
+        };
         if !account_models.is_empty() {
             next.upstream_models_by_provider
                 .insert(context.provider.id.clone(), account_models.clone());
@@ -524,7 +546,14 @@ pub(crate) fn preserve_declared_official_models(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn fetch_provider_models(profile: ProviderProfile) -> anyhow::Result<Vec<String>> {
+    Ok(fetch_provider_model_catalog(profile).await?.models)
+}
+
+pub(crate) async fn fetch_provider_model_catalog(
+    profile: ProviderProfile,
+) -> anyhow::Result<provider_models::ProviderModelCatalog> {
     // 原生传输插件的模型由配置声明，上游不一定提供标准 /models。
     if profile.plugin_owner_id.is_some()
         && let Some(spec) = profile
@@ -532,7 +561,10 @@ pub(crate) async fn fetch_provider_models(profile: ProviderProfile) -> anyhow::R
             .as_ref()
             .filter(|spec| spec.transport.is_some())
     {
-        return Ok(spec.models.clone());
+        return Ok(provider_models::ProviderModelCatalog {
+            models: spec.models.clone(),
+            speed_tiers: BTreeMap::new(),
+        });
     }
     let home = codex_home();
     let fetch_profile = tokio::task::spawn_blocking(move || {
@@ -543,7 +575,7 @@ pub(crate) async fn fetch_provider_models(profile: ProviderProfile) -> anyhow::R
     let client = provider_models::http_client()
         .current(&fetch_profile.normalized_base_url())
         .await;
-    provider_models::fetch(&fetch_profile, &client).await
+    provider_models::fetch_catalog(&fetch_profile, &client).await
 }
 
 #[cfg(test)]
@@ -600,13 +632,16 @@ pub(crate) async fn sync_provider_models_for_launch(
         return config;
     };
 
+    let mut speed_tiers = None;
     let (models, synced) = match tokio::time::timeout(
         STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT,
-        fetch_provider_models(profile.clone()),
+        fetch_provider_model_catalog(profile.clone()),
     )
     .await
     {
-        Ok(Ok(models)) => {
+        Ok(Ok(catalog)) => {
+            let models = catalog.models;
+            speed_tiers = Some(catalog.speed_tiers);
             let fetched_model_count = models.len();
             let (provider_models, synced) =
                 startup_model_sync_models_or_fallback(models, config.upstream_models_snapshot());
@@ -676,7 +711,11 @@ pub(crate) async fn sync_provider_models_for_launch(
         return latest;
     }
     let persistence_base = (!synced).then(|| latest.clone());
-    let next = config_with_current_provider_model_sync(&latest, models, synced, codex_home());
+    let mut next = config_with_current_provider_model_sync(&latest, models, synced, codex_home());
+    if synced && let Some(speed_tiers) = speed_tiers {
+        next.upstream_speed_tiers_by_provider
+            .insert(provider_id, speed_tiers);
+    }
     let committed = commit_startup_model_sync(state, latest, next, synced).await;
     drop(_config_write_guard);
     reconcile_current_subagent_defaults(state, persistence_base.as_ref())

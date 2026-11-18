@@ -354,7 +354,7 @@ pub(crate) fn current_model_state_in_context(
     };
     let requested_default_model = config.default_model_for_profile(active_profile);
     let reasoning_efforts = config.model_reasoning_efforts_for_provider(provider_id);
-    model_catalog::selection_state_in_context(
+    let mut state = model_catalog::selection_state_in_context(
         home,
         official,
         config
@@ -371,5 +371,17 @@ pub(crate) fn current_model_state_in_context(
         requested_default_model.as_deref(),
         context,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    let synchronized = config.upstream_speed_tiers_by_provider.get(provider_id);
+    if active_profile.official_siwc {
+        state.synced_ultrafast_models.clear();
+    } else if !config.inherits_native_speed_tiers(active_profile) {
+        state.synced_ultrafast_models = synchronized
+            .into_iter()
+            .flatten()
+            .filter(|(_, tiers)| tiers.supports_ultrafast())
+            .map(|(model, _)| model.clone())
+            .collect();
+    }
+    Ok(state)
 }

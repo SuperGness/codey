@@ -815,6 +815,8 @@ fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> boo
         || previous.declared_official_models_by_provider
             != next.declared_official_models_by_provider
         || previous.upstream_models_by_provider != next.upstream_models_by_provider
+        || previous.upstream_speed_tiers_by_provider != next.upstream_speed_tiers_by_provider
+        || previous.model_ultrafast_by_provider != next.model_ultrafast_by_provider
         || previous.model_reasoning_efforts_by_provider != next.model_reasoning_efforts_by_provider
         || previous.model_context_by_provider != next.model_context_by_provider
         || previous.default_model != next.default_model
@@ -895,22 +897,41 @@ async fn commit_official_launch_routes(
     home: PathBuf,
 ) -> Result<(), String> {
     let _config_write_guard = state.config_write_lock.lock().await;
+    let previous = state.config.read().await.clone();
+    let known_provider_ids = previous
+        .upstream_speed_tiers_by_provider
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     let current_accounts = state.official_accounts();
-    let official_launch = tokio::task::spawn_blocking(move || {
+    let probe_home = home.clone();
+    let (official_launch, account_provider_ids) = tokio::task::spawn_blocking(move || {
         let mut official_launch = official_launch;
-        official_launch.reconcile_current_accounts(&home, &current_accounts)?;
-        Ok::<_, anyhow::Error>(official_launch)
+        let account_provider_ids =
+            official_launch.reconcile_current_accounts(&probe_home, &current_accounts)?;
+        let account_provider_ids = official_accounts::include_existing_account_files(
+            &current_accounts,
+            account_provider_ids,
+            &known_provider_ids,
+        )?;
+        Ok::<_, anyhow::Error>((official_launch, account_provider_ids))
     })
     .await
     .map_err(|error| format!("校验官方账号线路任务异常退出：{error}"))?
     .map_err(|error| format!("校验官方账号线路失败：{error:#}"))?;
-    let previous = state.config.read().await.clone();
     if !previous.local_router_enabled {
-        let next = read_only_config_for_official_probe(previous, official_launch.status);
+        let mut next =
+            read_only_config_for_official_probe(previous.clone(), official_launch.status);
+        official_accounts::prune_deleted_account_speed_tiers(&mut next, &account_provider_ids);
+        if persisted_config_changed(&previous, &next) {
+            next.settings_revision = previous.settings_revision.saturating_add(1);
+            next = save_config_to_store(state, next).await?;
+        }
         *state.config.write().await = next;
         return Ok(());
     }
     let mut next = route_config_for_official_probe(&previous, official_launch)?;
+    official_accounts::prune_deleted_account_speed_tiers(&mut next, &account_provider_ids);
     // 派生时会按第三方线路占用的短名称挤开官方线路的短名称，把结果写回
     // 账号记录，账号面板显示的短名称才和线路列表、模型前缀保持一致。
     if let Err(error) =
@@ -929,7 +950,7 @@ async fn commit_official_launch_routes(
         if next.settings_revision == previous.settings_revision {
             next.settings_revision = previous.settings_revision.saturating_add(1);
         }
-        next = save_config_to_store(state, next)
+        next = models::save_config_with_route_speed_changes(state, &previous, next, &home)
             .await
             .map_err(|error| format!("保存启动线路准备结果失败：{error}"))?;
     }
@@ -2056,7 +2077,9 @@ async fn save_codey_config_locked(
     let reconcile_subagent_config = should_reconcile_runtime_subagent_config(&previous, &config);
     config.settings_revision = previous.settings_revision.saturating_add(1);
     let trace_guard_changed = config.disable_trace_log_writes != previous.disable_trace_log_writes;
-    let config = save_config_to_store(state, config).await?;
+    let config =
+        models::save_config_with_route_speed_changes(state, &previous, config, codex_home())
+            .await?;
     *state.config.write().await = config.clone();
     if trace_guard_changed {
         config_apply::request_trace_apply(state);
@@ -2274,6 +2297,9 @@ fn retain_route_scoped_config(config: &mut CodeyConfig) {
         .retain(|provider_id, _| provider_ids.contains(provider_id));
     config
         .upstream_models_by_provider
+        .retain(|provider_id, _| provider_ids.contains(provider_id));
+    config
+        .upstream_speed_tiers_by_provider
         .retain(|provider_id, _| provider_ids.contains(provider_id));
 }
 
@@ -3156,6 +3182,27 @@ fn misc_model_change_requires_restart(applied: &CodeyConfig, current: &CodeyConf
             .is_some_and(|model| model.contains('/'))
 }
 
+fn route_speed_change_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool {
+    if !applied.local_router_enabled || !current.local_router_enabled {
+        return false;
+    }
+    if applied.uses_builtin_official_model_catalog()
+        && current.needs_route_speed_catalog()
+        && !applied.needs_route_speed_catalog()
+        && applied.runtime_model_contexts().is_empty()
+    {
+        return true;
+    }
+    let previous = applied.runtime_model_speed_tiers();
+    let baseline = model_catalog::ModelSpeedPolicy::default();
+    current
+        .runtime_model_speed_tiers()
+        .iter()
+        .any(|(key, policy)| {
+            previous.get(key).unwrap_or(&baseline).request_tiers() != policy.request_tiers()
+        })
+}
+
 /// 仅比较当前进程无法热更新的配置；尚未送达的目录和角色配置由应用结果处理。
 pub(super) fn config_requires_restart_with_route_status(
     provider_route_restart_required: bool,
@@ -3172,6 +3219,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
         || applied.scope_guard != current.scope_guard
+        || route_speed_change_requires_restart(applied, current)
         || misc_model_change_requires_restart(applied, current)
 }
 
@@ -3196,6 +3244,7 @@ fn runtime_requires_restart(
             endpoint.supports_websockets != current.runtime_supports_websockets()
         });
     proxy_websocket_drift
+        || runtime.context_budget_requires_restart()
         || config_requires_restart_with_route_status(
             provider_route_restart_required_for_runtime(&runtime.applied_config, current)
                 || runtime.subagent_routes_require_restart(current),

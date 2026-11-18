@@ -171,8 +171,18 @@ struct SessionMaintenanceSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeModelRoute {
+    provider_id: String,
+    name: String,
+    enabled: bool,
+    official_account: bool,
+    supports_auto_review: bool,
+    official_siwc: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeModelConfig {
-    routes: Vec<(String, String, bool, bool, bool)>,
+    routes: Vec<RuntimeModelRoute>,
     selected_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     model_reasoning_efforts_by_provider: std::collections::BTreeMap<
         String,
@@ -185,6 +195,12 @@ pub struct RuntimeModelConfig {
     manual_third_party_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     declared_official_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     upstream_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
+    upstream_speed_tiers_by_provider: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, model_catalog::ModelSpeedTiers>,
+    >,
+    model_ultrafast_by_provider:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
     default_model: String,
 }
 
@@ -197,11 +213,12 @@ impl RuntimeModelConfig {
                 .iter()
                 .zip(&config.profiles)
                 .all(|(route, profile)| {
-                    route.0 == profile.provider_id()
-                        && route.1 == profile.name
-                        && route.2 == profile.enabled
-                        && route.3 == profile.official_account
-                        && route.4 == profile.supports_auto_review
+                    route.provider_id == profile.provider_id()
+                        && route.name == profile.name
+                        && route.enabled == profile.enabled
+                        && route.official_account == profile.official_account
+                        && route.supports_auto_review == profile.supports_auto_review
+                        && route.official_siwc == profile.official_siwc
                 })
             && self.selected_models_by_provider == config.selected_models_by_provider
             && self.model_context_by_provider == config.model_context_by_provider
@@ -212,6 +229,8 @@ impl RuntimeModelConfig {
             && self.declared_official_models_by_provider
                 == config.declared_official_models_by_provider
             && self.upstream_models_by_provider == config.upstream_models_by_provider
+            && self.upstream_speed_tiers_by_provider == config.upstream_speed_tiers_by_provider
+            && self.model_ultrafast_by_provider == config.model_ultrafast_by_provider
             && self.default_model == config.default_model
     }
 
@@ -220,14 +239,13 @@ impl RuntimeModelConfig {
             routes: config
                 .profiles
                 .iter()
-                .map(|profile| {
-                    (
-                        profile.provider_id().to_string(),
-                        profile.name.clone(),
-                        profile.enabled,
-                        profile.official_account,
-                        profile.supports_auto_review,
-                    )
+                .map(|profile| RuntimeModelRoute {
+                    provider_id: profile.provider_id().to_owned(),
+                    name: profile.name.clone(),
+                    enabled: profile.enabled,
+                    official_account: profile.official_account,
+                    supports_auto_review: profile.supports_auto_review,
+                    official_siwc: profile.official_siwc,
                 })
                 .collect(),
             selected_models_by_provider: config.selected_models_by_provider.clone(),
@@ -240,6 +258,8 @@ impl RuntimeModelConfig {
                 .declared_official_models_by_provider
                 .clone(),
             upstream_models_by_provider: config.upstream_models_by_provider.clone(),
+            upstream_speed_tiers_by_provider: config.upstream_speed_tiers_by_provider.clone(),
+            model_ultrafast_by_provider: config.model_ultrafast_by_provider.clone(),
             default_model: config.default_model.clone(),
         }
     }
@@ -287,6 +307,8 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
+    context_budgets: model_catalog::RuntimeContextBudgets,
+    context_budget_restart_required: AtomicBool,
     applied_model_config: RwLock<AppliedModelConfig>,
     applied_subagent_config: RwLock<Arc<RuntimeSubagentConfig>>,
     subagent_restart_config: RwLock<Option<RuntimeSubagentConfig>>,
@@ -582,6 +604,7 @@ struct StartupModelCatalog {
 struct PreparedProviderState {
     runtime_config: CodeyConfig,
     runtime_config_overrides: Vec<String>,
+    context_budgets: model_catalog::RuntimeContextBudgets,
 }
 
 fn route_subagent_model(
@@ -623,9 +646,9 @@ fn route_subagent_model(
 fn should_install_codey_model_catalog(
     official_only: bool,
     catalog_available: bool,
-    custom_context: bool,
+    needs_route_metadata: bool,
 ) -> bool {
-    (!official_only || custom_context) && catalog_available
+    (!official_only || needs_route_metadata) && catalog_available
 }
 
 fn router_subagent_runtime_config(
@@ -766,6 +789,7 @@ async fn prepare_startup_model_catalog(
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
     let runtime_image_detail_original_models = config.runtime_image_detail_original_model_aliases();
     let runtime_model_reasoning_efforts = config.runtime_model_reasoning_efforts();
+    let mut runtime_speed_tiers = config.runtime_model_speed_tiers();
     let runtime_model_contexts = config.runtime_model_contexts();
     let runtime_plugin_model_contexts = config.runtime_plugin_model_contexts();
     let runtime_display_names = config.runtime_catalog_display_names();
@@ -828,6 +852,7 @@ async fn prepare_startup_model_catalog(
                     contexts: &runtime_model_contexts,
                     reasoning_efforts: &runtime_model_reasoning_efforts,
                     display_names: &runtime_display_names,
+                    speed_tiers: Some(&runtime_speed_tiers),
                 },
                 &catalog_codex_app_path,
             );
@@ -841,6 +866,11 @@ async fn prepare_startup_model_catalog(
                 )
                 .and_then(|available| {
                     if available {
+                        model_catalog::resolve_native_speed_declarations(
+                            &catalog_home,
+                            &model_catalog::CatalogContext::new(&catalog_codex_app_path),
+                            &mut runtime_speed_tiers,
+                        );
                         model_catalog::apply_catalog_overrides(
                             &catalog_home,
                             model_catalog::CatalogOverrides {
@@ -848,6 +878,7 @@ async fn prepare_startup_model_catalog(
                                 contexts: &runtime_model_contexts,
                                 reasoning_efforts: &runtime_model_reasoning_efforts,
                                 display_names: &runtime_display_names,
+                                speed_tiers: Some(&runtime_speed_tiers),
                             },
                         )?;
                     }
@@ -937,8 +968,7 @@ async fn prepare_startup_model_catalog(
             false
         }
     };
-    // Official-only launches inherit Codex metadata unless the user explicitly
-    // configured a budget, in which case the generated catalog must be used.
+    // Codex 根据启动目录决定请求能携带哪些速度档位，单官方账号也需要自己的声明。
     if custom_context && !catalog_available_for_runtime {
         return Err(model_catalog::ContextBudgetCatalogError(anyhow::anyhow!(
             model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE
@@ -951,7 +981,11 @@ async fn prepare_startup_model_catalog(
     let use_official_catalog = should_install_codey_model_catalog(
         use_builtin_official_catalog,
         catalog_available_for_runtime,
-        custom_context,
+        custom_context
+            || config.needs_route_speed_catalog()
+            || (use_builtin_official_catalog
+                && catalog_available_for_runtime
+                && model_catalog::catalog_has_official_context_default(home)),
     );
     let model_state = match selection_result {
         Ok(state) => state,
@@ -1008,7 +1042,7 @@ async fn prepare_codex_startup_state(
     let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
     let subagent_roles = runtime_roles_config.subagent_roles.clone();
     let runtime_config = tokio::task::spawn_blocking(move || {
-        apply_runtime_router_config(
+        let applied = apply_runtime_router_config(
             &runtime_config_home,
             RuntimeRouterConfigOptions {
                 local_router: Some(&runtime_local_router),
@@ -1025,7 +1059,19 @@ async fn prepare_codex_startup_state(
                 scope_guard,
                 stream_max_retries,
             },
-        )
+        )?;
+        let context_budgets = model_catalog::RuntimeContextBudgets::from_catalog(
+            &runtime_config_home,
+            &runtime_subagent_config,
+            applied.model_catalog_path.as_deref(),
+            applied.global_context_budget,
+        )?;
+        runtime_subagent_config.fast_context_tools = applied.fast_context_tools_active;
+        Ok::<_, anyhow::Error>(PreparedProviderState {
+            runtime_config: runtime_subagent_config,
+            runtime_config_overrides: applied.runtime_config_overrides,
+            context_budgets,
+        })
     })
     .await
     .map_err(|error| {
@@ -1044,7 +1090,7 @@ async fn prepare_codex_startup_state(
         );
         error
     })?;
-    let applied = runtime_config.map_err(|error| {
+    runtime_config.map_err(|error| {
         error_log::record_failure(
             "patch_failed",
             "apply_runtime_router_config",
@@ -1057,11 +1103,6 @@ async fn prepare_codex_startup_state(
             }),
         );
         error
-    })?;
-    runtime_subagent_config.fast_context_tools = applied.fast_context_tools_active;
-    Ok(PreparedProviderState {
-        runtime_config: runtime_subagent_config,
-        runtime_config_overrides: applied.runtime_config_overrides,
     })
 }
 
@@ -1964,7 +2005,7 @@ async fn prepare_native_runtime_state(
                 remote_compaction_models: None,
                 use_official_catalog: false,
                 model_contexts: None,
-                required_catalog_models: &[],
+                required_catalog_models: &Default::default(),
                 default_model: None,
                 fast_context_tools,
                 subagent_optimization,
@@ -1985,6 +2026,7 @@ async fn prepare_native_runtime_state(
     Ok(PreparedProviderState {
         runtime_config,
         runtime_config_overrides: applied.runtime_config_overrides,
+        context_budgets: Default::default(),
     })
 }
 
@@ -2206,6 +2248,21 @@ impl CodeyRuntime {
 
     pub async fn applied_model_config(&self) -> Arc<RuntimeModelConfig> {
         Arc::clone(&self.applied_model_config.read().await.snapshot)
+    }
+
+    pub(crate) fn context_budget_requires_restart(&self) -> bool {
+        self.context_budget_restart_required.load(Ordering::Acquire)
+    }
+
+    /// 仅正向目录应用更新待重启状态；回滚和页面重连不改变预算基线。
+    pub(crate) fn apply_renderer_context_budgets(&self, catalog: &mut serde_json::Value) {
+        let changed = self.context_budgets.pin_renderer_catalog(catalog);
+        self.context_budget_restart_required
+            .store(changed, Ordering::Release);
+    }
+
+    pub(crate) fn pin_renderer_context_budgets(&self, catalog: &mut serde_json::Value) {
+        self.context_budgets.pin_renderer_catalog(catalog);
     }
 
     pub async fn applied_model_catalog_config(&self) -> CodeyConfig {
@@ -2463,6 +2520,7 @@ impl CodeyRuntime {
         let PreparedProviderState {
             runtime_config,
             runtime_config_overrides,
+            context_budgets,
         } = match prepared_provider_state {
             Ok(state) => state,
             Err(error) => {
@@ -2562,6 +2620,8 @@ impl CodeyRuntime {
             Self {
                 codex_app_path: app_dir,
                 maintenance,
+                context_budgets,
+                context_budget_restart_required: AtomicBool::new(false),
                 applied_model_config: RwLock::new(AppliedModelConfig::new(runtime_config.clone())),
                 applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(
                     &runtime_config,

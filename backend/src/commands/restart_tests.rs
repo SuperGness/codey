@@ -360,6 +360,7 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
         third_party_model_metadata: Vec::new(),
         manual_third_party_models: vec!["provider-fast-coder".into()],
         upstream_models: vec!["provider-fast-coder".into()],
+        synced_ultrafast_models: Vec::new(),
         default_model: "gpt-5.6-sol".into(),
     };
 
@@ -497,6 +498,13 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
     config.profiles[0].auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
     config.profiles[0].short_name.clear();
     config.profiles[0].normalize();
+    config.upstream_speed_tiers_by_provider.insert(
+        "openai".into(),
+        BTreeMap::from([(
+            "gpt-5.6-sol".into(),
+            model_catalog::ModelSpeedTiers::default(),
+        )]),
+    );
     let model_state = model_catalog::ModelSelectionState {
         official_models: vec![model_catalog::OfficialModelAvailability {
             slug: "gpt-5.6-sol".into(),
@@ -533,6 +541,8 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
             "model_display_name": "gpt-5.6-sol",
             "supported_reasoning_efforts": ["low", "medium"],
             "default_reasoning_effort": "low",
+            "service_tiers": [{"id":"priority", "name":"Fast", "description":"1.5x speed, increased usage"}],
+            "additional_speed_tiers": ["fast"],
         })
     );
 }
@@ -816,6 +826,54 @@ fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_ro
             &capability_change
         ));
     }
+}
+
+#[test]
+fn speed_declarations_hot_reload_the_picker_and_keep_existing_threads_pending() {
+    let mut route = crate::config::ProviderProfile::new("Relay");
+    route.id = "relay".into();
+    route.base_url = "https://relay.example/v1".into();
+    let applied = CodeyConfig {
+        active_profile_id: route.id.clone(),
+        profiles: vec![route],
+        selected_models_by_provider: BTreeMap::from([("relay".into(), vec!["gpt-6-astra".into()])]),
+        ..CodeyConfig::default()
+    };
+    let mut updated = applied.clone();
+    updated.model_ultrafast_by_provider.insert(
+        "relay".into(),
+        BTreeMap::from([("gpt-6-astra".into(), true)]),
+    );
+    assert!(runtime_supports_current_routes_for_hot_reload(
+        &applied, &updated
+    ));
+    assert!(config_requires_restart_with_route_status(
+        false, &applied, &updated
+    ));
+    let mut declared = applied.clone();
+    let tiers = model_catalog::ModelSpeedTiers::from_model(&json!({
+        "service_tiers": [{"id":"ultrafast","name":"New name","description":"From upstream"}]
+    }))
+    .unwrap();
+    declared.upstream_speed_tiers_by_provider.insert(
+        "relay".into(),
+        BTreeMap::from([("gpt-6-astra".into(), tiers)]),
+    );
+    assert!(!config_requires_restart_with_route_status(
+        false, &updated, &declared
+    ));
+    assert!(config_requires_restart_with_route_status(
+        false, &declared, &applied
+    ));
+    let mut extra = declared.clone();
+    extra
+        .selected_models_by_provider
+        .get_mut("relay")
+        .unwrap()
+        .push("model-b".into());
+    assert!(!config_requires_restart_with_route_status(
+        false, &declared, &extra
+    ));
 }
 
 #[test]
@@ -1237,4 +1295,63 @@ fn misc_model_hot_reloads_when_input_relay_was_installed_at_launch() {
     let mut direct_set = direct_no_relay.clone();
     direct_set.misc_model = format!("{provider_id}/m1");
     assert!(config_requires_restart(&direct_no_relay, &direct_set));
+}
+
+#[tokio::test]
+async fn official_catalog_budget_drift_requires_restart_without_config_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let mut profile = ProviderProfile::new("Official");
+    profile.source_provider_id = Some("openai".into());
+    profile.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    profile.normalize();
+    let selected = BTreeMap::from([("openai".into(), vec!["gpt-5.6-sol".into()])]);
+    let config = CodeyConfig {
+        local_router_enabled: true,
+        official_account_available_this_launch: true,
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        selected_models_by_provider: selected.clone(),
+        upstream_models_by_provider: selected,
+        ..Default::default()
+    }
+    .normalize();
+    let path = home.path().join(model_catalog::relative_path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"models": [{
+            "slug": "gpt-5.6-sol", "context_window": 400000,
+            "auto_compact_token_limit": 240000, "effective_context_window_percent": 95,
+            "description": "Official", "base_instructions": "Instructions",
+            "codey_context_source": "official_catalog"
+        }]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let runtime = Arc::new(
+        CodeyRuntime::for_model_delivery_test(config.clone(), "", None)
+            .with_context_budgets_for_test(home.path(), Some(&path)),
+    );
+    let state = Arc::new(AppState {
+        config: tokio::sync::RwLock::new(config.clone()),
+        runtime: tokio::sync::Mutex::new(Some(Arc::clone(&runtime))),
+        ..Default::default()
+    });
+    assert!(!runtime_config_requires_restart(&state, &config).await);
+    let mut catalog = json!({"model_metadata": [{
+        "model": "gpt-5.6-sol", "context_window": 400000,
+        "route_provider_id": "openai", "upstream_model": "gpt-5.6-sol", "official_account": true,
+        "auto_compact_token_limit": 360000, "effective_context_window_percent": 95,
+        "codey_context_source": "official_catalog"
+    }]});
+    runtime.apply_renderer_context_budgets(&mut catalog);
+    runtime.mark_model_config_applied(&config).await;
+    std::fs::remove_file(&path).unwrap();
+    for _ in 0..3 {
+        assert!(runtime_config_requires_restart(&state, &config).await);
+        assert_eq!(
+            runtime_status(&state).await.unwrap()["restartRequired"],
+            true
+        );
+    }
 }

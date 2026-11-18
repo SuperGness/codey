@@ -979,6 +979,7 @@ fn deleting_a_route_falls_back_global_default_and_dependent_subagent_roles() {
             "route-b".into(),
             vec!["model-b".into(), "gpt-5.6-terra".into()],
         )]),
+        upstream_speed_tiers_by_provider: BTreeMap::from([("route-b".into(), BTreeMap::new())]),
         default_model: "route-b/model-b".into(),
         subagent_model: "route-b/model-b".into(),
         subagent_reasoning_effort: "high".into(),
@@ -1010,6 +1011,11 @@ fn deleting_a_route_falls_back_global_default_and_dependent_subagent_roles() {
             .contains_key("route-b")
     );
     assert!(!next.upstream_models_by_provider.contains_key("route-b"));
+    assert!(
+        !next
+            .upstream_speed_tiers_by_provider
+            .contains_key("route-b")
+    );
 
     let valid_aliases = next
         .runtime_model_targets()
@@ -1392,7 +1398,9 @@ async fn startup_model_sync_does_not_publish_memory_when_persistence_fails() {
     let mut next = latest.clone();
     let provider_id = next.current_provider_id().unwrap().to_string();
     next.upstream_models_by_provider
-        .insert(provider_id, vec!["provider-new".into()]);
+        .insert(provider_id.clone(), vec!["provider-new".into()]);
+    next.upstream_speed_tiers_by_provider
+        .insert(provider_id, BTreeMap::new());
     let state = Arc::new(AppState {
         store: crate::config::ConfigStore::new(directory.path()),
         config: tokio::sync::RwLock::new(latest.clone()),
@@ -1403,6 +1411,43 @@ async fn startup_model_sync_does_not_publish_memory_when_persistence_fails() {
 
     assert_eq!(committed, latest);
     assert_eq!(*state.config.read().await, latest);
+}
+
+#[tokio::test]
+async fn startup_speed_declarations_are_committed_and_reloaded_with_model_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    let latest = CodeyConfig::default();
+    let mut next = latest.clone();
+    let provider_id = next.current_provider_id().unwrap().to_string();
+    next.upstream_models_by_provider
+        .insert(provider_id.clone(), vec!["future-model".into()]);
+    next.upstream_speed_tiers_by_provider.insert(
+        provider_id,
+        BTreeMap::from([(
+            "future-model".into(),
+            model_catalog::ModelSpeedTiers::from_model(
+                &json!({"additional_speed_tiers":["future"]}),
+            )
+            .unwrap(),
+        )]),
+    );
+    let state = Arc::new(AppState {
+        store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+        config: tokio::sync::RwLock::new(latest.clone()),
+        ..AppState::default()
+    });
+    let committed = commit_startup_model_sync(&state, latest, next, true).await;
+    let restored = state.store.load().unwrap();
+    assert!(!restored.upstream_speed_tiers_by_provider.is_empty());
+    assert_eq!(
+        restored.upstream_speed_tiers_by_provider,
+        committed.upstream_speed_tiers_by_provider
+    );
+    assert_eq!(
+        restored.upstream_models_by_provider,
+        committed.upstream_models_by_provider
+    );
+    assert_eq!(*state.config.read().await, committed);
 }
 
 #[tokio::test]
@@ -1503,6 +1548,7 @@ fn renderer_catalog_routes_every_model_through_the_codey_router_carrier() {
         third_party_model_metadata: Vec::new(),
         manual_third_party_models: Vec::new(),
         upstream_models: Vec::new(),
+        synced_ultrafast_models: Vec::new(),
         default_model: "gpt-5.6-sol".into(),
     };
 
@@ -1614,6 +1660,7 @@ fn renderer_catalog_qualifies_official_models_for_every_stored_account() {
         third_party_model_metadata: Vec::new(),
         manual_third_party_models: Vec::new(),
         upstream_models: Vec::new(),
+        synced_ultrafast_models: Vec::new(),
         default_model: "gpt-5.6-sol".into(),
     };
 

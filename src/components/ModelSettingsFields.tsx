@@ -14,7 +14,7 @@ import {
   reasoningEffortsEqual,
 } from "../modelReasoningEfforts";
 import { ModelContextWindowCombobox } from "./ModelContextWindowCombobox";
-import { Checkbox, Input } from "./ui";
+import { Checkbox, Input, Switch } from "./ui";
 
 export type ModelSettingsReasoningProps = {
   autoEfforts: readonly ModelReasoningEffort[];
@@ -30,6 +30,11 @@ export type ModelSettingsFieldsProps = {
   onChange: (policy: ModelContextConfig | undefined) => void;
   policy?: ModelContextConfig;
   reasoning?: ModelSettingsReasoningProps;
+  ultrafast?: {
+    synced: boolean;
+    override?: boolean;
+    onChange?: (value: boolean | undefined) => void;
+  };
 };
 
 type TokenKInputProps = {
@@ -82,13 +87,14 @@ export function TokenKInput({
   );
 }
 
-/// 单个模型的上下文预算与思考强度声明。
+/// 单个模型的上下文预算、思考强度和速度档位。
 export function ModelSettingsFields({
   disabled,
   model,
   onChange,
   policy,
   reasoning,
+  ultrafast,
 }: ModelSettingsFieldsProps) {
   const selectedLevels = new Set(
     (reasoning?.efforts ?? []).map((effort) => effort.level),
@@ -113,6 +119,9 @@ export function ModelSettingsFields({
   }
   if (!followsTemplate && declaredLevels.length > 0) {
     summaryBadges.push(declaredLevels.join(" / "));
+  }
+  if (ultrafast?.override !== undefined) {
+    summaryBadges.push(ultrafast.override ? "显示 Ultrafast" : "隐藏 Ultrafast");
   }
 
   const toggleLevel = (level: string, checked: boolean) => {
@@ -279,6 +288,28 @@ export function ModelSettingsFields({
             <p className="mt-2 text-[10px] leading-relaxed text-[var(--codey-subtle,#86868b)]">
               勾选该模型支持的思考强度，档位名称即发送给上游的取值。未声明时跟随上游模板自动适配，保存后立即生效。
             </p>
+          </div>
+        )}
+        {ultrafast && (
+          <div className="mt-3 flex items-center justify-between gap-2 border-t border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 pt-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium text-[var(--codey-text-soft,#4b5563)]">显示 Ultrafast</span>
+              {ultrafast.override === undefined && (
+                <span className="text-[10px] text-[var(--codey-subtle,#86868b)]">跟随同步目录</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {ultrafast.onChange && ultrafast.override !== undefined && (
+                <button type="button" disabled={disabled} onClick={() => ultrafast.onChange?.(undefined)}
+                  className="text-[10px] font-medium text-[var(--codey-blue,#007aff)] hover:underline disabled:opacity-40">
+                  恢复跟随目录
+                </button>
+              )}
+              <Switch size="sm" aria-label={`${model} 显示 Ultrafast`}
+                checked={ultrafast.override ?? ultrafast.synced}
+                disabled={disabled || !ultrafast.onChange}
+                onCheckedChange={ultrafast.onChange} />
+            </div>
           </div>
         )}
       </div>

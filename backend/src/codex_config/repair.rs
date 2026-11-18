@@ -736,7 +736,7 @@ mod tests {
             RouterApplyOptions {
                 remote_compaction_models: Some(&[DEFAULT_SUBAGENT_MODEL.to_string()]),
                 model_contexts: None,
-                required_catalog_models: &[],
+                required_catalog_models: &Default::default(),
                 stream_max_retries: 5,
                 local_router,
                 use_official_catalog: false,

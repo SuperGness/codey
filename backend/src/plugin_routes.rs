@@ -346,6 +346,8 @@ fn forget_removed(config: &mut CodeyConfig, provider_ids: &[String]) {
             .declared_official_models_by_provider
             .remove(provider_id);
         config.upstream_models_by_provider.remove(provider_id);
+        config.upstream_speed_tiers_by_provider.remove(provider_id);
+        config.model_ultrafast_by_provider.remove(provider_id);
     }
 }
 
@@ -394,7 +396,15 @@ mod tests {
                 .map(Vec::as_slice),
             Some(["demo-model".to_string()].as_slice())
         );
+        config
+            .upstream_speed_tiers_by_provider
+            .insert(provider_id.clone(), BTreeMap::new());
         release(&mut config, "dev.example");
+        assert!(
+            !config
+                .upstream_speed_tiers_by_provider
+                .contains_key(&provider_id)
+        );
         assert!(config.profiles.iter().all(|profile| profile.id != id));
         assert!(
             !config
@@ -468,6 +478,10 @@ mod tests {
         config
             .selected_models_by_provider
             .insert(provider_id.clone(), vec!["kept-model".into()]);
+        config.model_ultrafast_by_provider.insert(
+            provider_id.clone(),
+            BTreeMap::from([("gpt-6-astra".into(), true)]),
+        );
         let mut next = spec("https://relay.example/v2");
         next.models = vec!["demo-model".into(), "other-model".into()];
         upsert(&mut config, "dev.example", next, false).unwrap();
@@ -477,6 +491,7 @@ mod tests {
             .find(|profile| profile.id == id)
             .unwrap();
         assert_eq!(profile.normalized_base_url(), "https://relay.example/v2");
+        assert!(config.model_ultrafast_by_provider[&provider_id]["gpt-6-astra"]);
         assert_eq!(
             config
                 .selected_models_by_provider

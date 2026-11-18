@@ -16,6 +16,7 @@ pub async fn save_selected_models(
         BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
     >,
     requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
+    requested_model_ultrafast: Option<BTreeMap<String, bool>>,
 ) -> Result<Value, String> {
     let mut timings = ModelOperationTimings::new("save_selected_models");
     validate_requested_model_list_bounds("官方模型", &requested_official_models)?;
@@ -33,6 +34,9 @@ pub async fn save_selected_models(
     validate_regular_route_model_list("手动添加的其他模型", &requested_manual_third_party_models)?;
     validate_regular_route_model_list("待删除的其他模型", &requested_deleted_third_party_models)?;
     if !state.config.read().await.local_router_enabled {
+        if requested_model_ultrafast.is_some() {
+            return Err("配置 Ultrafast 需要启用本地路由".into());
+        }
         return save_native_selected_models(
             state,
             requested_official_models,
@@ -125,6 +129,31 @@ pub async fn save_selected_models(
         requested_model_reasoning_efforts.as_ref(),
         &supported_models,
     )?;
+    if let Some(requested) = requested_model_ultrafast {
+        validate_requested_model_list_bounds(
+            "Ultrafast 模型",
+            &requested.keys().cloned().collect::<Vec<_>>(),
+        )?;
+        let available = supported_models
+            .iter()
+            .map(|model| model_id::key(model))
+            .collect::<HashSet<_>>();
+        let mut overrides = BTreeMap::new();
+        for (model, enabled) in requested {
+            let key = model_id::key(&model);
+            if !crate::config::can_configure_ultrafast(&key) || !available.contains(&key) {
+                return Err(format!("模型 {model} 不支持配置 Ultrafast"));
+            }
+            if overrides.insert(key, enabled).is_some() {
+                return Err(format!("模型 {model} 的 Ultrafast 设置重复"));
+            }
+        }
+        config
+            .model_ultrafast_by_provider
+            .insert(provider_id.clone(), overrides);
+    } else if let Some(overrides) = config.model_ultrafast_by_provider.get_mut(&provider_id) {
+        overrides.retain(|model, _| !deleted_third_party_model_keys.contains(model));
+    }
     config
         .upstream_models_by_provider
         .insert(provider_id.clone(), supported_models);

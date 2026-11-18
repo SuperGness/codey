@@ -119,6 +119,25 @@ fn runtime_config_matches_agrees_with_from_config_equality() {
     assert!(!models.matches(&changed));
 
     let mut changed = applied.clone();
+    changed.model_ultrafast_by_provider.insert(
+        "relay".into(),
+        std::collections::BTreeMap::from([("gpt-6-astra".into(), true)]),
+    );
+    assert!(!models.matches(&changed));
+    let mut changed = applied.clone();
+    changed.upstream_speed_tiers_by_provider.insert(
+        "openai".into(),
+        std::collections::BTreeMap::from([(
+            "gpt-6-astra".into(),
+            model_catalog::ModelSpeedTiers {
+                additional_speed_tiers: vec!["ultrafast".into()],
+                ..Default::default()
+            },
+        )]),
+    );
+    assert!(!models.matches(&changed));
+
+    let mut changed = applied.clone();
     changed.profiles.push(changed.profiles[0].clone());
     assert!(!models.matches(&changed));
 

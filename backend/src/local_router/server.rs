@@ -1104,6 +1104,9 @@ impl RouterSnapshot {
         let mut default_official_provider = None;
         let mut default_official_rank = None;
         let mut official_store = None;
+        let user_speed_tiers = std::cell::LazyCell::new(|| {
+            crate::model_catalog::user_catalog_model_speed_tiers(crate::codex_config::codex_home())
+        });
         for profile in config.runtime_profiles() {
             let provider_id = profile.provider_id().trim();
             // 凭据平面先于上游地址决定：SIWC 直连时对话走官方公开 API，
@@ -1168,20 +1171,35 @@ impl RouterSnapshot {
                     && config.route_supports_remote_compaction_this_launch(profile),
                 remote_compaction_protocol: profile.remote_compaction_protocol,
                 models: HashSet::new(),
+                model_speed_tiers: config
+                    .upstream_speed_tiers_by_provider
+                    .get(provider_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                model_ultrafast: config
+                    .model_ultrafast_by_provider
+                    .get(provider_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 websocket_config: [0; 32],
                 context_config: [0; 32],
             };
             target.context_config = target.context_config_fingerprint();
             target.websocket_config = target.websocket_config_fingerprint();
             for model in config.routable_profile_models(profile) {
+                let alias = model_id::key(&model_alias(provider_id, &model));
+                if protocol != UpstreamProtocol::OpenAiResponses
+                    && let std::collections::btree_map::Entry::Vacant(entry) =
+                        target.model_speed_tiers.entry(model_id::key(&model))
+                    && let Some(tiers) = user_speed_tiers.get(&alias)
+                {
+                    entry.insert(tiers.clone());
+                }
                 let alias_target = AliasTarget {
                     provider_id: provider_id.to_string(),
                     model: model.clone(),
                 };
-                aliases.insert(
-                    model_id::key(&model_alias(provider_id, &model)),
-                    alias_target.clone(),
-                );
+                aliases.insert(alias, alias_target.clone());
                 raw_models
                     .entry(model_id::key(&model))
                     .or_default()
@@ -1648,6 +1666,8 @@ pub(crate) struct RouteTarget {
     pub(crate) supports_remote_compaction: bool,
     pub(crate) remote_compaction_protocol: crate::config::RemoteCompactionProtocol,
     pub(crate) models: HashSet<String>,
+    pub(crate) model_speed_tiers: BTreeMap<String, crate::model_catalog::ModelSpeedTiers>,
+    pub(crate) model_ultrafast: BTreeMap<String, bool>,
     pub(crate) websocket_config: [u8; 32],
     pub(crate) context_config: [u8; 32],
 }

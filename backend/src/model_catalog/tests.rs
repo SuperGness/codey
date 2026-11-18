@@ -153,6 +153,7 @@ fn catalog_operation_reuses_runtime_resolution_across_refresh_and_state_reads() 
             contexts: &BTreeMap::new(),
             reasoning_efforts: &BTreeMap::new(),
             display_names: &BTreeMap::new(),
+            speed_tiers: None,
         },
         &context,
     )
@@ -431,159 +432,249 @@ fn account_merge_excludes_old_runtime_templates_but_preserves_official_cache() {
 }
 
 #[test]
-fn account_snapshot_ultrafast_follows_the_two_x_fast_family() {
+fn new_models_and_official_aliases_follow_their_declared_tiers() {
     let home = tempfile::tempdir().unwrap();
     write_cache(home.path());
-    let snapshot = json!({
-        "codey_account_snapshot": true,
-        "codey_runtime_source": catalog_source_for_app(""),
-        "models": [
-            {
-                "slug": "gpt-6.1-sol",
-                "display_name": "GPT-6.1-Sol",
-                "visibility": "list",
-                "description": "GPT-6.1-Sol"
-            },
-            {
-                "slug": "gpt-6-astra",
-                "display_name": "GPT-6-Astra",
-                "visibility": "list",
-                "description": "GPT-6-Astra"
-            },
-            {
-                "slug": "gpt-5.6-sol",
-                "display_name": "GPT-5.6-Sol",
-                "visibility": "list",
-                "description": "GPT-5.6-Sol"
-            }
-        ]
-    });
-    fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
-    fs::write(
-        home.path().join(DEBUG_CATALOG_RELATIVE_PATH),
-        serde_json::to_vec(&snapshot).unwrap(),
-    )
-    .unwrap();
-
-    refresh_for_provider(home.path(), true, None, &[]).unwrap();
-
-    let catalog: Value =
-        serde_json::from_slice(&fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap())
-            .unwrap();
-    let models = catalog["models"].as_array().unwrap();
-    for slug in ["gpt-6.1-sol", "gpt-6-astra"] {
-        let Some(model) = models.iter().find(|model| model["slug"] == slug) else {
-            panic!("目录里缺少 {slug}");
-        };
-        // Fast 仍是第一档，Ultrafast 追加在它后面，选择器的默认顺序不变。
-        assert_eq!(model["service_tiers"][0]["id"], FAST_SERVICE_TIER_ID);
+    let future_tier =
+        json!({"id": "future-tier", "name": "Future", "description": "New tier", "cost": 3});
+    let native_ultrafast =
+        json!({"id": "ultrafast", "name": "Express", "description": "From upstream"});
+    let models = [
+        json!({"slug": "next-sol", "service_tiers": [future_tier, native_ultrafast], "default_service_tier": "future-tier"}),
+        json!({"slug": "speed-only", "additional_speed_tiers": ["fast", "ultrafast", "future-speed"]}),
+        json!({"slug": "default-only", "default_service_tier": "ultrafast"}),
+        json!({"slug": "minimal-tier", "service_tiers": [{"id": "new-tier", "credits": 4}]}),
+        json!({"slug": "fast-only", "service_tiers": [{"id": "priority", "description": "2x speed"}]}),
+        json!({"slug": "future-sol"}),
+    ];
+    merge_account_runtime_models(home.path(), &models, "").unwrap();
+    let selected = [
+        "next-sol",
+        "codey-official-account-a/next-sol",
+        "speed-only",
+        "default-only",
+        "minimal-tier",
+        "fast-only",
+        "future-sol",
+        "relay/next-sol",
+    ]
+    .map(str::to_owned);
+    refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+    let saved = read_runtime_catalog_models(home.path()).unwrap();
+    let entry = |slug: &str| saved.iter().find(|model| model["slug"] == slug).unwrap();
+    for slug in ["next-sol", "codey-official-account-a/next-sol"] {
+        let model = entry(slug);
+        assert_eq!(model["service_tiers"][0], future_tier);
+        assert_eq!(model["service_tiers"][1], native_ultrafast);
+        assert_eq!(model["default_service_tier"], "future-tier");
         assert_native_fast(model);
         assert_native_ultrafast(model);
     }
-    // 上游只按 1.5x 声明 Fast 的模型不会被顺带升级。
-    let sol56 = models
-        .iter()
-        .find(|model| model["slug"] == "gpt-5.6-sol")
-        .unwrap();
+    assert_native_ultrafast(entry("speed-only"));
+    assert_native_ultrafast(entry("default-only"));
+    assert_eq!(
+        entry("minimal-tier")["service_tiers"][0],
+        json!({
+            "id": "new-tier", "name": "new-tier", "description": "", "credits": 4
+        })
+    );
     assert!(
-        !sol56["service_tiers"]
+        entry("speed-only")["service_tiers"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|tier| tier["id"] == ULTRAFAST_SERVICE_TIER_ID)
+            .any(|tier| { tier["id"] == "future-speed" && tier["name"] == "future-speed" })
     );
-}
-
-#[test]
-fn route_alias_for_six_one_sol_keeps_ultrafast_speed() {
-    let home = tempfile::tempdir().unwrap();
-    let mut cache = official_cache();
-    cache["models"].as_array_mut().unwrap().push(json!({
-        "slug": "gpt-6.1-sol",
-        "display_name": "GPT-6.1-Sol",
-        "visibility": "list",
-        "priority": 0,
-        "default_reasoning_level": "low",
-        "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}],
-        "service_tiers": [{"id": "priority"}],
-        "additional_speed_tiers": ["fast"]
-    }));
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
-
-    let selection = vec!["route-x/gpt-6.1-sol".to_string()];
-    refresh_for_provider(home.path(), false, Some(&selection), &selection).unwrap();
-
-    let catalog: Value =
-        serde_json::from_slice(&fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap())
-            .unwrap();
-    let alias = catalog["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["slug"] == "route-x/gpt-6.1-sol")
-        .unwrap();
-    assert_native_fast(alias);
-    assert_native_ultrafast(alias);
-}
-
-#[test]
-fn ultrafast_speed_support_is_limited_to_the_two_x_fast_family() {
-    for slug in [
-        "gpt-6.1-sol",
-        "gpt-6.1-sol-wm",
-        "gpt-6.1-sol-priority",
-        "route-mu5dql1a/gpt-6.1-sol",
-        "my%20route/gpt-6.1-sol-wm",
-        "gpt-6-astra",
-        "gpt-6-astra-wm",
-        "codey-official-account-x/gpt-6-astra",
-    ] {
-        let model = json!({ "slug": slug });
-        assert!(supports_ultrafast_speed(&model), "{slug} 应支持 Ultrafast");
-    }
-    for slug in [
-        "gpt-5.6-sol",
-        "gpt-5.6-luna",
-        "gpt-6-sol",
-        "gpt-6-luna",
-        "gpt-6.1-sol2",
-        "gpt-6-astra2",
-        "route-x/gpt-6-astra-max",
-    ] {
-        let model = json!({ "slug": slug });
-        assert!(
-            !supports_ultrafast_speed(&model),
-            "{slug} 不应支持 Ultrafast"
-        );
-    }
-}
-
-#[test]
-fn ultrafast_speed_controls_keep_fast_first_and_stay_idempotent() {
-    let mut model = json!({
-        "slug": "gpt-6.1-sol",
-        "service_tiers": [{ "id": FAST_SERVICE_TIER_ID, "name": "Fast" }],
-        "additional_speed_tiers": [FAST_SPEED_TIER_ID]
-    });
-    add_ultrafast_speed_controls(&mut model);
-    add_ultrafast_speed_controls(&mut model);
-
-    let tiers = model["service_tiers"].as_array().unwrap();
-    assert_eq!(tiers.len(), 2);
-    assert_eq!(tiers[0]["id"], FAST_SERVICE_TIER_ID);
-    assert_eq!(tiers[1]["id"], ULTRAFAST_SERVICE_TIER_ID);
     assert_eq!(
-        model["additional_speed_tiers"],
-        json!([FAST_SPEED_TIER_ID, ULTRAFAST_SPEED_TIER_ID])
+        entry("speed-only")["additional_speed_tiers"],
+        json!(["fast", "ultrafast", "future-speed"])
     );
+    for slug in ["fast-only", "future-sol", "relay/next-sol"] {
+        assert_native_fast(entry(slug));
+        assert!(!declares_tier(
+            entry(slug),
+            ULTRAFAST_TIER_ID,
+            ULTRAFAST_TIER_ID
+        ));
+        assert!(entry(slug)["default_service_tier"].is_null());
+    }
+}
 
-    remove_ultrafast_speed_controls(&mut model);
-    assert_eq!(model["service_tiers"].as_array().unwrap().len(), 1);
-    assert_eq!(model["additional_speed_tiers"], json!([FAST_SPEED_TIER_ID]));
+#[test]
+fn synced_official_context_uses_the_models_own_declared_capacity() {
+    let home = tempfile::tempdir().unwrap();
+    let entries = [
+        json!({
+            "slug": "template-sol", "description": "Template", "base_instructions": "Instructions",
+            "context_window": 500_000, "max_context_window": 872_000,
+            "effective_context_window_percent": 95, "auto_compact_token_limit": 450_000
+        }),
+        json!({
+            "slug": "new-sol", "context_window": 272_000, "max_context_window": 872_000,
+            "auto_compact_token_limit": 244_800
+        }),
+        json!({"slug": "short-sol", "context_window": 272_000}),
+        json!({"slug": "unknown-sol"}),
+        json!({"slug": "max-only-sol", "max_context_window": 400_000}),
+        json!({"slug": "large-sol", "context_window": 1_000_000}),
+    ];
+    merge_account_runtime_models(home.path(), &entries, "").unwrap();
+    let selected = [
+        "template-sol",
+        "new-sol",
+        "short-sol",
+        "unknown-sol",
+        "codey-official-account-a/max-only-sol",
+        "codey-official-account-a/new-sol",
+        "relay/new-sol",
+        "large-sol",
+    ]
+    .map(str::to_owned);
+    refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+    let models = read_runtime_catalog_models(home.path()).unwrap();
+    let entry = |slug: &str| models.iter().find(|model| model["slug"] == slug).unwrap();
+    for slug in [
+        "template-sol",
+        "new-sol",
+        "codey-official-account-a/new-sol",
+    ] {
+        assert_eq!(entry(slug)["context_window"], 400_000, "{slug}");
+        assert_eq!(entry(slug)["max_context_window"], 872_000, "{slug}");
+        assert_eq!(entry(slug)["auto_compact_token_limit"], 360_000, "{slug}");
+    }
+    assert_eq!(
+        entry("template-sol")["effective_context_window_percent"],
+        95
+    );
+    assert_eq!(entry("short-sol")["context_window"], 272_000);
+    assert!(entry("short-sol")["max_context_window"].is_null());
+    assert!(entry("unknown-sol")["context_window"].is_null());
+    assert_eq!(entry("relay/new-sol")["context_window"], 272_000);
+    let max_only = entry("codey-official-account-a/max-only-sol");
+    assert_eq!(max_only["context_window"], 400_000);
+    assert_eq!(max_only["max_context_window"], 400_000);
+    assert_eq!(entry("large-sol")["context_window"], 400_000);
+    assert_eq!(entry("large-sol")["max_context_window"], 1_000_000);
+}
+
+#[test]
+fn a_new_speed_declaration_replaces_both_fields_of_the_previous_snapshot() {
+    let previous = json!({"slug": "release", "base_instructions": "instructions", "service_tiers": [{"id": "ultrafast"}], "additional_speed_tiers": ["ultrafast"], "default_service_tier": "ultrafast"});
+    for incoming in [
+        json!({"slug": "release", "service_tiers": []}),
+        json!({"slug": "release", "additional_speed_tiers": ["fast"]}),
+        json!({"slug": "another-release"}),
+    ] {
+        let model = merge_account_model(Some(&previous), &incoming, &[]);
+        assert!(!declares_tier(&model, ULTRAFAST_TIER_ID, ULTRAFAST_TIER_ID));
+        assert!(model["default_service_tier"].is_null());
+    }
+    let changed_default = merge_account_model(
+        Some(&previous),
+        &json!({"slug":"release", "default_service_tier":"priority"}),
+        &[],
+    );
+    assert!(!declares_tier(
+        &changed_default,
+        ULTRAFAST_TIER_ID,
+        ULTRAFAST_TIER_ID
+    ));
+    assert_eq!(changed_default["default_service_tier"], "priority");
+}
+
+#[test]
+fn a_previous_codey_catalog_cannot_declare_speed_tiers_for_an_account() {
+    let home = tempfile::tempdir().unwrap();
+    let context = CatalogContext::new("");
+    let model = json!({
+        "slug":"gpt-6-astra", "description":"Model", "base_instructions":"Fixture",
+        "service_tiers":[{"id":"ultrafast","name":"Ultrafast","description":"Fastest"}],
+        "additional_speed_tiers":["ultrafast"]
+    });
+    write_verified_catalog_in_context(home.path(), std::slice::from_ref(&model), &context).unwrap();
+    let resolve = || {
+        let mut policies = BTreeMap::from([("gpt-6-astra".into(), ModelSpeedPolicy::default())]);
+        resolve_native_speed_declarations(home.path(), &context, &mut policies);
+        policies["gpt-6-astra"]
+            .request_tiers()
+            .0
+            .contains("ultrafast")
+    };
+    assert!(!resolve());
+    merge_account_runtime_models_in_context(home.path(), &[model], &context).unwrap();
+    assert!(resolve());
+}
+
+#[test]
+fn route_overrides_can_be_removed_from_a_cached_catalog_without_losing_native_tiers() {
+    let home = tempfile::tempdir().unwrap();
+    write_cache(home.path());
+    let selected = [
+        "first/vendor/release",
+        "second/vendor/release",
+        "third/vendor/release",
+    ]
+    .map(str::to_owned);
+    refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+    let declared = ModelSpeedTiers::from_model(&json!({"service_tiers": [{"id": "ultrafast", "name": "Express"}, {"id": "future", "name": "Future"}]})).unwrap();
+    let mut policies = BTreeMap::from([
+        (
+            selected[0].clone(),
+            ModelSpeedPolicy {
+                tiers: Some(declared),
+                ultrafast: Some(true),
+            },
+        ),
+        (
+            selected[1].clone(),
+            ModelSpeedPolicy {
+                tiers: None,
+                ultrafast: Some(true),
+            },
+        ),
+    ]);
+    let apply = |policies: &BTreeMap<_, _>| {
+        apply_catalog_overrides(
+            home.path(),
+            CatalogOverrides {
+                plugin_contexts: &BTreeMap::new(),
+                contexts: &BTreeMap::new(),
+                reasoning_efforts: &BTreeMap::new(),
+                display_names: &BTreeMap::new(),
+                speed_tiers: Some(policies),
+            },
+        )
+        .unwrap();
+        read_runtime_catalog_models(home.path()).unwrap()
+    };
+    let models = apply(&policies);
+    assert_native_ultrafast(&models[0]);
+    assert_native_ultrafast(&models[1]);
+    assert!(!declares_tier(
+        &models[2],
+        ULTRAFAST_TIER_ID,
+        ULTRAFAST_TIER_ID
+    ));
+    assert_eq!(apply(&policies), models);
+    policies.get_mut(&selected[0]).unwrap().ultrafast = Some(false);
+    policies.remove(&selected[1]);
+    let models = apply(&policies);
+    assert!(!declares_tier(
+        &models[0],
+        ULTRAFAST_TIER_ID,
+        ULTRAFAST_TIER_ID
+    ));
+    assert!(declares_tier(&models[0], "future", "future"));
+    assert_native_fast(&models[1]);
+    assert!(!declares_tier(
+        &models[1],
+        ULTRAFAST_TIER_ID,
+        ULTRAFAST_TIER_ID
+    ));
+    policies.get_mut(&selected[0]).unwrap().ultrafast = None;
+    let models = apply(&policies);
+    assert_native_ultrafast(&models[0]);
+    assert_eq!(models[0]["service_tiers"][0]["name"], "Express");
 }
 
 #[test]
@@ -793,6 +884,7 @@ fn combined_catalog_refresh_preserves_staged_context_and_reasoning_results() {
         contexts: &contexts,
         reasoning_efforts: &efforts,
         display_names: &Default::default(),
+        speed_tiers: None,
     };
     staged_catalog_refresh(staged.path(), &selected, overrides);
     refresh_for_provider_with_contexts(
@@ -820,6 +912,7 @@ fn combined_catalog_refresh_preserves_staged_context_and_reasoning_results() {
             contexts: &contexts,
             reasoning_efforts: &no_efforts,
             display_names: &Default::default(),
+            speed_tiers: None,
         },
     )
     .unwrap();
@@ -860,6 +953,7 @@ fn route_display_names_replace_raw_route_ids_in_the_generated_catalog() {
             contexts: &Default::default(),
             reasoning_efforts: &Default::default(),
             display_names: &display_names,
+            speed_tiers: None,
         },
         "",
     )
@@ -881,6 +975,7 @@ fn route_display_names_replace_raw_route_ids_in_the_generated_catalog() {
             contexts: &Default::default(),
             reasoning_efforts: &Default::default(),
             display_names: &display_names,
+            speed_tiers: None,
         },
     )
     .unwrap();
@@ -923,6 +1018,7 @@ fn invalid_override_keeps_previous_catalog_for_generation_and_cached_updates() {
         contexts: &contexts,
         reasoning_efforts: &efforts,
         display_names: &Default::default(),
+        speed_tiers: None,
     };
     assert!(
         refresh_for_provider_with_contexts(
@@ -977,6 +1073,7 @@ fn benchmark_combined_catalog_refresh() {
         contexts: &contexts,
         reasoning_efforts: &efforts,
         display_names: &Default::default(),
+        speed_tiers: None,
     };
     let mut staged_us = Vec::new();
     let mut combined_us = Vec::new();
@@ -1154,9 +1251,9 @@ fn assert_native_fast(model: &Value) {
 
 fn assert_native_ultrafast(model: &Value) {
     assert!(
-        model["service_tiers"].as_array().is_some_and(|tiers| tiers
-            .iter()
-            .any(|tier| tier["id"] == ULTRAFAST_SERVICE_TIER_ID)),
+        model["service_tiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == ULTRAFAST_TIER_ID)),
         "{} 的 service_tiers 缺少 Ultrafast：{}",
         model["slug"],
         model["service_tiers"]
@@ -1164,7 +1261,7 @@ fn assert_native_ultrafast(model: &Value) {
     assert!(
         model["additional_speed_tiers"]
             .as_array()
-            .is_some_and(|tiers| tiers.iter().any(|tier| tier == ULTRAFAST_SPEED_TIER_ID)),
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == ULTRAFAST_TIER_ID)),
         "{} 的 additional_speed_tiers 缺少 Ultrafast：{}",
         model["slug"],
         model["additional_speed_tiers"]
@@ -2028,6 +2125,7 @@ fn catalog_overrides_do_not_restore_third_party_compaction_identity() {
         contexts: &contexts,
         reasoning_efforts: &empty_efforts,
         display_names: &display_names,
+        speed_tiers: None,
     };
     apply_overrides_to_models(&mut models, overrides).unwrap();
     assert!(models[0].get("comp_hash").is_none());
@@ -2848,7 +2946,7 @@ fn cold_start_replaces_stale_codey_fast_metadata() {
     let mut stale_catalog = official_cache();
     stale_catalog["codey_runtime_source"] = json!(catalog_source_for_app(""));
     for model in stale_catalog["models"].as_array_mut().unwrap() {
-        add_fast_speed_controls(model);
+        apply_model_speed_policy(model, None);
     }
     let catalog_path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
     fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
@@ -3508,7 +3606,7 @@ fn newer_snapshot_supersedes_a_stale_cache_entry() {
 
 #[cfg(test)]
 #[test]
-fn removing_context_override_restores_the_original_model_budget() {
+fn removing_context_override_restores_the_official_default_and_capacity() {
     let original = json!({
         "slug":"gpt-5.6-sol",
         "context_window":272000,
@@ -3535,6 +3633,7 @@ fn removing_context_override_restores_the_original_model_budget() {
                 contexts: overrides,
                 reasoning_efforts: &Default::default(),
                 display_names: &Default::default(),
+                speed_tiers: None,
             },
         )
         .unwrap();
@@ -3543,11 +3642,17 @@ fn removing_context_override_restores_the_original_model_budget() {
             assert_eq!(models[0]["auto_compact_token_limit"], 100_000);
         }
     }
+    assert_eq!(
+        models[0]["codey_context_base"]["context_window"],
+        original["context_window"]
+    );
+    let mut expected = original;
+    expected["context_window"] = json!(400_000);
     models[0]
         .as_object_mut()
         .unwrap()
         .remove("codey_context_base");
-    assert_eq!(models[0], original);
+    assert_eq!(models[0], expected);
 }
 
 #[cfg(test)]
@@ -3574,11 +3679,14 @@ fn custom_context_overlay_preserves_source_and_uses_immutable_versions() {
             reserve_output_tokens: Some(16_000),
         },
     )]);
-    let first = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
+    let first =
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap();
     assert_ne!(first, source);
     assert_eq!(
         first,
-        prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap()
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap()
     );
     let first_bytes = fs::read(&first).unwrap();
     let first_value: Value = serde_json::from_slice(&first_bytes).unwrap();
@@ -3590,18 +3698,28 @@ fn custom_context_overlay_preserves_source_and_uses_immutable_versions() {
         .get_mut("gpt-5.6-sol")
         .unwrap()
         .context_window_tokens = 400_000;
-    let second = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
+    let second =
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap();
     assert_ne!(first, second);
     assert_eq!(fs::read(&first).unwrap(), first_bytes);
     assert_eq!(
-        prepare_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &[]).unwrap(),
+        prepare_context_catalog_overlay(
+            home.path(),
+            &source,
+            &BTreeMap::new(),
+            &Default::default()
+        )
+        .unwrap(),
         source
     );
     assert_eq!(fs::read(&source).unwrap(), source_bytes);
     let mut updated = original;
     updated["models"][0]["base_instructions"] = json!("Updated by user");
     fs::write(&source, serde_json::to_vec(&updated).unwrap()).unwrap();
-    let third = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
+    let third =
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap();
     assert_ne!(second, third);
     let latest: Value = serde_json::from_slice(&fs::read(third).unwrap()).unwrap();
     assert_eq!(latest["models"][0]["base_instructions"], "Updated by user");
@@ -3650,7 +3768,9 @@ fn custom_context_overlay_supplements_exact_route_models_with_full_metadata() {
             reserve_output_tokens: Some(16_000),
         },
     )]);
-    let first = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
+    let first =
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap();
     let first_bytes = fs::read(&first).unwrap();
     let projected: Value = serde_json::from_slice(&first_bytes).unwrap();
     let mut expected = original.clone();
@@ -3670,7 +3790,8 @@ fn custom_context_overlay_supplements_exact_route_models_with_full_metadata() {
     );
     assert_eq!(
         first,
-        prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap()
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap()
     );
 
     runtime_model["base_instructions"] = json!("Updated Codey instructions");
@@ -3679,7 +3800,9 @@ fn custom_context_overlay_supplements_exact_route_models_with_full_metadata() {
         serde_json::to_vec(&json!({"models": [runtime_model]})).unwrap(),
     )
     .unwrap();
-    let second = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
+    let second =
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap();
     assert_ne!(first, second);
     assert_eq!(fs::read(&first).unwrap(), first_bytes);
     assert_eq!(fs::read(&source).unwrap(), source_bytes);
@@ -3716,7 +3839,7 @@ fn custom_context_overlay_prefers_source_without_reading_unneeded_fallback() {
         b"invalid runtime catalog".as_slice(),
     ] {
         fs::write(&runtime_path, fallback).unwrap();
-        let overlay = render_context_catalog_overlay(home.path(), &source, &policies, &[])
+        let overlay = render_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
             .unwrap()
             .unwrap();
         let projected: Value = serde_json::from_slice(&overlay).unwrap();
@@ -3769,7 +3892,8 @@ fn custom_context_overlay_rejects_missing_or_ambiguous_fallback_models() {
         let runtime_bytes = serde_json::to_vec(&catalog).unwrap();
         fs::write(&runtime_path, &runtime_bytes).unwrap();
         let error =
-            prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap_err();
+            prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+                .unwrap_err();
         assert!(error.is::<ContextBudgetCatalogError>());
         assert!(error.to_string().contains(message), "{error}");
         assert_eq!(fs::read(&source).unwrap(), original);
@@ -3811,7 +3935,8 @@ fn custom_context_overlay_rejects_missing_ambiguous_or_invalid_models() {
         let bytes = serde_json::to_vec(&catalog).unwrap();
         fs::write(&source, &bytes).unwrap();
         let error =
-            prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap_err();
+            prepare_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+                .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         assert_eq!(
             error.is::<ContextBudgetCatalogError>(),
@@ -3827,10 +3952,12 @@ fn custom_context_overlay_rejects_missing_ambiguous_or_invalid_models() {
         );
     }
     fs::write(&source, b"not json").unwrap();
-    let error = render_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap_err();
+    let error =
+        render_context_catalog_overlay(home.path(), &source, &policies, &Default::default())
+            .unwrap_err();
     assert!(!error.is::<ContextBudgetCatalogError>());
     assert!(
-        render_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &[])
+        render_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &Default::default())
             .unwrap()
             .is_none()
     );
@@ -3841,7 +3968,9 @@ fn custom_context_overlay_rejects_missing_ambiguous_or_invalid_models() {
         .get_mut("route/model")
         .unwrap()
         .auto_compact_token_limit = Some(128_000);
-    let error = prepare_context_catalog_overlay(home.path(), &source, &invalid, &[]).unwrap_err();
+    let error =
+        prepare_context_catalog_overlay(home.path(), &source, &invalid, &Default::default())
+            .unwrap_err();
     assert!(error.is::<ContextBudgetCatalogError>());
     assert_eq!(fs::read(&source).unwrap(), original);
     assert!(
@@ -3882,7 +4011,10 @@ fn custom_context_overlay_keeps_required_models_after_budget_removal() {
     fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
     let runtime_bytes = serde_json::to_vec(&json!({"models": [cached_model]})).unwrap();
     fs::write(&runtime_path, &runtime_bytes).unwrap();
-    let required = vec!["ROUTE/MODEL".to_string(), "route/model".to_string()];
+    let required = crate::model_catalog::RequiredCatalogModels {
+        models: vec!["ROUTE/MODEL".to_string(), "route/model".to_string()],
+        ..Default::default()
+    };
 
     let first =
         prepare_context_catalog_overlay(home.path(), &source, &policies, &required).unwrap();
@@ -3932,11 +4064,14 @@ fn custom_context_overlay_required_only_preserves_plugin_and_unmarked_metadata()
         serde_json::to_vec(&json!({"models": models})).unwrap(),
     )
     .unwrap();
-    let required = vec![
-        "route/plugin".into(),
-        "route/unmarked".into(),
-        "ROUTE/PLUGIN".into(),
-    ];
+    let required = crate::model_catalog::RequiredCatalogModels {
+        models: vec![
+            "route/plugin".into(),
+            "route/unmarked".into(),
+            "ROUTE/PLUGIN".into(),
+        ],
+        ..Default::default()
+    };
 
     let overlay = render_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &required)
         .unwrap()
@@ -3954,7 +4089,10 @@ fn custom_context_overlay_complete_required_catalog_reuses_source() {
     let runtime_path = home.path().join(relative_path());
     fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
     fs::write(&runtime_path, b"invalid unused fallback").unwrap();
-    let required = vec!["ROUTE/MODEL".into(), "route/model".into()];
+    let required = crate::model_catalog::RequiredCatalogModels {
+        models: vec!["ROUTE/MODEL".into(), "route/model".into()],
+        ..Default::default()
+    };
 
     assert!(
         render_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &required)
@@ -3979,12 +4117,18 @@ fn custom_context_overlay_without_requirements_does_not_read_catalogs() {
     let home = tempfile::tempdir().unwrap();
     let source = home.path().join("missing.json");
     assert!(
-        render_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &[])
+        render_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &Default::default())
             .unwrap()
             .is_none()
     );
     assert_eq!(
-        prepare_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &[]).unwrap(),
+        prepare_context_catalog_overlay(
+            home.path(),
+            &source,
+            &BTreeMap::new(),
+            &Default::default()
+        )
+        .unwrap(),
         source
     );
     assert!(!home.path().join("model-catalogs").exists());
@@ -4001,7 +4145,10 @@ fn custom_context_overlay_required_errors_do_not_offer_budget_recovery() {
     });
     let mut differently_cased = candidate.clone();
     differently_cased["slug"] = json!("ROUTE/MODEL");
-    let required = vec!["route/model".into()];
+    let required = crate::model_catalog::RequiredCatalogModels {
+        models: vec!["route/model".into()],
+        ..Default::default()
+    };
     let policies = BTreeMap::from([(
         "ROUTE/MODEL".into(),
         crate::config::ModelContextConfig {
@@ -4104,7 +4251,8 @@ fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
     assert_eq!(trusted["max_context_window"], 872000);
     let mut native_large = json!({"slug":"official", "context_window":1000000, "max_context_window":1000000, "effective_context_window_percent":95, "codey_context_source":"official_catalog"});
     prepare_cached_context_window(&mut native_large);
-    assert_eq!(native_large["context_window"], 1000000);
+    assert_eq!(native_large["context_window"], 400_000);
+    assert_eq!(native_large["max_context_window"], 1_000_000);
     assert_eq!(native_large["effective_context_window_percent"], 95);
     let mut legacy_override = json!({ "slug": "route/legacy", "codey_source": "third_party", "context_window": 1000000, "max_context_window": 1000000, "effective_context_window_percent": 100, "auto_compact_token_limit": null, "codey_context_source": "legacy_1m" });
     prepare_cached_context_window(&mut legacy_override);
@@ -4153,6 +4301,7 @@ fn plugin_context_defaults_yield_to_users_and_restore_after_override_removal() {
             contexts: &empty,
             reasoning_efforts: &reasoning,
             display_names: &Default::default(),
+            speed_tiers: None,
         },
     )
     .unwrap();
@@ -4165,6 +4314,7 @@ fn plugin_context_defaults_yield_to_users_and_restore_after_override_removal() {
             contexts: &user,
             reasoning_efforts: &reasoning,
             display_names: &Default::default(),
+            speed_tiers: None,
         },
     )
     .unwrap();
@@ -4177,8 +4327,70 @@ fn plugin_context_defaults_yield_to_users_and_restore_after_override_removal() {
             contexts: &empty,
             reasoning_efforts: &reasoning,
             display_names: &Default::default(),
+            speed_tiers: None,
         },
     )
     .unwrap();
     assert_eq!(models[0]["context_window"], 918000);
+}
+
+#[test]
+fn official_default_context_recomputes_only_window_based_compaction_limits() {
+    for (window, limit, percent, expected) in [
+        (272_000, 240_000, 95, 360_000),
+        (272_000, 244_800, 95, 360_000),
+        (272_000, 244_800, 80, 320_000),
+        (272_000, 217_600, 80, 320_000),
+        (272_000, 240_000, 80, 320_000),
+        (272_000, 100_000, 95, 100_000),
+        (400_000, 240_000, 95, 240_000),
+        (872_000, 244_800, 95, 244_800),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        for model in cache["models"].as_array_mut().unwrap() {
+            model["context_window"] = json!(window);
+            model["max_context_window"] = json!(872_000);
+            model["auto_compact_token_limit"] = json!(limit);
+            model["effective_context_window_percent"] = json!(percent);
+        }
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        refresh_for_provider(home.path(), true, None, &[]).unwrap();
+        let models = read_runtime_catalog_models(home.path()).unwrap();
+        let model = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .unwrap();
+        assert_eq!(model["context_window"], 400_000);
+        assert_eq!(
+            model["auto_compact_token_limit"], expected,
+            "{window}/{limit}/{percent}"
+        );
+        // 后续同步仍从原始声明重算，不累积扩大阈值。
+        refresh_for_provider(home.path(), true, None, &[]).unwrap();
+        assert_eq!(read_runtime_catalog_models(home.path()).unwrap(), models);
+    }
+}
+
+#[test]
+fn official_default_context_preserves_explicit_policies_and_unsupported_windows() {
+    for (slug, source, capacity) in [
+        ("gpt-6-luna", "user_declared", 872_000),
+        ("gpt-6-luna", "plugin_declared", 872_000),
+        ("relay/gpt-6-luna", "official_catalog", 872_000),
+        ("gpt-6-luna", "official_catalog", 272_000),
+    ] {
+        let mut model = json!({
+            "slug": slug, "context_window": 272000, "max_context_window": capacity,
+            "effective_context_window_percent": 95, "auto_compact_token_limit": 240000,
+            "codey_context_source": source,
+        });
+        prepare_cached_context_window(&mut model);
+        assert_eq!(model["context_window"], 272_000);
+        assert_eq!(model["auto_compact_token_limit"], 240_000);
+    }
 }

@@ -125,9 +125,15 @@ export type Config = {
     string,
     Record<string, ModelReasoningEffort[]>
   >;
+  modelUltrafastByProvider?: Record<string, Record<string, boolean>>;
   manualThirdPartyModelsByProvider: Record<string, string[]>;
   declaredOfficialModelsByProvider: Record<string, string[]>;
   upstreamModelsByProvider: Record<string, string[]>;
+  upstreamSpeedTiersByProvider?: Record<string, Record<string, {
+    service_tiers?: { id: string }[];
+    additional_speed_tiers?: string[];
+    default_service_tier?: string;
+  }>>;
   modelAliasHistory?: Record<string, string>;
   defaultModel: string;
   disableTraceLogWrites: boolean;
@@ -169,6 +175,7 @@ export type ModelState = {
   thirdPartyModelMetadata?: ThirdPartyModelState[];
   manualThirdPartyModels: string[];
   upstreamModels: string[];
+  syncedUltrafastModels?: string[];
   defaultModel: string;
 };
 

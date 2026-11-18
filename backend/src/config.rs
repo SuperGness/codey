@@ -1,4 +1,6 @@
 mod normalize;
+mod speed;
+pub(crate) use speed::can_configure_ultrafast;
 mod store;
 mod types;
 

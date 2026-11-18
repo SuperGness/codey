@@ -42,6 +42,34 @@ fn effective_budget(document: &DocumentMut, key: &str) -> Option<i64> {
         .and_then(Item::as_integer)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GlobalContextBudget {
+    window: Option<i64>,
+    threshold: Option<i64>,
+}
+
+impl GlobalContextBudget {
+    pub(crate) fn from_document(document: &DocumentMut) -> Self {
+        Self {
+            window: effective_budget(document, KEYS[0]),
+            threshold: effective_budget(document, KEYS[1]),
+        }
+    }
+
+    pub(crate) fn apply(self, model: &mut serde_json::Map<String, JsonValue>) {
+        if let Some(window) = self.window {
+            let maximum = model.get("max_context_window").and_then(JsonValue::as_i64);
+            model.insert(
+                "context_window".into(),
+                maximum.map_or(window, |max| window.min(max)).into(),
+            );
+        }
+        if let Some(threshold) = self.threshold {
+            model.insert("auto_compact_token_limit".into(), threshold.into());
+        }
+    }
+}
+
 pub(super) fn prepare(
     home: &Path,
     persistent: &DocumentMut,
@@ -63,8 +91,8 @@ pub(super) fn prepare(
         .get_mut("models")
         .and_then(JsonValue::as_array_mut)
         .context("上下文预算目录缺少 models 数组")?;
-    let window = effective_budget(persistent, KEYS[0]);
-    let threshold = effective_budget(persistent, KEYS[1]);
+    let global = GlobalContextBudget::from_document(persistent);
+    let uses_shared = source == home.join(crate::model_catalog::relative_path());
     for model in models {
         let slug = model
             .get("slug")
@@ -73,16 +101,13 @@ pub(super) fn prepare(
         if contexts.keys().any(|key| crate::model_id::equal(key, slug)) {
             continue;
         }
-        // Codex 原本会先加载目录，再按全局配置覆盖；在副本中保留同样的结果。
-        if let Some(window) = window {
-            let window = model
-                .get("max_context_window")
-                .and_then(JsonValue::as_i64)
-                .map_or(window, |maximum| window.min(maximum));
-            model["context_window"] = window.into();
-        }
-        if let Some(threshold) = threshold {
-            model["auto_compact_token_limit"] = threshold.into();
+        // 全局设置覆盖目录值，私有副本仍跟随原目录中的模型声明。
+        let fields = model
+            .as_object_mut()
+            .context("上下文预算目录中的模型条目必须是对象")?;
+        global.apply(fields);
+        if uses_shared {
+            fields.insert("codey_context_from_runtime_catalog".into(), true.into());
         }
     }
     let bytes = serde_json::to_vec_pretty(&catalog)?;

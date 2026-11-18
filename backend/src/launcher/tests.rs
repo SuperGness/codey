@@ -118,6 +118,128 @@ fn third_party_provider_installs_the_codey_model_catalog_when_available() {
 }
 
 #[tokio::test]
+async fn single_official_route_installs_the_synchronized_speed_catalog() {
+    let home = tempfile::tempdir().unwrap();
+    let runtime = home.path().join("test-codex");
+    std::fs::write(&runtime, "test runtime").unwrap();
+    let mut profile = ProviderProfile::new("Official");
+    profile.source_provider_id = Some("openai".into());
+    profile.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    profile.normalize();
+    let model = "next-release";
+    let entry = serde_json::json!({
+        "slug": model, "description": "Next release", "base_instructions": "Instructions",
+        "service_tiers": [{"id": "ultrafast", "name": "Express", "description": "Fastest"}]
+    });
+    model_catalog::merge_account_runtime_models(
+        home.path(),
+        std::slice::from_ref(&entry),
+        runtime.to_str().unwrap(),
+    )
+    .unwrap();
+    let selected = std::collections::BTreeMap::from([("openai".into(), vec![model.into()])]);
+    let mut config = CodeyConfig {
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        official_account_available_this_launch: true,
+        selected_models_by_provider: selected.clone(),
+        upstream_models_by_provider: selected,
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    let declaration = model_catalog::ModelSpeedTiers::from_model(&entry).unwrap();
+    config.upstream_speed_tiers_by_provider.insert(
+        "openai".into(),
+        std::collections::BTreeMap::from([(model.into(), declaration)]),
+    );
+    for declared in [true, false] {
+        if !declared {
+            config
+                .upstream_speed_tiers_by_provider
+                .get_mut("openai")
+                .unwrap()
+                .clear();
+        }
+        let startup =
+            prepare_startup_model_catalog(&config, &config.profiles[0], home.path(), &runtime)
+                .await
+                .unwrap();
+        assert!(startup.use_official_catalog);
+        let required =
+            crate::codex_config::runtime_required_catalog_models(&config, home.path(), true);
+        let path =
+            crate::codex_config::runtime_model_catalog_path(home.path(), true, None, &required)
+                .unwrap()
+                .unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let row = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["slug"] == model)
+            .unwrap();
+        assert_eq!(
+            row["service_tiers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tier| tier["id"] == "ultrafast"),
+            declared
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_official_route_installs_the_synchronized_context_default() {
+    let home = tempfile::tempdir().unwrap();
+    let runtime = home.path().join("test-codex");
+    std::fs::write(&runtime, "test runtime").unwrap();
+    let mut profile = ProviderProfile::new("Official");
+    profile.source_provider_id = Some("openai".into());
+    profile.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    profile.normalize();
+    let model = "next-release";
+    let selected = std::collections::BTreeMap::from([("openai".into(), vec![model.into()])]);
+    let config = CodeyConfig {
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        official_account_available_this_launch: true,
+        selected_models_by_provider: selected.clone(),
+        upstream_models_by_provider: selected,
+        ..CodeyConfig::default()
+    }
+    .normalize();
+
+    for (capacity, expected_window, expected_install) in
+        [(272_000, 272_000, false), (872_000, 400_000, true)]
+    {
+        let entry = serde_json::json!({
+            "slug": model, "description": "Next release", "base_instructions": "Instructions",
+            "context_window": 272_000, "max_context_window": capacity,
+        });
+        model_catalog::merge_account_runtime_models(
+            home.path(),
+            &[entry],
+            runtime.to_str().unwrap(),
+        )
+        .unwrap();
+        let startup =
+            prepare_startup_model_catalog(&config, &config.profiles[0], home.path(), &runtime)
+                .await
+                .unwrap();
+        assert_eq!(startup.use_official_catalog, expected_install);
+        let catalog: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join(model_catalog::relative_path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog["models"][0]["context_window"], expected_window);
+        let metadata = model_catalog::context_metadata_for_config(home.path(), &config).unwrap();
+        assert_eq!(metadata[model]["context_window"], expected_window);
+    }
+}
+
+#[tokio::test]
 async fn custom_context_cold_start_can_retry_after_restoring_defaults() {
     let home = tempfile::tempdir().unwrap();
     let mut official = ProviderProfile::new("Official");
@@ -1239,6 +1361,8 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
             performance_detail: String::new(),
             startup_injection_mode: String::new(),
         },
+        context_budgets: Default::default(),
+        context_budget_restart_required: AtomicBool::new(false),
         applied_model_config: RwLock::new(AppliedModelConfig::new(config.clone())),
         applied_subagent_config: RwLock::new(std::sync::Arc::new(
             RuntimeSubagentConfig::from_config(&config),

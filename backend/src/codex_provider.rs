@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -75,13 +75,18 @@ pub struct OfficialAccountLaunch {
 impl OfficialAccountLaunch {
     /// 提交时从当前账号完整重建线路，包含探测后新增、删除和修改的账号。
     /// 保留本次启动的认证探测结论；这里只读本地记录，不重新登录或执行网络请求。
+    /// 返回同一快照内的全部账号 Provider ID，包含暂时失效的账号。
     pub(crate) fn reconcile_current_accounts(
         &mut self,
         codex_home: &Path,
         accounts: &OfficialAccountStore,
-    ) -> Result<()> {
+    ) -> Result<HashSet<String>> {
         let snapshot = local_provider_with_auth_policy(codex_home, AuthProbePolicy::Lenient)?;
         let (records, default_id) = accounts.route_snapshot()?;
+        let provider_ids = records
+            .iter()
+            .map(|record| crate::config::official_profile_id(&record.id))
+            .collect();
         self.has_stored_accounts |= !records.is_empty();
         self.profiles = if records.is_empty() && self.has_stored_accounts {
             // 最后一个存储账号删除后，不能用旧 Codex 登录再次派生兼容线路。
@@ -89,7 +94,7 @@ impl OfficialAccountLaunch {
         } else {
             official_profiles_from_records(&snapshot, records, default_id.as_deref())
         };
-        Ok(())
+        Ok(provider_ids)
     }
 
     pub fn resolve(codex_home: &Path, accounts: &OfficialAccountStore) -> Result<Self> {
@@ -340,6 +345,10 @@ fn sync_provider_profile(
         next.declared_official_models_by_provider
             .remove(&placeholder_provider_id);
         next.upstream_models_by_provider
+            .remove(&placeholder_provider_id);
+        next.upstream_speed_tiers_by_provider
+            .remove(&placeholder_provider_id);
+        next.model_ultrafast_by_provider
             .remove(&placeholder_provider_id);
     } else if let Some(existing) = next.profiles.iter_mut().find(|existing| {
         existing.provider_id() == imported_provider_id || existing.id == imported_id
@@ -1594,6 +1603,10 @@ experimental_bearer_token = "sk-relay"
             profiles: vec![saved],
             active_profile_id: "relay".into(),
             initial_route_import_completed: true,
+            model_ultrafast_by_provider: std::collections::BTreeMap::from([(
+                "relay".into(),
+                std::collections::BTreeMap::from([("gpt-6-astra".into(), true)]),
+            )]),
             ..CodeyConfig::default()
         };
 
@@ -1613,6 +1626,7 @@ experimental_bearer_token = "sk-relay"
 
         assert_eq!(synced.profiles[0].short_name, "中");
         assert_eq!(synced.profiles[0].name, "Relay Updated");
+        assert!(synced.model_ultrafast_by_provider["relay"]["gpt-6-astra"]);
     }
 
     #[test]

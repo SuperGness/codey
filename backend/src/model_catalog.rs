@@ -12,14 +12,18 @@ use crate::fs_util::atomic_write_private_with_parent as atomic_write;
 use crate::model_id;
 
 mod cli_probe;
+mod context_budget;
 mod gating;
 mod normalize;
+mod speed;
 mod store;
 mod sync;
 
 use cli_probe::*;
+pub(crate) use context_budget::*;
 pub(crate) use gating::*;
 pub use normalize::*;
+pub(crate) use speed::*;
 pub use store::*;
 pub(crate) use sync::*;
 

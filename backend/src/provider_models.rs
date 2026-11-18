@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::config::ProviderProfile;
 use crate::local_router::{UpstreamProtocol, apply_upstream_headers, prepare_upstream_headers};
+use crate::model_catalog::ModelSpeedTiers;
 use crate::model_id;
 use crate::model_list::{self, ModelEndpointError};
 use crate::system_proxy_client::SystemProxyClient;
@@ -20,6 +21,32 @@ const PROVIDER_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_PROVIDER_MODEL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PROVIDER_MODELS: usize = 10_000;
 pub(crate) const MAX_PROVIDER_MODEL_ID_BYTES: usize = 512;
+
+#[derive(Debug, Default)]
+pub(crate) struct ProviderModelCatalog {
+    pub(crate) models: Vec<String>,
+    pub(crate) speed_tiers: BTreeMap<String, ModelSpeedTiers>,
+}
+
+impl ProviderModelCatalog {
+    pub(crate) fn from_official_models(entries: &[Value]) -> Self {
+        let mut catalog = Self::default();
+        for entry in entries {
+            let Some(id) = entry
+                .get("slug")
+                .or_else(|| entry.get("id"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            catalog.models.push(id.to_string());
+            if let Some(tiers) = ModelSpeedTiers::from_model(entry) {
+                catalog.speed_tiers.insert(model_id::key(id), tiers);
+            }
+        }
+        catalog
+    }
+}
 
 #[derive(Debug)]
 enum ModelListError {
@@ -69,7 +96,15 @@ pub(crate) fn http_client() -> &'static SystemProxyClient {
     })
 }
 
+#[cfg(test)]
 pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<String>> {
+    Ok(fetch_catalog(profile, client).await?.models)
+}
+
+pub(crate) async fn fetch_catalog(
+    profile: &ProviderProfile,
+    client: &Client,
+) -> Result<ProviderModelCatalog> {
     let base = profile.normalized_base_url();
     if base.is_empty() {
         anyhow::bail!("API 地址不能为空");
@@ -132,7 +167,7 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
         )
         .await
         .map_err(|error| anyhow::anyhow!("{error:#}：{endpoint}"))?;
-        match model_ids(&body) {
+        match model_catalog_with_limits(&body, MAX_PROVIDER_MODELS, MAX_PROVIDER_MODEL_ID_BYTES) {
             Ok(models) => return Ok(models),
             Err(error) if has_fallback && error.allows_endpoint_fallback() => continue,
             Err(error) => {
@@ -153,19 +188,31 @@ fn model_endpoints(base: &str) -> Result<Vec<String>> {
     })
 }
 
+#[cfg(test)]
 fn model_ids(body: &[u8]) -> std::result::Result<Vec<String>, ModelListError> {
     model_ids_with_limits(body, MAX_PROVIDER_MODELS, MAX_PROVIDER_MODEL_ID_BYTES)
 }
 
+#[cfg(test)]
 fn model_ids_with_limits(
     body: &[u8],
     max_models: usize,
     max_model_id_bytes: usize,
 ) -> std::result::Result<Vec<String>, ModelListError> {
+    Ok(model_catalog_with_limits(body, max_models, max_model_id_bytes)?.models)
+}
+
+fn model_catalog_with_limits(
+    body: &[u8],
+    max_models: usize,
+    max_model_id_bytes: usize,
+) -> std::result::Result<ProviderModelCatalog, ModelListError> {
     let value = serde_json::from_slice::<Value>(body).map_err(ModelListError::InvalidJson)?;
     let mut models = Vec::new();
     let mut seen = HashSet::<String>::new();
-    let recognized = model_list::visit_model_ids(&value, &mut |model| {
+    let mut speed_tiers = BTreeMap::new();
+    let recognized = model_list::visit_model_entries(&value, &mut |model, entry| {
+        let previous_count = models.len();
         push_model_id(
             model,
             &mut models,
@@ -173,6 +220,11 @@ fn model_ids_with_limits(
             max_models,
             max_model_id_bytes,
         )?;
+        if models.len() != previous_count
+            && let Some(tiers) = ModelSpeedTiers::from_model(entry)
+        {
+            speed_tiers.insert(model_id::key(model), tiers);
+        }
         Ok(true)
     })?;
     if !recognized {
@@ -181,7 +233,10 @@ fn model_ids_with_limits(
     if models.is_empty() {
         return Err(ModelListError::Empty);
     }
-    Ok(models)
+    Ok(ProviderModelCatalog {
+        models,
+        speed_tiers,
+    })
 }
 
 fn push_model_id(
@@ -216,6 +271,45 @@ mod tests {
     use crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn speed_tiers_are_extracted_from_every_supported_shape_without_catalog_fields() {
+        let entry = serde_json::json!({
+            "slug": "New-Model", "context_window": 123,
+            "service_tiers": [{ "id": "future", "credits": 5 }],
+            "additional_speed_tiers": ["future"], "default_service_tier": "future"
+        });
+        for payload in [
+            entry.clone(),
+            serde_json::json!([entry]),
+            serde_json::json!({ "data": [entry] }),
+            serde_json::json!({ "models": [entry] }),
+            serde_json::json!({ "items": [entry] }),
+        ] {
+            let catalog =
+                model_catalog_with_limits(&serde_json::to_vec(&payload).unwrap(), 10, 512).unwrap();
+            assert_eq!(catalog.models, ["New-Model"]);
+            let saved = serde_json::to_value(&catalog.speed_tiers["new-model"]).unwrap();
+            assert_eq!(saved["service_tiers"][0]["credits"], 5);
+            assert_eq!(
+                saved["additional_speed_tiers"],
+                serde_json::json!(["future"])
+            );
+            assert_eq!(saved["default_service_tier"], "future");
+            assert!(saved.get("context_window").is_none());
+        }
+    }
+
+    #[test]
+    fn speed_tiers_follow_first_duplicate_and_id_only_or_empty_responses_clear_declarations() {
+        let catalog = model_catalog_with_limits(br#"{"data":["A",{"id":"a","additional_speed_tiers":["ultrafast"]},{"name":"B","service_tiers":[]},{"model":"C","additional_speed_tiers":["future"]}]}"#, 3, 512).unwrap();
+        assert_eq!(catalog.models, ["A", "B", "C"]);
+        assert!(!catalog.speed_tiers.contains_key("a"));
+        assert_eq!(catalog.speed_tiers["b"], ModelSpeedTiers::default());
+        assert_eq!(catalog.speed_tiers["c"].additional_speed_tiers, ["future"]);
+        let plain = model_catalog_with_limits(br#"["A","B","C"]"#, 3, 512).unwrap();
+        assert!(plain.speed_tiers.is_empty());
+    }
 
     #[test]
     fn builds_compatible_model_endpoints() {
@@ -443,7 +537,10 @@ mod tests {
         let server = std::thread::spawn(move || {
             for (expected_path, body) in [
                 ("/api/v1/models", r#"{"data":[]}"#),
-                ("/api/models", r#"{"models":["fallback-model"]}"#),
+                (
+                    "/api/models",
+                    r#"{"models":[{"id":"fallback-model","additional_speed_tiers":["future"]}]}"#,
+                ),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0u8; 4096];
@@ -462,9 +559,13 @@ mod tests {
         profile.base_url = format!("http://{address}/api");
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let models = fetch(&profile, &client).await.unwrap();
+        let catalog = fetch_catalog(&profile, &client).await.unwrap();
 
-        assert_eq!(models, vec!["fallback-model"]);
+        assert_eq!(catalog.models, vec!["fallback-model"]);
+        assert_eq!(
+            catalog.speed_tiers["fallback-model"].additional_speed_tiers,
+            ["future"]
+        );
         server.join().unwrap();
     }
 

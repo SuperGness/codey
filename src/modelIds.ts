@@ -2,6 +2,11 @@ export const AUTO_REVIEW_MODEL = "codex-auto-review";
 
 export const modelKey = (model: string) => model.trim().toLowerCase();
 
+export const canConfigureUltrafast = (model: string) => {
+  const key = modelKey(model);
+  return /(?:^|[-_])(?:astra|sol)(?:$|[-_])/.test(key.slice(key.lastIndexOf("/") + 1));
+};
+
 export const modelIdsEqual = (left: string, right: string) =>
   modelKey(left) === modelKey(right);
 

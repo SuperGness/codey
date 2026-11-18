@@ -255,6 +255,8 @@ export function App({
     draftModelContexts,
     updateDraftModelContext,
     draftReasoningEfforts,
+    draftModelUltrafast,
+    updateDraftModelUltrafast,
     reasoningEffortAutoByModel,
     modelPickerReasoningCapabilities,
     updateDraftReasoningEffort,
@@ -815,11 +817,22 @@ export function App({
         const warning = savedRoute.authMode === "officialAccount"
           ? `自动同步失败：${errorText(error)}。请重试以读取当前账号可用模型。`
           : `自动同步失败：${errorText(error)}。仍可手动录入当前线路支持的模型 ID。`;
+        const providerId = routeProviderId(savedRoute);
+        const savedTiers = savedConfig.upstreamSpeedTiersByProvider?.[providerId];
+        const syncedUltrafastModels = savedRoute.officialSiwc
+          ? []
+          : savedTiers
+            ? Object.entries(savedTiers).filter(([, tiers]) =>
+              tiers.additional_speed_tiers?.includes("ultrafast") ||
+              tiers.service_tiers?.some((tier) => tier.id === "ultrafast") ||
+              tiers.default_service_tier === "ultrafast").map(([model]) => model)
+            : savedRoute.id === savedConfig.activeProfileId ? modelState.syncedUltrafastModels : undefined;
+        const fallback = savedRoute.authMode === "officialAccount"
+          ? modelState
+          : thirdPartyRouteModelState(savedConfig, savedRoute, modelState);
         completeModelPickerLoad(
           session,
-          savedRoute.authMode === "officialAccount"
-            ? modelState
-            : thirdPartyRouteModelState(savedConfig, savedRoute, modelState),
+          { ...fallback, syncedUltrafastModels },
           warning,
           savedRoute.id,
           savedRoute.supportsAutoReview === true,
@@ -871,7 +884,7 @@ export function App({
         showAccountUsageInHeader,
         // undefined 表示保持现状（如只同步模型），空字符串表示清除代理。
         ...(upstreamProxy === undefined ? {} : { upstreamProxy }),
-        // 连接与并发设置写入同一账号记录，避免重复派生和热更新。
+        // 账号连接设置与线路选项一并保存，避免重复派生和热更新。
         ...(routeSettings
           ? {
               accountId: routeSettings.accountId,
@@ -1758,6 +1771,8 @@ export function App({
         draftModelSet={draftModelSet}
         draftModelContexts={draftModelContexts}
         draftReasoningEfforts={draftReasoningEfforts}
+        draftModelUltrafast={draftModelUltrafast}
+        onUpdateDraftModelUltrafast={updateDraftModelUltrafast}
         reasoningEffortAutoByModel={reasoningEffortAutoByModel}
         onUpdateDraftModelContext={updateDraftModelContext}
         onUpdateDraftReasoningEffort={updateDraftReasoningEffort}

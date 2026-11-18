@@ -229,18 +229,19 @@ pub(crate) fn config_with_launch_pinned_transport(
     pinned
 }
 
+#[cfg(test)]
 pub(crate) fn renderer_model_catalog_value(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) -> Value {
-    renderer_model_catalog_value_at(config, model_state, codex_home())
+    renderer_model_catalog_value_at(config, model_state, codex_home()).unwrap()
 }
 
-fn renderer_model_catalog_value_at(
+pub(crate) fn renderer_model_catalog_value_at(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
     home: &std::path::Path,
-) -> Value {
+) -> Result<Value, String> {
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
@@ -252,16 +253,12 @@ fn renderer_model_catalog_value_at(
             catalog["status"] = json!("ok");
             catalog["clear_models"] = json!(true);
         }
-        return catalog;
+        return Ok(catalog);
     }
     let route_catalog = renderer_route_model_catalog(config, model_state);
-    let context_metadata = if !config.uses_builtin_official_model_catalog()
-        || !config.runtime_model_contexts().is_empty()
-    {
-        model_catalog::context_metadata_for_config(home, config)
-    } else {
-        BTreeMap::new()
-    };
+    let speed_metadata = model_catalog::renderer_speed_metadata(home, config);
+    let context_metadata = model_catalog::context_metadata_for_config(home, config)
+        .map_err(|error| format!("{error:#}"))?;
     let models = route_catalog
         .iter()
         .map(|entry| entry.alias.clone())
@@ -284,7 +281,11 @@ fn renderer_model_catalog_value_at(
             metadata["route_provider_id"] = Value::String(entry.provider_id.clone());
             metadata["upstream_model"] = Value::String(entry.model.clone());
             metadata["model_display_name"] = Value::String(entry.model.clone());
-            if let Some(context) = context_metadata.get(&entry.alias) {
+            let alias_key = model_id::key(&entry.alias);
+            if let Some(tiers) = speed_metadata.get(&alias_key) {
+                metadata.as_object_mut().unwrap().extend(tiers.clone());
+            }
+            if let Some(context) = context_metadata.get(&alias_key) {
                 for (key, value) in context {
                     metadata[key] = value.clone();
                 }
@@ -311,7 +312,7 @@ fn renderer_model_catalog_value_at(
     let provider_name = default_entry
         .map(|entry| entry.route_name.as_str())
         .unwrap_or(active_provider);
-    json!({
+    Ok(json!({
         "status": if models.is_empty() { "not_configured" } else { "ok" },
         "model": default_model,
         "default_model": default_model,
@@ -325,7 +326,7 @@ fn renderer_model_catalog_value_at(
             "status": "unknown",
             "message": ""
         }
-    })
+    }))
 }
 
 pub(crate) fn renderer_native_model_catalog_value(

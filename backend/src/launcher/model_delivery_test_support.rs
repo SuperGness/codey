@@ -1,6 +1,21 @@
 use super::*;
 
 impl CodeyRuntime {
+    pub(crate) fn with_context_budgets_for_test(
+        mut self,
+        home: &std::path::Path,
+        catalog: Option<&std::path::Path>,
+    ) -> Self {
+        self.context_budgets = model_catalog::RuntimeContextBudgets::from_catalog(
+            home,
+            &self.applied_config,
+            catalog,
+            Default::default(),
+        )
+        .unwrap();
+        self
+    }
+
     pub(crate) async fn replace_model_delivery_target_for_test(&self, websocket_url: &str) {
         *self.injection_websocket_url.write().await = Arc::from(websocket_url);
     }
@@ -21,6 +36,8 @@ impl CodeyRuntime {
                 performance_detail: String::new(),
                 startup_injection_mode: String::new(),
             },
+            context_budgets: Default::default(),
+            context_budget_restart_required: AtomicBool::new(false),
             applied_model_config: RwLock::new(AppliedModelConfig::new(config.clone())),
             applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(
                 &config,

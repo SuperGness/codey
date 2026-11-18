@@ -342,6 +342,7 @@ fn subagent_catalog_overlay_survives_partial_and_complete_budget_reset() {
                 plugin_contexts: &Default::default(),
                 reasoning_efforts: &Default::default(),
                 display_names: &Default::default(),
+                speed_tiers: None,
             },
         )
         .unwrap();
@@ -454,22 +455,25 @@ fn subagent_required_catalog_models_skip_unavailable_official_models_only() {
         let available = selected[0].clone();
         write_subagent_test_catalog(home.path(), &[&available]);
         assert_eq!(
-            crate::codex_config::runtime_required_catalog_models(&config, home.path(), true),
+            crate::codex_config::runtime_required_catalog_models(&config, home.path(), true).models,
             vec![available]
         );
         assert!(
             crate::codex_config::runtime_required_catalog_models(&config, home.path(), false)
+                .models
                 .is_empty()
         );
         let mut disabled = config.clone();
         disabled.local_router_enabled = false;
         assert!(
             crate::codex_config::runtime_required_catalog_models(&disabled, home.path(), true)
+                .models
                 .is_empty()
         );
         let third_party = subagent_catalog_fallback_config();
         assert_eq!(
-            crate::codex_config::runtime_required_catalog_models(&third_party, home.path(), true),
+            crate::codex_config::runtime_required_catalog_models(&third_party, home.path(), true)
+                .models,
             third_party.runtime_catalog_models().1
         );
     }
@@ -638,6 +642,8 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
             performance_detail: String::new(),
             startup_injection_mode: String::new(),
         },
+        context_budgets: Default::default(),
+        context_budget_restart_required: AtomicBool::new(false),
         applied_model_config: RwLock::new(AppliedModelConfig::new(config.clone())),
         applied_subagent_config: RwLock::new(std::sync::Arc::new(
             RuntimeSubagentConfig::from_config(&config),

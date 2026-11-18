@@ -18,6 +18,44 @@ pub(crate) struct RefreshedModelState {
     pub(crate) custom_contexts_restored: bool,
 }
 
+/// 普通线路设置也要更新 Codex 读取的目录。配置写入失败时一并恢复目录。
+pub(crate) async fn save_config_with_route_speed_changes(
+    state: &Arc<AppState>,
+    previous: &CodeyConfig,
+    config: CodeyConfig,
+    home: &std::path::Path,
+) -> Result<CodeyConfig, String> {
+    let catalog_path = home.join(model_catalog::relative_path());
+    // 用户目录只覆盖显式声明。已有的 Codey 目录还要移除没有声明档位的模型及旧账号别名。
+    let catalog_changed = config.local_router_enabled
+        && (previous.user_catalog_speed_overrides() != config.user_catalog_speed_overrides()
+            || (previous.runtime_model_speed_tiers() != config.runtime_model_speed_tiers()
+                && catalog_path.try_exists().map_err(|error| {
+                    format!(
+                        "检查 Codey 模型目录失败：{}：{error}",
+                        catalog_path.display()
+                    )
+                })?));
+    if !catalog_changed {
+        return save_config_to_store(state, config).await;
+    }
+    // 启动时账号可能先于模型模板就绪，保存线路只需刷新目录，不要求生成面板模型列表。
+    let refresh_config = config.clone();
+    let home = home.to_path_buf();
+    let refresh = tokio::task::spawn_blocking(move || {
+        let context = model_catalog::CatalogContext::new(&refresh_config.codex_app_path);
+        refresh_model_catalog_or_fallback_in_context(&refresh_config, &home, &context)
+    })
+    .await
+    .map_err(|error| format!("刷新 Codey 模型目录的任务异常退出：{error}"))??;
+    match save_config_to_store(state, config).await {
+        Ok(config) => Ok(config),
+        Err(error) => {
+            Err(rollback_model_catalog_after_config_save_async(Some(refresh), error).await)
+        }
+    }
+}
+
 #[cfg(test)]
 fn refresh_model_catalog_or_fallback_at(
     config: &CodeyConfig,
@@ -67,21 +105,21 @@ fn refresh_model_catalog_or_fallback_in_context(
                     model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE.to_string(),
                 ));
             }
-            // Freshly generated catalogs already include both overrides. Only
-            // a reused catalog needs a separate, single read/write pass.
-            if reused_cached_catalog
-                && available
-                && let Err(error) = model_catalog::apply_catalog_overrides(
+            if reused_cached_catalog && available {
+                let mut speeds = config.runtime_model_speed_tiers();
+                model_catalog::resolve_native_speed_declarations(home, context, &mut speeds);
+                if let Err(error) = model_catalog::apply_catalog_overrides(
                     home,
                     model_catalog::CatalogOverrides {
                         plugin_contexts: &runtime_plugin_model_contexts,
                         contexts: &runtime_model_contexts,
                         reasoning_efforts: &runtime_model_reasoning_efforts,
                         display_names: &runtime_display_names,
+                        speed_tiers: Some(&speeds),
                     },
-                )
-            {
-                return Err(rollback_model_catalog_snapshot(snapshot, error.to_string()));
+                ) {
+                    return Err(rollback_model_catalog_snapshot(snapshot, error.to_string()));
+                }
             }
             if let Err(error) = crate::codex_config::validate_runtime_model_contexts(
                 home,
@@ -361,6 +399,7 @@ fn try_refresh_model_catalog(
             contexts: &config.runtime_model_contexts(),
             reasoning_efforts: &config.runtime_model_reasoning_efforts(),
             display_names: &config.runtime_catalog_display_names(),
+            speed_tiers: Some(&config.runtime_model_speed_tiers()),
         },
         context,
     )
@@ -370,6 +409,119 @@ fn try_refresh_model_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn route_settings_commit_speed_to_disk_and_restore_it_on_save_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let model_id = "gpt-6-astra";
+        model_catalog::merge_account_runtime_models(
+            home.path(),
+            &[json!({"slug":model_id,"description":"Template","base_instructions":"Fixture"})],
+            "",
+        )
+        .unwrap();
+        let mut route = ProviderProfile::new("Relay");
+        route.id = "relay".into();
+        route.base_url = "https://relay.example.test/v1".into();
+        let selected = BTreeMap::from([("relay".into(), vec![model_id.into()])]);
+        let mut config = CodeyConfig {
+            active_profile_id: route.id.clone(),
+            profiles: vec![route],
+            selected_models_by_provider: selected.clone(),
+            upstream_models_by_provider: selected,
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        let state = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(home.path().join("codey.json")),
+            ..AppState::default()
+        });
+        let path = home.path().join(model_catalog::relative_path());
+        for manual in [true, false] {
+            let mut next = config.clone();
+            next.model_ultrafast_by_provider
+                .insert("relay".into(), BTreeMap::from([(model_id.into(), manual)]));
+            config = save_config_with_route_speed_changes(&state, &config, next, home.path())
+                .await
+                .unwrap();
+            let catalog: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let model = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["slug"] == "relay/gpt-6-astra")
+                .unwrap();
+            assert_eq!(
+                model["service_tiers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["id"] == "ultrafast"),
+                manual
+            );
+        }
+        let saved_catalog = std::fs::read(&path).unwrap();
+        let broken = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(state.store.path().join("not-a-directory")),
+            ..AppState::default()
+        });
+        let mut next = config.clone();
+        next.model_ultrafast_by_provider
+            .get_mut("relay")
+            .unwrap()
+            .insert(model_id.into(), true);
+        assert!(
+            save_config_with_route_speed_changes(&broken, &config, next, home.path())
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), saved_catalog);
+    }
+
+    #[test]
+    fn synchronized_ultrafast_is_scoped_to_the_route_and_ignores_overrides() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("models_cache.json"), serde_json::to_vec(&json!({
+            "models":[{"slug":"gpt-5.6-sol","description":"Template","base_instructions":"Fixture"}]
+        })).unwrap()).unwrap();
+        let mut config = config_with_custom_context();
+        let mut relay = ProviderProfile::new("Relay");
+        relay.id = "relay".into();
+        relay.base_url = "https://relay.example.test/v1".into();
+        config.profiles.push(relay);
+        let model = "gpt-5.6-sol";
+        let tiers = model_catalog::ModelSpeedTiers::from_model(&json!({
+            "additional_speed_tiers":["ultrafast"]
+        }))
+        .unwrap();
+        config.upstream_speed_tiers_by_provider.insert(
+            "openai".into(),
+            BTreeMap::from([(model.into(), tiers.clone())]),
+        );
+        config
+            .upstream_models_by_provider
+            .insert("relay".into(), vec![model.into()]);
+        config
+            .model_ultrafast_by_provider
+            .insert("relay".into(), BTreeMap::from([(model.into(), true)]));
+
+        let official = current_model_state_at(&config, home.path()).unwrap();
+        assert_eq!(official.synced_ultrafast_models, [model]);
+        config.active_profile_id = "relay".into();
+        let unsynced = current_model_state_at(&config, home.path()).unwrap();
+        assert!(unsynced.synced_ultrafast_models.is_empty());
+
+        config
+            .upstream_speed_tiers_by_provider
+            .insert("relay".into(), BTreeMap::from([(model.into(), tiers)]));
+        config
+            .model_ultrafast_by_provider
+            .get_mut("relay")
+            .unwrap()
+            .insert(model.into(), false);
+        let synced = current_model_state_at(&config, home.path()).unwrap();
+        assert_eq!(synced.synced_ultrafast_models, [model]);
+    }
 
     fn config_with_custom_context() -> CodeyConfig {
         let mut official = crate::config::ProviderProfile::new("Official");

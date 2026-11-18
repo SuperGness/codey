@@ -4,6 +4,14 @@ use super::*;
 pub(super) const LEGACY_1M_CONTEXT_WINDOW: u64 = 1_000_000;
 pub(super) const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
 pub(super) const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
+const OFFICIAL_DEFAULT_CONTEXT_WINDOW: u64 = 400_000;
+pub(super) const CONTEXT_FIELDS: [&str; 5] = [
+    "context_window",
+    "max_context_window",
+    "effective_context_window_percent",
+    "auto_compact_token_limit",
+    "codey_context_source",
+];
 pub(crate) const THIRD_PARTY_REASONING_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 const THIRD_PARTY_REASONING_EFFORT_ALLOWLIST: [&str; 6] =
     ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -99,6 +107,8 @@ pub struct ModelSelectionState {
     pub third_party_model_metadata: Vec<ThirdPartyModelAvailability>,
     pub manual_third_party_models: Vec<String>,
     pub upstream_models: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub synced_ultrafast_models: Vec<String>,
     pub default_model: String,
 }
 
@@ -156,6 +166,7 @@ pub(crate) struct CatalogOverrides<'a> {
     /// Route-qualified model id to native display name. Codex shows this field
     /// in surfaces Codey cannot patch, so aliased ids must not read as raw ids.
     pub(crate) display_names: &'a std::collections::BTreeMap<String, String>,
+    pub(crate) speed_tiers: Option<&'a BTreeMap<String, ModelSpeedPolicy>>,
 }
 
 #[cfg(test)]
@@ -265,15 +276,20 @@ pub(crate) fn apply_catalog_overrides(home: &Path, overrides: CatalogOverrides<'
     Ok(())
 }
 
-/// 用户目录按完整标识补齐必需模型，仅覆盖明确配置的预算。
-/// 保留外部条目的元数据，每次从原目录生成，恢复默认不会继承旧副本的预算。
+#[derive(Default)]
+pub(crate) struct RequiredCatalogModels {
+    pub(crate) models: Vec<String>,
+    pub(crate) speed_overrides: BTreeMap<String, ModelSpeedPolicy>,
+}
+
+/// 按完整标识补齐已启用模型，并将预算和线路速度声明应用到用户目录的私有副本。
 pub(crate) fn render_context_catalog_overlay(
     home: &Path,
     source: &Path,
     contexts: &BTreeMap<String, crate::config::ModelContextConfig>,
-    required_models: &[String],
+    required: &RequiredCatalogModels,
 ) -> Result<Option<Vec<u8>>> {
-    if contexts.is_empty() && required_models.is_empty() {
+    if contexts.is_empty() && required.models.is_empty() {
         return Ok(None);
     }
     let bytes = fs::read(source)
@@ -297,13 +313,13 @@ pub(crate) fn render_context_catalog_overlay(
         .iter()
         .map(|(model, policy)| (model_id::key(model), (model.as_str(), Some(policy))))
         .collect::<BTreeMap<_, _>>();
-    for model in required_models {
+    for model in &required.models {
         targets
             .entry(model_id::key(model))
             .or_insert((model.as_str(), None));
     }
     let mut runtime_models = None;
-    let mut supplemented = false;
+    let mut changed = false;
     for (key, (model, policy)) in targets {
         let kind = if policy.is_some() {
             "预算模型"
@@ -365,6 +381,10 @@ pub(crate) fn render_context_catalog_overlay(
                     )));
                 }
                 let mut candidate = candidate.clone();
+                // 补齐的官方模型仍跟随共享预算；用户原有条目保持独立。
+                if is_official_catalog_model(&candidate) {
+                    candidate["codey_context_from_runtime_catalog"] = json!(true);
+                }
                 normalize_third_party_compaction_identity(&mut candidate);
                 if policy.is_none()
                     && candidate
@@ -378,38 +398,41 @@ pub(crate) fn render_context_catalog_overlay(
                 }
                 let index = models.len();
                 models.push(candidate);
-                indices.insert(key, Some(index));
-                supplemented = true;
+                changed = true;
                 index
             }
         };
         apply_model_context(&mut models[index], policy).map_err(ContextBudgetCatalogError)?;
+        if let Some(speed) = required.speed_overrides.get(&key) {
+            let before = ModelSpeedTiers::from_model(&models[index]);
+            apply_model_speed_policy(&mut models[index], Some(speed));
+            changed |= ModelSpeedTiers::from_model(&models[index]) != before;
+        }
     }
-    if contexts.is_empty() && !supplemented {
+    if contexts.is_empty() && !changed {
         return Ok(None);
     }
-    let mut bytes = serde_json::to_vec_pretty(&catalog).context("序列化模型预算副本失败")?;
+    let mut bytes = serde_json::to_vec_pretty(&catalog).context("序列化运行时模型目录副本失败")?;
     bytes.push(b'\n');
     Ok(Some(bytes))
 }
 
-fn read_context_fallback_models(path: &Path) -> Result<Vec<Value>> {
+pub(super) fn read_context_fallback_models(path: &Path) -> Result<Vec<Value>> {
     let bytes = fs::read(path)
         .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
-    let catalog: Value = serde_json::from_slice(&bytes)
+    let mut catalog: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("解析 Codey 运行时模型目录失败：{}", path.display()))?;
-    catalog
-        .get("models")
-        .and_then(Value::as_array)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Codey 运行时模型目录缺少 models 数组：{}", path.display()))
+    match catalog.get_mut("models").map(Value::take) {
+        Some(Value::Array(models)) => Ok(models),
+        _ => bail!("Codey 运行时模型目录缺少 models 数组：{}", path.display()),
+    }
 }
 
 pub(crate) fn prepare_context_catalog_overlay(
     home: &Path,
     source: &Path,
     contexts: &BTreeMap<String, crate::config::ModelContextConfig>,
-    required_models: &[String],
+    required_models: &RequiredCatalogModels,
 ) -> Result<PathBuf> {
     let Some(bytes) = render_context_catalog_overlay(home, source, contexts, required_models)?
     else {
@@ -432,6 +455,10 @@ pub(super) fn apply_overrides_to_models(
     overrides: CatalogOverrides<'_>,
 ) -> Result<()> {
     for model in models {
+        if let Some(policies) = overrides.speed_tiers {
+            let policy = policies.get(&model_id::key(model["slug"].as_str().unwrap()));
+            apply_model_speed_policy(model, policy);
+        }
         // Always start from the catalog declaration, including when an override
         // was removed or only a plugin policy remains.
         prepare_cached_context_window(model);
@@ -485,20 +512,36 @@ pub(crate) fn runtime_context_metadata(
 pub(crate) fn context_metadata_for_config(
     home: &Path,
     config: &crate::config::CodeyConfig,
-) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
-    let mut models = read_runtime_catalog_models(home).unwrap_or_default();
+) -> Result<BTreeMap<String, serde_json::Map<String, Value>>> {
+    let mut models = match read_runtime_catalog_models(home) {
+        Ok(models) => models,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    let contexts = config.runtime_model_contexts();
     // 保存设置会提前改写共享目录；页面必须按已生效的配置重新计算预算。
     // 先恢复原始声明，再依次应用插件默认值和用户覆盖，避免沿用待重启的值。
     let overrides = CatalogOverrides {
         plugin_contexts: &config.runtime_plugin_model_contexts(),
-        contexts: &config.runtime_model_contexts(),
+        contexts: &contexts,
         reasoning_efforts: &Default::default(),
         display_names: &Default::default(),
+        speed_tiers: None,
     };
-    if apply_overrides_to_models(&mut models, overrides).is_err() {
-        return BTreeMap::new();
-    }
-    context_metadata_from_models(models)
+    apply_overrides_to_models(&mut models, overrides)?;
+    // 内置目录同样保留声明，才能比较从 400k 恢复较小窗口的待重启变化。
+    Ok(context_metadata_from_models(models))
+}
+
+pub(crate) fn catalog_has_official_context_default(home: &Path) -> bool {
+    read_runtime_catalog_models(home)
+        .is_ok_and(|models| models.iter().any(uses_official_context_default))
 }
 
 fn context_metadata_from_models(
@@ -507,17 +550,10 @@ fn context_metadata_from_models(
     models
         .into_iter()
         .filter_map(|model| {
-            let slug = model["slug"].as_str()?.to_string();
-            let fields = [
-                "context_window",
-                "max_context_window",
-                "effective_context_window_percent",
-                "auto_compact_token_limit",
-                "codey_context_source",
-            ];
+            let slug = model_id::key(model["slug"].as_str()?);
             Some((
                 slug,
-                fields
+                CONTEXT_FIELDS
                     .into_iter()
                     .map(|field| (field.to_string(), model[field].clone()))
                     .collect(),
@@ -542,7 +578,7 @@ pub(crate) fn apply_model_context(
     model["auto_compact_token_limit"] = json!(
         policy
             .auto_compact_token_limit
-            .unwrap_or((window * 9 / 10).min(window * percent / 100))
+            .unwrap_or_else(|| default_compact_limit(window, percent))
     );
     model["codey_context_source"] = json!("user_declared");
     Ok(())
@@ -754,10 +790,6 @@ fn render_catalog_for_provider(
     for model in &mut catalog_models {
         ensure_catalog_compatibility(model);
         expose_supported_model(model);
-        add_fast_speed_controls(model);
-        if supports_ultrafast_speed(model) {
-            add_ultrafast_speed_controls(model);
-        }
     }
 
     if !official_provider {
@@ -848,6 +880,7 @@ fn render_catalog_for_provider(
         }
     }
     for model in &mut catalog_models {
+        apply_model_speed_policy(model, None);
         normalize_third_party_compaction_identity(model);
         prepare_cached_context_window(model);
         // Codex 只发送模型目录里声明过的思考强度。目录没有 ultra 时，界面仍能
@@ -1054,6 +1087,18 @@ pub(crate) fn selection_state_in_context(
         official_model_ids,
         third_party_models,
         third_party_model_metadata,
+        synced_ultrafast_models: if official_provider {
+            official_entries
+                .iter()
+                .filter_map(|model| {
+                    ModelSpeedTiers::from_model(model)
+                        .filter(ModelSpeedTiers::supports_ultrafast)?;
+                    model["slug"].as_str().map(str::to_owned)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         manual_third_party_models,
         upstream_models: if official_provider {
             Vec::new()
@@ -1208,8 +1253,26 @@ fn instruction_template_for<'a>(slug: &str, templates: &'a [Value]) -> Option<&'
 fn account_model_with_runtime_template(base: &Value, account: &Value) -> Value {
     let base_slug = base.get("slug").and_then(Value::as_str).unwrap_or("");
     let account_slug = account.get("slug").and_then(Value::as_str).unwrap_or("");
+    let same_model = model_id::equal(base_slug, account_slug);
     let mut merged = overlay_account_fields(base, account);
-    if !account_slug.is_empty() && !model_id::equal(base_slug, account_slug) {
+    if !same_model
+        || account["service_tiers"].is_array()
+        || account["additional_speed_tiers"].is_array()
+        || account["default_service_tier"].is_string()
+    {
+        replace_template_speed_tiers(&mut merged, account);
+    }
+    if !same_model || declared_context_capacity(account).is_some() {
+        // 容量必须来自这个模型的声明。目录只借用其他模型的运行时模板。
+        let object = merged.as_object_mut().unwrap();
+        object.remove("codey_context_base");
+        for field in CONTEXT_FIELDS {
+            if account.get(field).is_none_or(Value::is_null) {
+                object.remove(field);
+            }
+        }
+    }
+    if !account_slug.is_empty() && !same_model {
         if account
             .get("description")
             .and_then(Value::as_str)
@@ -1794,18 +1857,21 @@ fn synthetic_model(
     index: usize,
     preserve_source_runtime_metadata: bool,
 ) -> Value {
+    let official_route = is_official_route_alias(model_id);
     let preserve_multi_agent_version =
         preserve_source_runtime_metadata && third_party_template_supports_coordination(template);
     let mut model = template.clone();
     if !preserve_source_runtime_metadata {
         codey_runtime_core::model_suffix::sanitize_generic_model_metadata(&mut model);
     }
-    if !preserve_source_runtime_metadata
-        || model
-            .get("context_window")
-            .and_then(Value::as_u64)
-            .is_none_or(|window| window == 0)
-    {
+    let has_context = if official_route {
+        declared_context_capacity(&model).is_some()
+    } else {
+        model["context_window"]
+            .as_u64()
+            .is_some_and(|window| window > 0)
+    };
+    if !preserve_source_runtime_metadata || !has_context {
         // ponytail: unknown providers use a 200K operating budget; an
         // explicit provider/model setting replaces it when capacity is known.
         model["context_window"] = json!(200_000);
@@ -1821,7 +1887,7 @@ fn synthetic_model(
     }
     model["slug"] = json!(model_id);
     model["display_name"] = json!(model_id);
-    if !is_official_route_alias(model_id) {
+    if !official_route {
         model["description"] = json!("Third-party API model");
         model["codey_source"] = json!("third_party");
     } else if let Some(object) = model.as_object_mut() {
@@ -1845,14 +1911,19 @@ fn synthetic_model(
             object.remove("multi_agent_reasoning_effort");
         }
     }
-    model["service_tiers"] = json!([]);
-    model["additional_speed_tiers"] = json!([]);
+    if !official_route {
+        model["service_tiers"] = json!([]);
+        model["additional_speed_tiers"] = json!([]);
+        // 第三方线路独立声明档位。Fast 在所有线路可选，可保留同名模型已有的默认 Fast。
+        if model["default_service_tier"] != FAST_SERVICE_TIER_ID {
+            model
+                .as_object_mut()
+                .unwrap()
+                .remove("default_service_tier");
+        }
+    }
     ensure_catalog_compatibility(&mut model);
     clamp_reasoning_efforts(&mut model);
-    add_fast_speed_controls(&mut model);
-    if supports_ultrafast_speed(&model) {
-        add_ultrafast_speed_controls(&mut model);
-    }
     model
 }
 
@@ -1879,13 +1950,6 @@ pub(super) fn prepare_cached_context_window(model: &mut Value) {
     }
     // Preserve the unmodified declaration so cached catalogs can remove an
     // override without inheriting stale window/threshold values.
-    const FIELDS: [&str; 5] = [
-        "context_window",
-        "max_context_window",
-        "effective_context_window_percent",
-        "auto_compact_token_limit",
-        "codey_context_source",
-    ];
     if model.get("codey_context_base").is_none()
         && matches!(
             model.get("codey_context_source").and_then(Value::as_str),
@@ -1901,7 +1965,7 @@ pub(super) fn prepare_cached_context_window(model: &mut Value) {
         model["auto_compact_token_limit"] = Value::Null;
     }
     if let Some(base) = model.get("codey_context_base").cloned() {
-        for field in FIELDS {
+        for field in CONTEXT_FIELDS {
             if let Some(value) = base.get(field) {
                 model[field] = value.clone();
             } else if let Some(object) = model.as_object_mut() {
@@ -1910,11 +1974,78 @@ pub(super) fn prepare_cached_context_window(model: &mut Value) {
         }
     } else {
         let mut base = serde_json::Map::new();
-        for field in FIELDS {
+        for field in CONTEXT_FIELDS {
             if let Some(value) = model.get(field) {
                 base.insert(field.to_string(), value.clone());
             }
         }
         model["codey_context_base"] = Value::Object(base);
     }
+    apply_official_context_default(model);
+}
+
+pub(super) fn declared_context_capacity(model: &Value) -> Option<u64> {
+    model["max_context_window"]
+        .as_u64()
+        .filter(|window| *window > 0)
+        .or_else(|| {
+            model["context_window"]
+                .as_u64()
+                .filter(|window| *window > 0)
+        })
+}
+
+fn is_official_catalog_model(model: &Value) -> bool {
+    let slug = model["slug"].as_str().unwrap();
+    model["codey_source"] != "third_party"
+        && (model_id::parse_alias(slug).is_none() || is_official_route_alias(slug))
+}
+
+fn apply_official_context_default(model: &mut Value) {
+    if !is_official_catalog_model(model)
+        || matches!(
+            model["codey_context_source"].as_str(),
+            Some("conservative_fallback" | "plugin_declared" | "user_declared")
+        )
+    {
+        return;
+    }
+    let window = OFFICIAL_DEFAULT_CONTEXT_WINDOW;
+    let Some(capacity) = declared_context_capacity(model).filter(|capacity| *capacity >= window)
+    else {
+        return;
+    };
+    let declared_window = model["context_window"].as_u64();
+    model["context_window"] = json!(window);
+    model["max_context_window"] = json!(capacity);
+    model["codey_context_source"] = json!("official_catalog");
+    if let Some(limit) = model["auto_compact_token_limit"].as_u64() {
+        let percent = model["effective_context_window_percent"]
+            .as_u64()
+            .unwrap_or(DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT)
+            .min(100);
+        let ceiling = default_compact_limit(window, percent);
+        // 目录可能直接声明原窗口的 90%，也可能已按有效比例截断，272k 还有取整为 240k 的默认值。
+        let follows_window = declared_window.is_some_and(|declared| {
+            declared < window
+                && (limit == default_compact_limit(declared, percent)
+                    || limit == declared * 9 / 10
+                    || (declared == DEFAULT_CONTEXT_WINDOW && limit == 240_000))
+        });
+        model["auto_compact_token_limit"] = json!(if follows_window {
+            ceiling
+        } else {
+            limit.min(ceiling)
+        });
+    }
+}
+
+pub(super) fn default_compact_limit(window: u64, effective_percent: u64) -> u64 {
+    (u128::from(window) * u128::from(effective_percent.min(90)) / 100) as u64
+}
+
+fn uses_official_context_default(model: &Value) -> bool {
+    is_official_catalog_model(model)
+        && model["codey_context_source"] == "official_catalog"
+        && model["context_window"] == OFFICIAL_DEFAULT_CONTEXT_WINDOW
 }

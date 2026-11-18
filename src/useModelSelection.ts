@@ -19,6 +19,7 @@ import type {
 } from "./App.types";
 import {
   AUTO_REVIEW_MODEL,
+  canConfigureUltrafast,
   includesModelId,
   modelIdsEqual,
   modelKey,
@@ -90,6 +91,16 @@ export function useModelSelection({
     Record<string, ModelReasoningEffort[]>
   >({});
   const [draftModelContexts, setDraftModelContexts] = useState<Record<string, ModelContextConfig>>({});
+  const [draftModelUltrafast, setDraftModelUltrafast] = useState<Record<string, boolean>>({});
+  const updateDraftModelUltrafast = useCallback((model: string, value: boolean | undefined) => {
+    setDraftModelUltrafast((current) => {
+      const next = { ...current };
+      const key = modelKey(model);
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  }, []);
   const updateDraftModelContext = useCallback((model: string, policy: ModelContextConfig | undefined) => {
     setDraftModelContexts((current) => {
       const next = { ...current };
@@ -232,6 +243,8 @@ export function useModelSelection({
       config?.selectedModelsByProvider[providerId] || [],
     ));
     setDraftModelContexts(config?.modelContextByProvider?.[providerId] || {});
+    setDraftModelUltrafast(Object.fromEntries(Object.entries(config?.modelUltrafastByProvider?.[providerId] ?? {})
+      .map(([model, value]) => [modelKey(model), value])));
     const storedReasoningEfforts = config?.modelReasoningEffortsByProvider?.[providerId];
     const reasoningModels = uniqueModelIds([
       ...state.upstreamModels,
@@ -330,13 +343,14 @@ export function useModelSelection({
     );
     if (!checked) {
       const retainedKeys = new Set([...modelEditorState.upstreamModels.map(modelKey), ...officialSlugKeys]);
-      setDraftReasoningEfforts((current) =>
+      const retainSettings = <T,>(current: Record<string, T>) =>
         Object.fromEntries(
           Object.entries(current).filter(
             ([key]) => !keys.has(key) || retainedKeys.has(key),
           ),
-        ),
-      );
+        );
+      setDraftReasoningEfforts(retainSettings);
+      setDraftModelUltrafast(retainSettings);
       setDraftManualThirdPartyModels((current) =>
         current.filter((item) => !keys.has(modelKey(item))),
       );
@@ -420,6 +434,7 @@ export function useModelSelection({
     const normalizedKey = modelKey(normalized);
     const wasManual = draftManualThirdPartyModelKeys.has(normalizedKey);
     if (!wasManual) return;
+    updateDraftModelUltrafast(normalized, undefined);
     setDraftReasoningEfforts((current) =>
       Object.fromEntries(
         Object.entries(current).filter(([key]) => key !== normalizedKey),
@@ -441,6 +456,7 @@ export function useModelSelection({
   }, [
     draftManualThirdPartyModelKeys,
     manualThirdPartyModelKeys,
+    updateDraftModelUltrafast,
   ]);
 
   const applyModelSelection = useCallback(async (
@@ -473,6 +489,9 @@ export function useModelSelection({
       ),
     );
     const contextUpdate = config?.localRouterEnabled === true ? { modelContexts } : {};
+    const modelUltrafast = Object.fromEntries(thirdPartyModelOptions
+      .filter((model) => canConfigureUltrafast(model) && draftModelUltrafast[modelKey(model)] !== undefined)
+      .map((model) => [model, draftModelUltrafast[modelKey(model)]]));
     const result = officialRoutePicker
       ? await invoke<{
           config: Config;
@@ -493,7 +512,7 @@ export function useModelSelection({
           supportsAutoReview,
           ...contextUpdate,
           ...(config?.localRouterEnabled === true && !officialOnly
-            ? { reasoningEfforts: declaredReasoningEfforts }
+            ? { reasoningEfforts: declaredReasoningEfforts, modelUltrafast }
             : {}),
           ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),
         });
@@ -513,6 +532,7 @@ export function useModelSelection({
     config,
     draftReasoningEfforts,
     draftModelContexts,
+    draftModelUltrafast,
     reasoningEffortAutoByModel,
     modelEditorState.officialModelIds,
     thirdPartyModelOptions,
@@ -570,6 +590,8 @@ export function useModelSelection({
     draftModelSet,
     draftModelContexts,
     updateDraftModelContext,
+    draftModelUltrafast,
+    updateDraftModelUltrafast,
     draftReasoningEfforts,
     reasoningEffortAutoByModel,
     modelPickerReasoningCapabilities,

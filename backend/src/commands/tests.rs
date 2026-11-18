@@ -4,6 +4,40 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[tokio::test]
+async fn model_ultrafast_setting_rejects_invalid_input_before_saving() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+    for invalid in [json!(1), json!({"gpt-6-astra": "true"}), Value::Null] {
+        let error = models::invoke(
+            &state,
+            "save_selected_models",
+            &json!({
+                "routeId": "route", "officialModels": [], "thirdPartyModels": ["gpt-5.6-sol"], "modelUltrafast": invalid
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("modelUltrafast"), "{error}");
+    }
+    assert!(!state.store.path().exists());
+    assert_eq!(
+        optional_argument::<BTreeMap<String, bool>>(&json!({}), "modelUltrafast").unwrap(),
+        None
+    );
+    assert_eq!(
+        optional_argument::<BTreeMap<String, bool>>(
+            &json!({"modelUltrafast":{"gpt-6-astra":false}}),
+            "modelUltrafast"
+        )
+        .unwrap(),
+        Some(BTreeMap::from([("gpt-6-astra".into(), false)]))
+    );
+}
+
+#[tokio::test]
 async fn official_concurrency_command_rejects_invalid_values_before_saving() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
@@ -169,7 +203,7 @@ async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
         directory.path(),
         true,
         Some(&config.runtime_enabled_model_contexts()),
-        &[],
+        &Default::default(),
     )
     .unwrap_err()
     .context("准备运行时模型目录失败");
@@ -254,7 +288,7 @@ async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
             directory.path(),
             true,
             Some(&config.runtime_enabled_model_contexts()),
-            &[],
+            &Default::default(),
         )
         .unwrap(),
         Some(source.clone())
@@ -1236,7 +1270,7 @@ async fn dropping_derived_official_routes_persists_the_route_removal() {
     });
     state.store.save(&config).unwrap();
 
-    crate::commands::official_accounts::drop_derived_official_routes(&state)
+    official_accounts::drop_derived_official_routes(&state, directory.path())
         .await
         .unwrap();
 
@@ -1263,7 +1297,7 @@ async fn dropping_derived_official_routes_persists_the_route_removal() {
 
     // 没有官方线路时重复调用不再改写配置。
     let revision = next.settings_revision;
-    crate::commands::official_accounts::drop_derived_official_routes(&state)
+    official_accounts::drop_derived_official_routes(&state, directory.path())
         .await
         .unwrap();
     assert_eq!(state.config.read().await.settings_revision, revision);
@@ -1290,6 +1324,328 @@ fn stored_official_account(
         }
     }))
     .expect("可反序列化的官方账号记录")
+}
+
+fn official_speed_tiers_fixture() -> crate::model_catalog::ModelSpeedTiers {
+    crate::model_catalog::ModelSpeedTiers::from_model(&json!({
+        "service_tiers": [{"id": "ultrafast", "name": "Ultrafast", "credits": 3}],
+        "additional_speed_tiers": ["ultrafast"],
+        "default_service_tier": "ultrafast",
+    }))
+    .unwrap()
+}
+
+async fn official_speed_test_state(home: &Path, account_ids: &[&str]) -> Arc<AppState> {
+    std::fs::write(home.join("config.toml"), "").unwrap();
+    crate::model_catalog::merge_account_runtime_models(
+        home,
+        &[json!({"slug": "gpt-6-astra", "description": "Template", "base_instructions": "Fixture"})],
+        "",
+    )
+    .unwrap();
+    let mut relay = ProviderProfile::new("Relay");
+    relay.id = "relay".into();
+    relay.base_url = "https://relay.example/v1".into();
+    let mut config = CodeyConfig {
+        active_profile_id: relay.id.clone(),
+        profiles: vec![relay],
+        ..CodeyConfig::default()
+    };
+    for provider_id in account_ids
+        .iter()
+        .map(|id| crate::config::official_profile_id(id))
+        .chain(std::iter::once("relay".to_string()))
+    {
+        config
+            .selected_models_by_provider
+            .insert(provider_id.clone(), vec!["gpt-6-astra".into()]);
+        config
+            .upstream_models_by_provider
+            .insert(provider_id.clone(), vec!["gpt-6-astra".into()]);
+        config.upstream_speed_tiers_by_provider.insert(
+            provider_id,
+            BTreeMap::from([("gpt-6-astra".into(), official_speed_tiers_fixture())]),
+        );
+    }
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(home.join("codey.json")),
+        config: RwLock::new(config.normalize()),
+        ..AppState::default()
+    });
+    let store = state.official_accounts();
+    for (index, account_id) in account_ids.iter().enumerate() {
+        store
+            .upsert(&stored_official_account(account_id, index as u64))
+            .unwrap();
+    }
+    store
+        .set_default_account_id(account_ids.first().copied())
+        .unwrap();
+    let probe = crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+    commit_official_launch_routes(&state, probe, home.to_path_buf())
+        .await
+        .unwrap();
+    state
+}
+
+fn disk_catalog_model(home: &Path, model_id: &str) -> Value {
+    let catalog: Value = serde_json::from_slice(
+        &std::fs::read(home.join(crate::model_catalog::relative_path())).unwrap(),
+    )
+    .unwrap();
+    catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == model_id)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn official_launch_siwc_switches_disk_speed_tiers_and_restores_catalog_on_save_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let state = official_speed_test_state(home, &["one"]).await;
+    let store = state.official_accounts();
+    let provider_id = crate::config::official_profile_id("one");
+    let siwc = serde_json::from_value(json!({
+        "clientId": "test-client", "accessToken": "test-access",
+        "scopes": ["chatgpt.tokens.use.direct"],
+    }))
+    .unwrap();
+    assert_eq!(
+        disk_catalog_model(home, "gpt-6-astra")["default_service_tier"],
+        "ultrafast"
+    );
+    for enabled in [true, false] {
+        let probe = crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+        if enabled {
+            store.attach_siwc("one", &siwc).unwrap();
+        } else {
+            store.clear_siwc("one").unwrap();
+        }
+        commit_official_launch_routes(&state, probe, home.to_path_buf())
+            .await
+            .unwrap();
+        let model = disk_catalog_model(home, "gpt-6-astra");
+        assert_eq!(
+            model["default_service_tier"].as_str(),
+            (!enabled).then_some("ultrafast")
+        );
+        assert_eq!(
+            model["service_tiers"]
+                .as_array()
+                .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == "ultrafast")),
+            !enabled
+        );
+        assert_eq!(
+            state.config.read().await.upstream_speed_tiers_by_provider[&provider_id]["gpt-6-astra"],
+            official_speed_tiers_fixture()
+        );
+    }
+    let previous = state.config.read().await.clone();
+    let catalog_path = home.join(crate::model_catalog::relative_path());
+    let saved_catalog = std::fs::read(&catalog_path).unwrap();
+    std::fs::remove_file(state.store.path()).unwrap();
+    std::fs::create_dir(state.store.path()).unwrap();
+    store.attach_siwc("one", &siwc).unwrap();
+    let probe = crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+    assert!(
+        commit_official_launch_routes(&state, probe, home.to_path_buf())
+            .await
+            .is_err()
+    );
+    assert_eq!(*state.config.read().await, previous);
+    assert_eq!(std::fs::read(catalog_path).unwrap(), saved_catalog);
+}
+
+#[tokio::test]
+async fn official_route_removal_clears_one_and_last_account_speed_tiers_from_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let state = official_speed_test_state(home, &["one", "two"]).await;
+    let store = state.official_accounts();
+    for account_id in ["one", "two"] {
+        let provider_id = crate::config::official_profile_id(account_id);
+        assert!(
+            !disk_catalog_model(home, &format!("{provider_id}/gpt-6-astra")).is_null()
+                || account_id == "two"
+        );
+        store.remove_with_codex_login(account_id, home).unwrap();
+        official_accounts::drop_derived_official_routes(&state, home)
+            .await
+            .unwrap();
+        let next = state.config.read().await.clone();
+        assert!(
+            !next
+                .upstream_speed_tiers_by_provider
+                .contains_key(&provider_id)
+        );
+        assert!(
+            next.profiles
+                .iter()
+                .all(|profile| profile.official_account_id.as_deref() != Some(account_id))
+        );
+        assert!(disk_catalog_model(home, &format!("{provider_id}/gpt-6-astra")).is_null());
+        assert_eq!(
+            disk_catalog_model(home, "relay/gpt-6-astra")["default_service_tier"],
+            "ultrafast"
+        );
+        if account_id == "one" {
+            assert!(
+                next.upstream_speed_tiers_by_provider
+                    .contains_key(&crate::config::official_profile_id("two"))
+            );
+            assert_eq!(
+                disk_catalog_model(home, "gpt-6-astra")["default_service_tier"],
+                "ultrafast"
+            );
+        } else {
+            assert!(disk_catalog_model(home, "gpt-6-astra").is_null());
+        }
+        let saved: CodeyConfig =
+            serde_json::from_slice(&std::fs::read(state.store.path()).unwrap()).unwrap();
+        assert_eq!(
+            saved.upstream_speed_tiers_by_provider,
+            next.upstream_speed_tiers_by_provider
+        );
+    }
+}
+
+#[tokio::test]
+async fn official_account_removal_updates_existing_aliases_without_speed_declarations() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let state = official_speed_test_state(home, &["one", "two"]).await;
+    let previous = state.config.read().await.clone();
+    let mut next = previous.clone();
+    next.upstream_speed_tiers_by_provider.clear();
+    let next = models::save_config_with_route_speed_changes(&state, &previous, next, home)
+        .await
+        .unwrap();
+    *state.config.write().await = next;
+    let old_alias = format!("{}/gpt-6-astra", crate::config::official_profile_id("one"));
+    assert!(!disk_catalog_model(home, &old_alias).is_null());
+
+    state
+        .official_accounts()
+        .remove_with_codex_login("one", home)
+        .unwrap();
+    official_accounts::drop_derived_official_routes(&state, home)
+        .await
+        .unwrap();
+    assert!(disk_catalog_model(home, &old_alias).is_null());
+    assert!(!disk_catalog_model(home, "gpt-6-astra").is_null());
+}
+
+#[tokio::test]
+async fn official_speed_cleanup_preserves_invalid_accounts_and_works_without_derived_routes() {
+    for local_router_enabled in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        std::fs::write(home.join("config.toml"), "").unwrap();
+        let mut config = CodeyConfig {
+            local_router_enabled,
+            ..CodeyConfig::default()
+        };
+        for id in ["removed", "invalid", "kept", "corrupt"] {
+            config.upstream_speed_tiers_by_provider.insert(
+                crate::config::official_profile_id(id),
+                BTreeMap::from([("gpt-6-astra".into(), official_speed_tiers_fixture())]),
+            );
+        }
+        config
+            .upstream_speed_tiers_by_provider
+            .insert("openai".into(), BTreeMap::new());
+        config
+            .upstream_speed_tiers_by_provider
+            .insert("relay".into(), BTreeMap::new());
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(home.join("codey.json")),
+            config: RwLock::new(config.clone()),
+            ..AppState::default()
+        });
+        let store = state.official_accounts();
+        for id in ["removed", "invalid", "kept"] {
+            let mut record = stored_official_account(id, 1);
+            if id != "kept" {
+                record.mark_invalid("expired");
+            }
+            store.upsert(&record).unwrap();
+        }
+        std::fs::write(store.account_path("corrupt"), "{").unwrap();
+        let stale_probe =
+            crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+        store.remove_with_codex_login("removed", home).unwrap();
+        official_accounts::drop_derived_official_routes(&state, home)
+            .await
+            .unwrap();
+        let expected = state
+            .config
+            .read()
+            .await
+            .upstream_speed_tiers_by_provider
+            .clone();
+        assert!(!expected.contains_key(&crate::config::official_profile_id("removed")));
+        for id in ["invalid", "kept", "corrupt"] {
+            assert!(expected.contains_key(&crate::config::official_profile_id(id)));
+        }
+        assert!(expected.contains_key("openai"));
+        assert!(expected.contains_key("relay"));
+        // 模拟删除已提交但配置写入未完成，旧探测重试仍按当前账号库清理。
+        *state.config.write().await = config;
+        commit_official_launch_routes(&state, stale_probe, home.to_path_buf())
+            .await
+            .unwrap();
+        let saved: CodeyConfig =
+            serde_json::from_slice(&std::fs::read(state.store.path()).unwrap()).unwrap();
+        assert_eq!(saved.upstream_speed_tiers_by_provider, expected);
+        assert_eq!(
+            state.config.read().await.upstream_speed_tiers_by_provider,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn official_route_removal_save_failure_rolls_back_catalog_and_retries_after_account_deletion()
+{
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let state = official_speed_test_state(home, &["one", "two"]).await;
+    let store = state.official_accounts();
+    let stale_probe = crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+    let previous = state.config.read().await.clone();
+    let catalog_path = home.join(crate::model_catalog::relative_path());
+    let catalog_before = std::fs::read(&catalog_path).unwrap();
+    store.remove_with_codex_login("two", home).unwrap();
+    std::fs::remove_file(state.store.path()).unwrap();
+    std::fs::create_dir(state.store.path()).unwrap();
+    assert!(
+        official_accounts::drop_derived_official_routes(&state, home)
+            .await
+            .is_err()
+    );
+    assert!(store.get("two").unwrap().is_none());
+    assert_eq!(*state.config.read().await, previous);
+    assert_eq!(std::fs::read(&catalog_path).unwrap(), catalog_before);
+    std::fs::remove_dir(state.store.path()).unwrap();
+    commit_official_launch_routes(&state, stale_probe, home.to_path_buf())
+        .await
+        .unwrap();
+    assert!(
+        !state
+            .config
+            .read()
+            .await
+            .upstream_speed_tiers_by_provider
+            .contains_key(&crate::config::official_profile_id("two"))
+    );
+    assert_eq!(
+        disk_catalog_model(home, "gpt-6-astra")["default_service_tier"],
+        "ultrafast"
+    );
 }
 
 #[tokio::test]

@@ -27,7 +27,7 @@ import {
   nextVisibleModelCount,
   visibleModelOptions,
 } from "./modelPickerPagination";
-import { modelKey } from "./modelIds";
+import { canConfigureUltrafast, modelKey } from "./modelIds";
 import {
   Badge,
   Button,
@@ -59,6 +59,8 @@ type ModelPickerDialogProps = {
   modelState: ModelState;
   draftModelSet: Set<string>;
   draftModelContexts: Record<string, ModelContextConfig>;
+  draftModelUltrafast: Record<string, boolean>;
+  onUpdateDraftModelUltrafast: (model: string, value: boolean | undefined) => void;
   draftReasoningEfforts: Record<string, ModelReasoningEffort[]>;
   reasoningEffortAutoByModel: Record<string, ModelReasoningEffort[]>;
   onUpdateDraftModelContext: (model: string, policy: ModelContextConfig | undefined) => void;
@@ -94,6 +96,8 @@ function ModelPickerDialogComponent({
   modelState,
   draftModelSet,
   draftModelContexts,
+  draftModelUltrafast,
+  onUpdateDraftModelUltrafast,
   draftReasoningEfforts,
   reasoningEffortAutoByModel,
   onUpdateDraftModelContext,
@@ -191,6 +195,9 @@ function ModelPickerDialogComponent({
         : new Set<string>(),
     [modelState.thirdPartyModels, open],
   );
+  const syncedUltrafast = useMemo(() => new Set(
+    modelState.syncedUltrafastModels?.map(modelKey),
+  ), [modelState.syncedUltrafastModels]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -330,6 +337,7 @@ function ModelPickerDialogComponent({
                     <strong className="break-words text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">{model.displayName}</strong>
                   </div>
                   {!routeConfigReadOnly && <ModelSettingsFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
+                    ultrafast={{ synced: syncedUltrafast.has(modelKey(model.slug)) }}
                     onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />}
                 </div>
               ))}
@@ -427,6 +435,11 @@ function ModelPickerDialogComponent({
                     disabled={isBusy}
                     policy={draftModelContexts[model]}
                     onChange={(policy) => onUpdateDraftModelContext(model, policy)}
+                    ultrafast={canConfigureUltrafast(model) ? {
+                      synced: syncedUltrafast.has(key),
+                      override: draftModelUltrafast[key],
+                      onChange: (value) => onUpdateDraftModelUltrafast(model, value),
+                    } : undefined}
                     reasoning={{
                       efforts: draftReasoningEfforts[key] ?? [],
                       autoEfforts: reasoningEffortAutoByModel[key] ?? [],

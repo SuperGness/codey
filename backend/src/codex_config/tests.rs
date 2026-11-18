@@ -687,7 +687,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: false,
@@ -853,7 +853,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
@@ -907,7 +907,7 @@ fn isolated_runtime_config_creates_empty_codex_config_when_missing() {
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
@@ -1518,7 +1518,7 @@ fn native_runtime_forwards_user_catalog_with_the_same_resolved_path() {
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: None,
             use_official_catalog: false,
@@ -1544,7 +1544,7 @@ fn native_runtime_forwards_user_catalog_with_the_same_resolved_path() {
     assert_eq!(resolved, home.join("models/custom.json"));
     assert_eq!(
         Some(resolved),
-        runtime_model_catalog_path(&home, false, None, &[]).unwrap()
+        runtime_model_catalog_path(&home, false, None, &Default::default()).unwrap()
     );
     assert_eq!(
         fs::read_to_string(home.join("config.toml")).unwrap(),
@@ -1565,7 +1565,7 @@ fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: None,
             use_official_catalog: false,
@@ -1612,14 +1612,14 @@ fn custom_context_runtime_overlay_keeps_external_catalog_and_config() {
             reserve_output_tokens: None,
         },
     )]);
-    validate_runtime_model_contexts(home.path(), &policies, &[]).unwrap();
+    validate_runtime_model_contexts(home.path(), &policies, &Default::default()).unwrap();
     assert!(
         !home
             .path()
             .join("model-catalogs/context-overrides")
             .exists()
     );
-    let path = runtime_model_catalog_path(home.path(), true, Some(&policies), &[])
+    let path = runtime_model_catalog_path(home.path(), true, Some(&policies), &Default::default())
         .unwrap()
         .unwrap();
     assert!(path.starts_with(home.path().join("model-catalogs/context-overrides")));
@@ -1636,7 +1636,13 @@ fn custom_context_runtime_overlay_keeps_external_catalog_and_config() {
     assert_eq!(fs::read(&source).unwrap(), original);
     assert_eq!(fs::read(runtime).unwrap(), runtime_bytes);
     assert_eq!(
-        runtime_model_catalog_path(home.path(), true, Some(&BTreeMap::new()), &[]).unwrap(),
+        runtime_model_catalog_path(
+            home.path(),
+            true,
+            Some(&BTreeMap::new()),
+            &Default::default()
+        )
+        .unwrap(),
         Some(source)
     );
 }
@@ -1679,7 +1685,7 @@ fn runtime_context_overlay_uses_user_catalog_and_reset_restores_its_path() {
                 local_router: router.then(test_runtime_router_endpoint),
                 use_official_catalog: router,
                 model_contexts: Some(contexts),
-                required_catalog_models: &[],
+                required_catalog_models: &Default::default(),
                 stream_max_retries: 5,
                 default_model: None,
                 fastctx_command: None,
@@ -1704,7 +1710,8 @@ fn runtime_context_overlay_uses_user_catalog_and_reset_restores_its_path() {
             assert_ne!(path, source);
             assert_eq!(
                 Some(path.clone()),
-                runtime_model_catalog_path(&home, true, Some(contexts), &[]).unwrap()
+                runtime_model_catalog_path(&home, true, Some(contexts), &Default::default())
+                    .unwrap()
             );
             let projected: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1739,7 +1746,10 @@ fn runtime_context_overlay_required_models_respect_router_and_catalog_selection(
     let generated = home.join(crate::model_catalog::relative_path());
     fs::create_dir_all(generated.parent().unwrap()).unwrap();
     fs::write(&generated, br#"{"models":[{"slug":"route/model","description":"Model","base_instructions":"Instructions","context_window":320000},{"slug":"disabled/model"}]}"#).unwrap();
-    let required = vec!["route/model".to_string()];
+    let required = crate::model_catalog::RequiredCatalogModels {
+        models: vec!["route/model".to_string()],
+        ..Default::default()
+    };
     let marker = temp.path().join("state/lease.json");
     let backup_root = temp.path().join("state/backups");
     for (router, use_catalog) in [(true, true), (true, false), (false, true), (false, false)] {
@@ -1824,7 +1834,7 @@ fn context_budget_startup_applies_and_recovers_global_conflicts() {
             local_router: Some(test_runtime_router_endpoint()),
             use_official_catalog: true,
             model_contexts: Some(&policies),
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             default_model: None,
             fastctx_command: None,
@@ -1850,6 +1860,10 @@ fn context_budget_startup_applies_and_recovers_global_conflicts() {
         .as_str()
         .unwrap()
         .to_string();
+    assert_eq!(
+        applied.model_catalog_path.as_deref(),
+        Some(Path::new(&path))
+    );
     let projected: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     let model = projected["models"]
         .as_array()
@@ -1896,7 +1910,7 @@ fn isolated_runtime_skips_retry_overrides_for_builtin_providers() {
             RouterApplyOptions {
                 remote_compaction_models: None,
                 model_contexts: None,
-                required_catalog_models: &[],
+                required_catalog_models: &Default::default(),
                 stream_max_retries: 7,
                 local_router: None,
                 use_official_catalog: false,
@@ -1945,7 +1959,7 @@ fn isolated_runtime_keeps_retry_overrides_for_custom_providers() {
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 7,
             local_router: None,
             use_official_catalog: false,
@@ -2004,7 +2018,7 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
                 RouterApplyOptions {
                     remote_compaction_models: None,
                     model_contexts: None,
-                    required_catalog_models: &[],
+                    required_catalog_models: &Default::default(),
                     stream_max_retries: 5,
                     local_router,
                     use_official_catalog: false,
@@ -2059,7 +2073,7 @@ wire_api = "responses"
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: None,
             use_official_catalog: false,
@@ -2231,7 +2245,7 @@ service_tier = "flex"
                 RouterApplyOptions {
                     remote_compaction_models: None,
                     model_contexts: None,
-                    required_catalog_models: &[],
+                    required_catalog_models: &Default::default(),
                     stream_max_retries: 5,
                     local_router,
                     use_official_catalog: false,
@@ -3468,7 +3482,7 @@ experimental_bearer_token = "upstream-secret-token"
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
@@ -3606,7 +3620,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
@@ -3651,7 +3665,7 @@ fn builtin_catalog_roles_keep_the_selected_routes_compaction_mode() {
             stream_max_retries: 5,
             use_official_catalog: false,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             default_model: None,
             fastctx_command: None,
             subagent_optimization: true,
@@ -3703,7 +3717,7 @@ wire_api = "responses"
         RouterApplyOptions {
             remote_compaction_models: None,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
@@ -3861,7 +3875,7 @@ fn isolated_scope_guard_adds_start_hooks_beside_the_subagent_gate() {
             stream_max_retries: 5,
             use_official_catalog: false,
             model_contexts: None,
-            required_catalog_models: &[],
+            required_catalog_models: &Default::default(),
             default_model: None,
             fastctx_command: None,
             subagent_optimization: true,

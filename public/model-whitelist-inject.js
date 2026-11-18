@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "85";
+  const patchVersion = "86";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -509,7 +509,15 @@
             || typeof metadata.model !== "string"
           ) return [];
           const model = canonicalModelName(models, metadata.model);
-          return model ? [[model, metadata]] : [];
+          if (!model) return [];
+          if (!nativeSelectionOnly && Array.isArray(metadata.service_tiers)) {
+            return [[model, {
+              ...metadata,
+              service_tiers: nativeFastServiceTiers(metadata.service_tiers),
+              additional_speed_tiers: nativeFastSpeedTiers(metadata.additional_speed_tiers),
+            }]];
+          }
+          return [[model, metadata]];
         }),
     );
     const routeMetadata = nativeSelectionOnly ? {} : Object.fromEntries(
@@ -727,6 +735,19 @@
     return tiers.includes(fastSpeedTierId) ? tiers : [...tiers, fastSpeedTierId];
   };
 
+  // QueryClient preserves cached references for deeply equal speed tier data.
+  const sameSpeedTierData = (left, right) => {
+    if (left === right) return true;
+    if (
+      left === null || right === null
+      || typeof left !== "object" || typeof right !== "object"
+      || Array.isArray(left) !== Array.isArray(right)
+    ) return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length
+      && keys.every((key) => Object.hasOwn(right, key) && sameSpeedTierData(left[key], right[key]));
+  };
+
   const generatedRouteProviderId = (providerId) => {
     const key = modelKey(providerId);
     return key.startsWith("codey-official-account-") || key.startsWith("route-");
@@ -807,12 +828,11 @@
 
   const modelDescriptor = (modelName, current = null) => {
     const metadata = catalog.modelMetadata[modelName];
+    const hasRouteTiers = !nativeSelectionOnly && Array.isArray(metadata?.service_tiers);
     const descriptorMetadata = {
-      serviceTiers: nativeFastServiceTiers(current?.serviceTiers),
-      additionalSpeedTiers: nativeFastSpeedTiers(current?.additionalSpeedTiers),
-      defaultServiceTier: Object.hasOwn(current || {}, "defaultServiceTier")
-        ? current.defaultServiceTier
-        : null,
+      serviceTiers: hasRouteTiers ? metadata.service_tiers : nativeFastServiceTiers(current?.serviceTiers),
+      additionalSpeedTiers: hasRouteTiers ? metadata.additional_speed_tiers : nativeFastSpeedTiers(current?.additionalSpeedTiers),
+      defaultServiceTier: (hasRouteTiers ? metadata.default_service_tier : current?.defaultServiceTier) ?? null,
       contextWindow: Object.hasOwn(metadata || {}, "context_window") ? metadata.context_window : current?.contextWindow,
       maxContextWindow: Object.hasOwn(metadata || {}, "max_context_window") ? metadata.max_context_window : current?.maxContextWindow,
       effectiveContextWindowPercent: Object.hasOwn(metadata || {}, "effective_context_window_percent") ? metadata.effective_context_window_percent : current?.effectiveContextWindowPercent,
@@ -920,6 +940,9 @@
     if (!leftMetadata || !rightMetadata) return leftMetadata === rightMetadata;
     return (
       leftMetadata.default_reasoning_effort === rightMetadata.default_reasoning_effort
+      && leftMetadata.default_service_tier === rightMetadata.default_service_tier
+      && sameSpeedTierData(leftMetadata.service_tiers, rightMetadata.service_tiers)
+      && sameSpeedTierData(leftMetadata.additional_speed_tiers, rightMetadata.additional_speed_tiers)
       && leftMetadata.context_window === rightMetadata.context_window
       && leftMetadata.max_context_window === rightMetadata.max_context_window
       && leftMetadata.effective_context_window_percent === rightMetadata.effective_context_window_percent
@@ -996,8 +1019,8 @@
           model?.supportedReasoningEfforts,
           nextModels[index]?.supportedReasoningEfforts,
         )
-        && model?.serviceTiers === nextModels[index]?.serviceTiers
-        && model?.additionalSpeedTiers === nextModels[index]?.additionalSpeedTiers
+        && sameSpeedTierData(model?.serviceTiers, nextModels[index]?.serviceTiers)
+        && sameSpeedTierData(model?.additionalSpeedTiers, nextModels[index]?.additionalSpeedTiers)
         && model?.defaultServiceTier === nextModels[index]?.defaultServiceTier
       ))
     );

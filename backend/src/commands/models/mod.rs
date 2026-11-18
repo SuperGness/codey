@@ -164,6 +164,7 @@ pub(super) async fn invoke(
                     route_id,
                     model_reasoning_efforts,
                     model_contexts,
+                    optional_argument::<BTreeMap<String, bool>>(args, "modelUltrafast")?,
                 )
                 .await
             }

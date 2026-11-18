@@ -2,6 +2,7 @@
 //! OAuth login flow, keep several of them, and pick exactly one as the default
 //! that Codex runs as.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -835,29 +836,31 @@ pub(super) async fn remove_official_account(
     let store = state.official_accounts();
     let home = codex_home().to_path_buf();
     let removal_id = account_id.clone();
-    let (removed_default, promoted, accounts_left) =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<(bool, Option<String>, bool)> {
-            let (was_default, mut remaining) = store.remove_with_codex_login(&removal_id, &home)?;
-            // 默认账号被移除后把剩下最早的可用账号补上，Codex 仍然有可用的登录
-            // 身份；失效账号必须跳过，否则补位会因凭据被拒绝而整个失败。
-            let promoted = if was_default {
-                remaining.sort_by(|left, right| {
-                    left.added_at
-                        .cmp(&right.added_at)
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                remaining
-                    .iter()
-                    .find(|record| !record.invalid())
-                    .map(|record| record.id.clone())
-            } else {
-                None
-            };
-            Ok((was_default, promoted, !remaining.is_empty()))
-        })
-        .await
-        .map_err(|error| format!("移除官方账号任务异常退出：{error}"))?
-        .map_err(|error| format!("{error:#}"))?;
+    // 删除和线路提交共用配置锁，避免旧探测在删除之后重新写入账号状态。
+    let config_write_guard = state.config_write_lock.lock().await;
+    let promoted = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+        let (was_default, mut remaining) = store.remove_with_codex_login(&removal_id, &home)?;
+        // 默认账号被移除后把剩下最早的可用账号补上，Codex 仍然有可用的登录
+        // 身份；失效账号必须跳过，否则补位会因凭据被拒绝而整个失败。
+        let promoted = if was_default {
+            remaining.sort_by(|left, right| {
+                left.added_at
+                    .cmp(&right.added_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            remaining
+                .iter()
+                .find(|record| !record.invalid())
+                .map(|record| record.id.clone())
+        } else {
+            None
+        };
+        Ok(promoted)
+    })
+    .await
+    .map_err(|error| format!("移除官方账号任务异常退出：{error}"))?
+    .map_err(|error| format!("{error:#}"))?;
+    drop(config_write_guard);
     if let Some(credential) = siwc_credential
         && let Err(error) = revoke_account_siwc(state, &credential).await
     {
@@ -869,6 +872,7 @@ pub(super) async fn remove_official_account(
         );
     }
     if let Some(promoted) = promoted {
+        // 补位会重新派生线路并清理已删除账号的档位；先完成默认登录的切换。
         let payload = match set_default_official_account(state, promoted).await {
             Ok(payload) => payload,
             Err(error) => {
@@ -889,35 +893,102 @@ pub(super) async fn remove_official_account(
         };
         return Ok(merge(payload, json!({ "status": "ok" })));
     }
-    if removed_default && !accounts_left {
-        // 最后一个官方账号已经删除，配置里由它派生的线路随之失效；先撤掉这些
-        // 线路再重新准备，本地路由不会继续转发到已经不存在的账号。
-        drop_derived_official_routes(state).await?;
-    }
+    drop_derived_official_routes(state, codex_home())
+        .await
+        .map_err(|error| format!("账号已移除，但清理官方线路失败：{error}"))?;
     let payload = refresh_official_route_after_account_change(state).await?;
     Ok(merge(payload, json!({ "status": "ok" })))
 }
 
-/// Removes every derived official route from the running configuration and
-/// persists the result. Used when the account store is empty, so the local
-/// router stops exposing routes whose accounts no longer exist.
-pub(super) async fn drop_derived_official_routes(state: &Arc<AppState>) -> Result<(), String> {
+pub(super) fn include_existing_account_files(
+    store: &OfficialAccountStore,
+    mut provider_ids: HashSet<String>,
+    known_provider_ids: &[String],
+) -> anyhow::Result<HashSet<String>> {
+    let prefix = format!("{}-", crate::config::DERIVED_OFFICIAL_PROFILE_ID);
+    // 账号列表会跳过损坏记录；文件仍在时不能把解析失败当作账号已删除。
+    for provider_id in known_provider_ids {
+        if !provider_ids.contains(provider_id)
+            && let Some(account_id) = provider_id.strip_prefix(&prefix)
+            && store.account_path(account_id).try_exists()?
+        {
+            provider_ids.insert(provider_id.clone());
+        }
+    }
+    Ok(provider_ids)
+}
+
+/// 失效账号仍保留同步历史；只有账号记录已删除时才清除对应声明。
+pub(super) fn prune_deleted_account_speed_tiers(
+    config: &mut CodeyConfig,
+    account_provider_ids: &HashSet<String>,
+) {
+    let prefix = format!("{}-", crate::config::DERIVED_OFFICIAL_PROFILE_ID);
+    config
+        .upstream_speed_tiers_by_provider
+        .retain(|provider_id, _| {
+            !provider_id.starts_with(&prefix)
+                || account_provider_ids.contains(provider_id)
+                || config.profiles.iter().any(|profile| {
+                    !profile.official_account && profile.provider_id() == provider_id
+                })
+        });
+}
+
+/// 删除后按当前账号库清理线路，避免并发导入或重试时删除其他账号的状态。
+pub(super) async fn drop_derived_official_routes(
+    state: &Arc<AppState>,
+    home: &std::path::Path,
+) -> Result<(), String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
-    if !previous
+    let known_provider_ids = previous
+        .upstream_speed_tiers_by_provider
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let store = state.official_accounts();
+    let account_provider_ids = tokio::task::spawn_blocking(move || {
+        let (records, _) = store.route_snapshot()?;
+        let provider_ids = records
+            .iter()
+            .map(|record| crate::config::official_profile_id(&record.id))
+            .collect();
+        include_existing_account_files(&store, provider_ids, &known_provider_ids)
+    })
+    .await
+    .map_err(|error| format!("读取官方账号任务异常退出：{error}"))?
+    .map_err(|error| format!("{error:#}"))?;
+    let mut next = previous.clone();
+    let keeps_official_route = |profile: &crate::config::ProviderProfile| {
+        profile.official_account_id.as_deref().map_or_else(
+            || !account_provider_ids.is_empty(),
+            |id| account_provider_ids.contains(&crate::config::official_profile_id(id)),
+        )
+    };
+    if previous
         .profiles
         .iter()
-        .any(|profile| profile.official_account)
+        .any(|profile| profile.official_account && !keeps_official_route(profile))
     {
+        let remaining = previous
+            .profiles
+            .iter()
+            .filter(|profile| profile.official_account && keeps_official_route(profile))
+            .cloned()
+            .collect();
+        next.apply_launch_official_profiles(remaining);
+        next = next.normalize();
+    }
+    prune_deleted_account_speed_tiers(&mut next, &account_provider_ids);
+    if !super::persisted_config_changed(&previous, &next) {
         return Ok(());
     }
-    let mut next = previous.clone();
-    next.apply_launch_official_profiles(Vec::new());
-    next = next.normalize();
     if next.settings_revision == previous.settings_revision {
         next.settings_revision = previous.settings_revision.saturating_add(1);
     }
-    let next = save_config_to_store(state, next).await?;
+    let next =
+        super::models::save_config_with_route_speed_changes(state, &previous, next, home).await?;
     *state.config.write().await = next;
     Ok(())
 }

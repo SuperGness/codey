@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 import { FakeElementCore, liveCollection } from "./helpers/fake-element.mjs";
 
@@ -1166,7 +1167,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "85");
+  assert.equal(patch.version, "86");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -5008,6 +5009,29 @@ test("an unchanged model list repairs missing native Fast tiers", async () => {
   patch.dispose();
 });
 
+test("updating only a route's speed tiers refreshes the mounted picker and removes withdrawn tiers", async () => {
+  const model = "route/future-model";
+  const queryClient = activeModelQueryClient([model]);
+  const fast = { id: "priority", name: "Fast", description: "2x speed" };
+  const ultra = { id: "ultrafast", name: "Express", description: "Upstream" };
+  const future = { id: "future-tier", name: "Future", cost: 3 };
+  const catalog = (services, speeds, defaultTier = null) => ({
+    status: "ok", models: [model], default_model: model,
+    model_metadata: [{ model, service_tiers: services, additional_speed_tiers: speeds, default_service_tier: defaultTier }],
+  });
+  const runtime = await loadPatch(catalog([fast], ["fast"]), [statsigClient()], { queryClient });
+  await runtime.patch.setCatalog(catalog([fast, ultra, future], ["fast", "ultrafast"], "future-tier"));
+  const updated = queryClient.model(model);
+  assert.deepEqual(updated.serviceTiers, [fast, ultra, future]);
+  assert.deepEqual(updated.additionalSpeedTiers, ["fast", "ultrafast"]);
+  assert.equal(updated.defaultServiceTier, "future-tier");
+  await runtime.patch.setCatalog(catalog([fast], ["fast"]));
+  assert.deepEqual(queryClient.model(model).serviceTiers, [fast]);
+  assert.deepEqual(queryClient.model(model).additionalSpeedTiers, ["fast"]);
+  assert.equal(queryClient.model(model).defaultServiceTier, null);
+  runtime.patch.dispose();
+});
+
 test("catalog model metadata overrides stale native reasoning efforts", async () => {
   const client = statsigClient();
   const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
@@ -5276,6 +5300,52 @@ async function verifyRendererDelivery(patch, catalog) {
   });
   return JSON.parse(report);
 }
+
+test("CDP accepts a changed model list when the cache reuses equal speed tiers", async () => {
+  const model = "route/current";
+  const addedModel = "route/new";
+  const queryClient = activeModelQueryClient([model]);
+  const cachedModel = queryClient.model(model);
+  cachedModel.serviceTiers = [{ name: "Fast", id: "priority" }];
+  cachedModel.additionalSpeedTiers = ["fast"];
+  const write = queryClient.setQueryData;
+  queryClient.setQueryData = (key, value) => {
+    const previous = queryClient.result();
+    const data = value.data.map((descriptor, index) => {
+      const shared = { ...descriptor };
+      // TanStack Query preserves cached references for deeply equal data.
+      for (const field of ["serviceTiers", "additionalSpeedTiers"]) {
+        const cached = previous.data[index]?.[field];
+        if (isDeepStrictEqual(cached, descriptor[field])) shared[field] = cached;
+      }
+      return shared;
+    });
+    write(key, { ...value, data });
+  };
+  const catalog = {
+    status: "ok", models: [model], default_model: model,
+    model_metadata: [{
+      model,
+      service_tiers: [{ id: "priority", name: "Fast" }],
+      additional_speed_tiers: ["fast"],
+    }],
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()], { queryClient });
+  let notifications = 0;
+  queryClient.subscribe(() => { notifications += 1; });
+
+  const updated = { ...catalog, models: [model, addedModel] };
+  const report = await verifyRendererDelivery(runtime.patch, updated);
+
+  assert.equal(report.ok, true, report.error);
+  assert.equal(report.delivered, "active");
+  assert.equal(report.delivery.pendingQueryEntries, 0);
+  assert.equal(notifications, 1);
+  assert.deepEqual(queryClient.models(), updated.models);
+  assert.equal(queryClient.model(model).serviceTiers, cachedModel.serviceTiers);
+  assert.equal(queryClient.model(model).additionalSpeedTiers, cachedModel.additionalSpeedTiers);
+  runtime.patch.dispose();
+});
 
 test("CDP requires every existing model cache to acknowledge the catalog", async () => {
   const catalog = { status: "ok", models: ["current"], default_model: "current" };

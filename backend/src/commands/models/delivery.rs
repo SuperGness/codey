@@ -60,7 +60,11 @@ pub(crate) async fn runtime_renderer_model_catalog(state: &Arc<AppState>) -> Res
         runtime.as_ref().map(|runtime| &runtime.applied_config),
         applied.as_ref(),
     );
-    renderer_catalog_with_official_send_bypass(state, config).await
+    let mut catalog = renderer_catalog_with_official_send_bypass(state, config).await?;
+    if let Some(runtime) = runtime.as_ref() {
+        runtime.pin_renderer_context_budgets(&mut catalog);
+    }
+    Ok(catalog)
 }
 
 /// 绑定到其他官方账号的线路不受会话额度快照约束。运行中的 Codex 会话按
@@ -161,11 +165,12 @@ pub(crate) async fn hot_reload_runtime_models_locked(
         } else {
             config_with_launch_pinned_transport(&runtime.applied_config, &config)
         };
-    let expected_catalog = match renderer_catalog_with_official_send_bypass(state, &delivered).await
-    {
-        Ok(catalog) => catalog,
-        Err(error) => return ModelHotReloadOutcome::failed(error),
-    };
+    let mut expected_catalog =
+        match renderer_catalog_with_official_send_bypass(state, &delivered).await {
+            Ok(catalog) => catalog,
+            Err(error) => return ModelHotReloadOutcome::failed(error),
+        };
+    runtime.apply_renderer_context_budgets(&mut expected_catalog);
     let previous = runtime.applied_model_catalog_config().await;
     let router_swap = if delivered.local_router_enabled {
         match runtime.sync_local_router_routes(&delivered) {
@@ -176,9 +181,12 @@ pub(crate) async fn hot_reload_runtime_models_locked(
         None
     };
     if skip_unchanged
-        && let Ok(previous_catalog) =
+        && let Ok(mut previous_catalog) =
             renderer_catalog_with_official_send_bypass(state, &previous).await
-        && previous_catalog == expected_catalog
+        && {
+            runtime.pin_renderer_context_budgets(&mut previous_catalog);
+            previous_catalog == expected_catalog
+        }
     {
         runtime.mark_model_config_applied(&delivered).await;
         return ModelHotReloadOutcome::default();
@@ -199,9 +207,12 @@ pub(crate) async fn hot_reload_runtime_models_locked(
             }
             let rollback = match renderer_catalog_with_official_send_bypass(state, &previous).await
             {
-                Ok(catalog) => refresh_current_renderer(&runtime, &catalog)
-                    .await
-                    .map(|_| ()),
+                Ok(mut catalog) => {
+                    runtime.pin_renderer_context_budgets(&mut catalog);
+                    refresh_current_renderer(&runtime, &catalog)
+                        .await
+                        .map(|_| ())
+                }
                 Err(error) => Err(error),
             };
             let error = match rollback {

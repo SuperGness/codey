@@ -690,6 +690,13 @@ pub struct CodeyConfig {
     /// result with user-confirmed model declarations.
     #[serde(default)]
     pub upstream_models_by_provider: BTreeMap<String, Vec<String>>,
+    /// 线路最近一次同步的速度声明。只有模型 ID 的响应也会替换此前的声明。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) upstream_speed_tiers_by_provider:
+        BTreeMap<String, BTreeMap<String, crate::model_catalog::ModelSpeedTiers>>,
+    /// 第三方线路按模型覆盖 Ultrafast 显示状态；缺省时跟随同步结果。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) model_ultrafast_by_provider: BTreeMap<String, BTreeMap<String, bool>>,
     /// Previously published selectors mapped to upstream ids. Retained across
     /// route removal and router-mode changes; contains no connection secrets.
     #[serde(default)]
@@ -862,6 +869,8 @@ impl Default for CodeyConfig {
             manual_third_party_models_by_provider: BTreeMap::new(),
             declared_official_models_by_provider: BTreeMap::new(),
             upstream_models_by_provider: BTreeMap::new(),
+            upstream_speed_tiers_by_provider: BTreeMap::new(),
+            model_ultrafast_by_provider: BTreeMap::new(),
             model_alias_history: BTreeMap::new(),
             default_model: String::new(),
             disable_trace_log_writes: true,

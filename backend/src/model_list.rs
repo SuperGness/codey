@@ -54,6 +54,13 @@ pub(crate) fn visit_model_ids<E>(
     value: &Value,
     visitor: &mut impl FnMut(&str) -> Result<bool, E>,
 ) -> Result<bool, E> {
+    visit_model_entries(value, &mut |id, _| visitor(id))
+}
+
+pub(crate) fn visit_model_entries<E>(
+    value: &Value,
+    visitor: &mut impl FnMut(&str, &Value) -> Result<bool, E>,
+) -> Result<bool, E> {
     match value {
         Value::Array(items) => {
             visit_model_items(items, visitor)?;
@@ -70,7 +77,7 @@ pub(crate) fn visit_model_ids<E>(
                 }
             }
             if !recognized && let Some(model) = model_id_value(value) {
-                visitor(model)?;
+                visitor(model, value)?;
                 recognized = true;
             }
             Ok(recognized)
@@ -81,11 +88,11 @@ pub(crate) fn visit_model_ids<E>(
 
 fn visit_model_items<E>(
     items: &[Value],
-    visitor: &mut impl FnMut(&str) -> Result<bool, E>,
+    visitor: &mut impl FnMut(&str, &Value) -> Result<bool, E>,
 ) -> Result<bool, E> {
     for item in items {
         if let Some(model) = model_id_value(item)
-            && !visitor(model)?
+            && !visitor(model, item)?
         {
             return Ok(false);
         }

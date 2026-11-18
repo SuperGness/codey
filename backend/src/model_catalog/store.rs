@@ -250,7 +250,22 @@ fn read_official_entries_uncached(
                 .get("codey_account_snapshot")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-        let models = official_models_from_value(&value);
+        let mut models = official_models_from_value(&value);
+        if path.ends_with(MODEL_CATALOG_RELATIVE_PATH) {
+            // 旧版生成目录曾按模型名补 Ultrafast，只能用它恢复指令等模板字段。
+            for model in &mut models {
+                clear_template_speed_tiers(model);
+            }
+        } else {
+            for model in &mut models {
+                // 有来源的官方容量声明应保留，旧版 Codey 的 1M 覆盖另行迁移。
+                if model.get("codey_context_source").is_none()
+                    && declared_context_capacity(model).is_some()
+                {
+                    model["codey_context_source"] = json!("official_catalog");
+                }
+            }
+        }
         if account_snapshot {
             account_snapshot_models = Some(models.clone());
         }
@@ -314,7 +329,6 @@ fn read_official_entries_uncached(
                     .unwrap_or(slug)
                     .to_string();
                 normalize_official_model(&mut model, slug, &display_name, seen.len() - 1);
-                add_fast_speed_controls(&mut model);
                 Some(model)
             })
             .collect::<Vec<_>>();
@@ -345,12 +359,6 @@ fn read_official_entries_uncached(
             let fallbacks = matching_models;
             complete_reasoning_metadata(&mut model, &fallbacks);
             normalize_official_model(&mut model, slug, display_name, priority);
-            add_fast_speed_controls(&mut model);
-            if supports_ultrafast_speed(&model) {
-                add_ultrafast_speed_controls(&mut model);
-            } else {
-                remove_ultrafast_speed_controls(&mut model);
-            }
             Ok(model)
         })
         .collect()

@@ -251,6 +251,7 @@ impl CodeyConfig {
         normalize_model_lists(&mut self.selected_models_by_provider);
         self.prune_retired_official_selections();
         normalize_model_reasoning_effort_lists(&mut self.model_reasoning_efforts_by_provider);
+        self.normalize_model_ultrafast();
         normalize_model_lists(&mut self.manual_third_party_models_by_provider);
         normalize_model_lists(&mut self.declared_official_models_by_provider);
         normalize_upstream_model_lists(&mut self.upstream_models_by_provider);
@@ -325,6 +326,7 @@ impl CodeyConfig {
             self.declared_official_models_by_provider
                 .remove(&provider_id);
             self.upstream_models_by_provider.remove(&provider_id);
+            self.upstream_speed_tiers_by_provider.remove(&provider_id);
         }
         if !official_profiles.is_empty() {
             // Official and third-party routes share the short-name namespace,
@@ -353,26 +355,18 @@ impl CodeyConfig {
                     }
                 }
                 let account_key = account_id.unwrap_or_default();
-                official_profile.enabled = previous_official_profiles
+                let previous = previous_official_profiles
                     .iter()
                     .find(|(_, previous_account_id, _)| {
                         previous_account_id.as_deref() == Some(account_key.as_str())
                     })
-                    .map(|(_, _, enabled)| *enabled)
                     .or_else(|| {
-                        // 升级前只有一条官方线路，它的启用状态留给默认账号。
-                        (index == 0)
-                            .then(|| {
-                                previous_official_profiles
-                                    .iter()
-                                    .find(|(_, previous_account_id, _)| {
-                                        previous_account_id.is_none()
-                                    })
-                                    .map(|(_, _, enabled)| *enabled)
-                            })
-                            .flatten()
-                    })
-                    .unwrap_or(true);
+                        // 旧版的单条官方线路由默认账号继承。
+                        previous_official_profiles
+                            .iter()
+                            .find(|(_, account_id, _)| index == 0 && account_id.is_none())
+                    });
+                official_profile.enabled = previous.is_none_or(|(_, _, enabled)| *enabled);
                 official_profile.normalize();
                 official_profile.short_name = unique_official_route_short_name(
                     &official_profile.display_short_name(),
@@ -422,6 +416,7 @@ impl CodeyConfig {
         if previous_provider_id == official_provider_id {
             return;
         }
+        // 速度声明没有旧原生账号的身份信息，不能随默认账号迁移给另一个账号。
         if let Some(models) = self.model_context_by_provider.remove(previous_provider_id) {
             let target = self
                 .model_context_by_provider

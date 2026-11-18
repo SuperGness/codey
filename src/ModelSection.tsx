@@ -162,7 +162,7 @@ type RouteDraftErrors = {
   upstreamProxy: string;
 };
 
-// 官方线路的编辑入口调整连接与并发设置，模型列举交给同步入口。
+// 官方线路的编辑入口调整线路设置，模型列举交给同步入口。
 type OfficialRouteDialogScope = "settings" | "models";
 
 const UPSTREAM_PROXY_TOOLTIP_CONTENT = (
@@ -1846,6 +1846,7 @@ function ModelSectionComponent({
                     optionList={routeProtocolOptions}
                   />
                 </div>
+
 
                 {routeDraft.upstreamProtocol === "openaiResponses" && (
                   <div className="route-field route-editor-span-all">

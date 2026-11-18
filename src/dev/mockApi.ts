@@ -301,6 +301,7 @@ if (import.meta.env.DEV) {
           clearApiKey: false,
           officialAccount: true,
           officialAccountId: account.id,
+          officialSiwc: account.siwcStatus === "active",
           supportsRemoteCompaction: false,
           supportsWebsockets: true,
           supportsNativeWebSearch: true,
@@ -422,6 +423,7 @@ if (import.meta.env.DEV) {
           includesModelId(thirdPartyModels, model),
         ),
         upstreamModels: official ? [] : upstream,
+        syncedUltrafastModels: official && !profile.officialSiwc ? ["gpt-6-astra"] : [],
         thirdPartyModelMetadata: official
           ? []
           : previewThirdPartyModelMetadata(profile, thirdPartyModels),
@@ -1405,6 +1407,12 @@ if (import.meta.env.DEV) {
         previewConfig.modelReasoningEffortsByProvider = { ...previewConfig.modelReasoningEffortsByProvider,
           [providerId]: Object.fromEntries(Object.entries((args.reasoningEfforts as Record<string, import("../App.types").ModelReasoningEffort[]> | undefined)
             ?? previewConfig.modelReasoningEffortsByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(availableModels, model))) };
+        if (args.modelUltrafast !== undefined) {
+          previewConfig.modelUltrafastByProvider = {
+            ...previewConfig.modelUltrafastByProvider,
+            [providerId]: args.modelUltrafast as Record<string, boolean>,
+          };
+        }
         previewConfig = {
           ...previewConfig,
           settingsRevision: previewConfig.settingsRevision + 1,
@@ -1535,8 +1543,11 @@ if (import.meta.env.DEV) {
             ? args.showAccountUsageInHeader
             : previewConfig.showAccountUsageInHeader,
           profiles: previewConfig.profiles.map((profile) =>
-            profile.id === routeId && typeof args.enabled === "boolean"
-              ? { ...profile, enabled: args.enabled }
+            profile.id === routeId
+              ? {
+                  ...profile,
+                  ...(typeof args.enabled === "boolean" ? { enabled: args.enabled } : {}),
+                }
               : profile
           ),
           selectedModelsByProvider: {

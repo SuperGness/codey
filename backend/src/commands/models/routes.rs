@@ -16,7 +16,8 @@ pub async fn set_route_enabled(
         config = config.normalize();
     }
     // 启停只保存线路及其模型依赖，不重新配置通知、日志保护等无关功能。
-    let config = save_config_to_store(state, config).await?;
+    let config =
+        save_config_with_route_speed_changes(state, &previous, config, codex_home()).await?;
     *state.config.write().await = config.clone();
     let hot_reload = ModelHotReloadOutcome::queued(state, true);
     drop(config_write_guard);
@@ -156,7 +157,8 @@ pub async fn delete_route(
     ensure_route_revision(&previous, expected_revision)?;
     let route_id = route_id.trim();
     let config = config_after_route_deletion(&previous, route_id)?;
-    let config = save_config_to_store(state, config).await?;
+    let config =
+        save_config_with_route_speed_changes(state, &previous, config, codex_home()).await?;
     *state.config.write().await = config.clone();
     let model_state = current_model_state_async(&config).await?;
     let hot_reload = ModelHotReloadOutcome::queued(state, true);
@@ -217,6 +219,9 @@ pub(crate) fn config_after_route_deletion(
         .remove(&removed_provider_id);
     config
         .upstream_models_by_provider
+        .remove(&removed_provider_id);
+    config
+        .upstream_speed_tiers_by_provider
         .remove(&removed_provider_id);
     if config.active_profile_id == route_id
         && let Some(first) = config.profiles.first()
@@ -505,23 +510,14 @@ pub async fn fetch_route_models(
         model_catalog::merge_account_runtime_models(codex_home(), entries, &config.codex_app_path)
             .map_err(|error| format!("保存官方模型目录快照失败：{error:#}"))?;
     }
-    let fetched_models = if let Some(entries) = fetched_account_entries.as_ref() {
-        entries
-            .iter()
-            .filter_map(|model| {
-                model
-                    .get("slug")
-                    .or_else(|| model.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect::<Vec<_>>()
+    let fetched_catalog = if let Some(entries) = fetched_account_entries.as_ref() {
+        provider_models::ProviderModelCatalog::from_official_models(entries)
     } else {
-        fetch_provider_models(profile.clone())
+        fetch_provider_model_catalog(profile.clone())
             .await
             .map_err(|error| error.to_string())?
     };
-    let visible_fetched_models = regular_route_models(fetched_models.clone());
+    let visible_fetched_models = regular_route_models(fetched_catalog.models.clone());
     timings.mark("fetchModelsMs");
     let _config_write_guard = state.config_write_lock.lock().await;
     timings.mark("configLockMs");
@@ -536,20 +532,7 @@ pub async fn fetch_route_models(
     if latest_profile.provider_id() != provider_id {
         return Err("同步模型期间线路接入配置已变化，请重试".to_string());
     }
-    latest = if profile.official_account {
-        let mut next = latest;
-        next.upstream_models_by_provider
-            .insert(provider_id.clone(), fetched_models.clone());
-        let fallback_models = model_catalog::default_official_model_slugs();
-        let selected = next.selected_models_by_provider.get(&provider_id);
-        if selected.is_none_or(|models| models == &fallback_models) {
-            next.selected_models_by_provider
-                .insert(provider_id.clone(), fetched_models.clone());
-        }
-        next.normalize()
-    } else {
-        config_with_provider_model_sync(&latest, &provider_id, fetched_models.clone(), codex_home())
-    };
+    latest = config_with_route_catalog_sync(&latest, &profile, fetched_catalog, codex_home());
     latest.settings_revision = latest.settings_revision.saturating_add(1);
     let RefreshedModelState {
         refresh: catalog_refresh,
@@ -615,6 +598,33 @@ pub(crate) fn ensure_route_revision(
     Ok(())
 }
 
+fn config_with_route_catalog_sync(
+    config: &CodeyConfig,
+    profile: &ProviderProfile,
+    catalog: provider_models::ProviderModelCatalog,
+    home: &std::path::Path,
+) -> CodeyConfig {
+    let provider_id = profile.provider_id();
+    let mut next = if profile.official_account {
+        let mut next = config.clone();
+        let selected = config.selected_models_by_provider.get(provider_id);
+        next.upstream_models_by_provider
+            .insert(provider_id.to_string(), catalog.models.clone());
+        let fallback = model_catalog::default_official_model_slugs();
+        if selected.is_none_or(|models| models == &fallback) {
+            next.selected_models_by_provider
+                .insert(provider_id.to_string(), catalog.models);
+        }
+        next.normalize()
+    } else {
+        config_with_provider_model_sync(config, provider_id, catalog.models, home)
+    };
+    // 每次成功同步完整替换该线路的声明，ID 列表同样可以撤下旧档位。
+    next.upstream_speed_tiers_by_provider
+        .insert(provider_id.to_string(), catalog.speed_tiers);
+    next
+}
+
 pub(crate) fn config_with_provider_model_sync(
     config: &CodeyConfig,
     provider_id: &str,
@@ -659,8 +669,74 @@ pub(crate) fn config_with_provider_model_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::{official_models_account_id, official_models_base_url, official_models_endpoint};
+    use super::*;
     use crate::config::{AUTH_MODE_OFFICIAL_ACCOUNT, ProviderProfile, official_profile_id};
+
+    #[test]
+    fn route_catalog_sync_updates_tiers_and_respects_each_providers_model_list() {
+        let home = tempfile::tempdir().unwrap();
+        for official in [false, true] {
+            let mut profile = ProviderProfile::new("route");
+            profile.id = "route".into();
+            profile.base_url = "https://example.test/v1".into();
+            if official {
+                profile.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+            }
+            profile.normalize();
+            let mut config = CodeyConfig {
+                profiles: vec![profile.clone()],
+                ..CodeyConfig::default()
+            };
+            config.selected_models_by_provider.insert(
+                "route".into(),
+                vec!["Kept-New-Model".into(), "Listed".into()],
+            );
+            let declared = model_catalog::ModelSpeedTiers::from_model(
+                &json!({"additional_speed_tiers":["future"]}),
+            )
+            .unwrap();
+            config.upstream_speed_tiers_by_provider.insert(
+                "other".into(),
+                BTreeMap::from([("listed".into(), declared.clone())]),
+            );
+            let catalog = provider_models::ProviderModelCatalog {
+                models: vec!["Listed".into()],
+                speed_tiers: BTreeMap::from([("listed".into(), declared.clone())]),
+            };
+            let synced = config_with_route_catalog_sync(&config, &profile, catalog, home.path());
+            let expected_selection: &[&str] = if official {
+                &["Listed"]
+            } else {
+                &["Kept-New-Model", "Listed"]
+            };
+            assert_eq!(
+                synced.selected_models_by_provider["route"],
+                expected_selection
+            );
+            assert_eq!(
+                synced.upstream_models_by_provider["route"].contains(&"Kept-New-Model".into()),
+                !official,
+            );
+            assert_eq!(
+                synced.upstream_speed_tiers_by_provider["route"]["listed"],
+                declared
+            );
+            let plain = provider_models::ProviderModelCatalog {
+                models: vec!["Listed".into()],
+                ..Default::default()
+            };
+            let cleared = config_with_route_catalog_sync(&synced, &profile, plain, home.path());
+            assert!(cleared.upstream_speed_tiers_by_provider["route"].is_empty());
+            assert_eq!(
+                cleared.upstream_speed_tiers_by_provider["other"],
+                config.upstream_speed_tiers_by_provider["other"]
+            );
+            assert_eq!(
+                cleared.selected_models_by_provider["route"],
+                synced.selected_models_by_provider["route"]
+            );
+        }
+    }
 
     #[test]
     fn official_models_account_id_uses_the_field_then_the_profile_id() {
