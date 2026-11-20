@@ -3646,6 +3646,18 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
     assert!(rendered.contains("model_providers.codey_router.name=\"Codey Local Router\""));
     assert!(rendered.contains("model_providers.codey_router.requires_openai_auth=true"));
     assert!(rendered.contains("model_providers.codey_router.supports_websockets=true"));
+    let router_fields: Vec<_> = applied
+        .runtime_config_overrides
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("model_providers.codey_router."))
+        .collect();
+    let legacy_fields: Vec<_> = applied
+        .runtime_config_overrides
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("model_providers.codey_router_remote."))
+        .collect();
+    assert_eq!(legacy_fields, router_fields);
+    assert!(!rendered.contains("model_provider=\"codey_router_remote\""));
     assert!(rendered.contains("x-codey-router-token"));
     assert!(!rendered.contains("model_providers.codey_router.experimental_bearer_token="));
     assert!(!rendered.contains("openai_base_url="));

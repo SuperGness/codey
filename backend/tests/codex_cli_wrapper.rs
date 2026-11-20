@@ -168,7 +168,7 @@ async fn router_wrapper_rewrites_stdin_without_inspector_and_preserves_exec_exit
         );
         let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         if routed {
-            assert_eq!(actual["params"]["modelProvider"], "codey_router");
+            assert!(actual["params"].get("modelProvider").is_none());
             assert_eq!(actual["params"]["model"], message["params"]["model"]);
             assert_eq!(
                 actual["params"]["config"],
