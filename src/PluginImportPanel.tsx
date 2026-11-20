@@ -184,6 +184,11 @@ export function PluginImportPanel({
                 启用后，插件将接收其线路的请求正文，以及配置邮箱对应账号的访问令牌；不会接收刷新令牌。
               </p>
             ) : null}
+            {capabilities.includes("ui.status.v1") ? (
+              <p className="m-0 leading-relaxed text-muted">
+                启用后，点击 Codex 侧栏的 Codey 图标查看插件状态。
+              </p>
+            ) : null}
           </div>
 
           <div className="plugin-import-note is-warning sm:ml-[52px]">

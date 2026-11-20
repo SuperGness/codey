@@ -17,6 +17,7 @@ pub(super) const ACCEPTED_CAPABILITIES: &[&str] = &[
     codey_plugin_sdk::lifecycle::API_KEY_CAPABILITY,
     codey_plugin_sdk::lifecycle::TURN_STATE_CAPABILITY,
     codey_plugin_sdk::provider::CAPABILITY,
+    codey_plugin_sdk::status_panel::CAPABILITY,
     codey_plugin_sdk::transport::CAPABILITY,
     codey_plugin_sdk::transport::ACCOUNT_CAPABILITY,
 ];
@@ -197,6 +198,14 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         .capabilities
         .iter()
         .any(|c| c == codey_plugin_sdk::transport::ACCOUNT_CAPABILITY);
+    if manifest
+        .capabilities
+        .iter()
+        .any(|c| c == codey_plugin_sdk::status_panel::CAPABILITY)
+        && (lifecycle || transport)
+    {
+        return Err("状态卡片须与请求生命周期和自定义传输分开部署".into());
+    }
     if (transport
         && !manifest
             .capabilities

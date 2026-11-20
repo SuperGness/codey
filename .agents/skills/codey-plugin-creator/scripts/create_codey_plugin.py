@@ -52,7 +52,7 @@ def main() -> int:
     parser.add_argument("--display-name")
     parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--sdk-path", help="SDK path relative to the generated crate, or an absolute path")
-    parser.add_argument("--capability", action="append", choices=["request.lifecycle.v1", "request.lifecycle.auth", "request.lifecycle.api_key", "request.lifecycle.turn_state", "provider.route.v1", "provider.transport.v1", "provider.account.v1", "appserver.call.v1"], default=[])
+    parser.add_argument("--capability", action="append", choices=["request.lifecycle.v1", "request.lifecycle.auth", "request.lifecycle.api_key", "request.lifecycle.turn_state", "provider.route.v1", "provider.transport.v1", "provider.account.v1", "appserver.call.v1", "ui.status.v1"], default=[])
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -76,6 +76,9 @@ def main() -> int:
     account = "provider.account.v1" in args.capability
     if (transport and "provider.route.v1" not in args.capability) or account != transport:
         parser.error("provider transport requires provider.route.v1, provider.transport.v1, and provider.account.v1")
+    status_panel = "ui.status.v1" in args.capability
+    if status_panel and (lifecycle or transport):
+        parser.error("status panels must use an instance separate from lifecycle or transport")
 
     sdk_path = args.sdk_path
     if sdk_path is None:
@@ -111,6 +114,12 @@ def main() -> int:
             "provider.request.start" => Err("upstream_unavailable".into()),
             "provider.request.write" | "provider.request.read" => Err("request_not_found".into()),
             "provider.request.cancel" | "provider.request.stop" => Ok(json!({})),
+"""
+    if status_panel:
+        provider_method += """
+            codey_plugin_sdk::status_panel::READ_METHOD => Ok(json!({
+                "rows": [{"id": "example", "label": "服务", "reading": {"state": "unavailable", "message": "等待配置"}}]
+            })),
 """
     account_field = "    account_email: String," if transport else ""
     account_init = """

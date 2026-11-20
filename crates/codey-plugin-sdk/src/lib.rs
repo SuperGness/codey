@@ -9,6 +9,7 @@ pub mod config;
 pub mod host;
 pub mod lifecycle;
 pub mod provider;
+pub mod status_panel;
 pub mod transport;
 
 pub use serde_json;

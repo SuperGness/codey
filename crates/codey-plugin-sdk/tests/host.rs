@@ -38,13 +38,23 @@ fn package_with_options(path: &Path, library: &[u8], version: &str, header: &str
         "capabilities": if transport { vec!["request.lifecycle.v1", "provider.route.v1", "provider.transport.v1", "provider.account.v1"] } else { vec!["request.lifecycle.v1"] },
         "headerNames":[header]
     });
+    write_package(path, &filename, library, &manifest, INITIAL_CONFIG);
+}
+
+fn write_package(
+    path: &Path,
+    filename: &str,
+    library: &[u8],
+    manifest: &serde_json::Value,
+    config: &str,
+) {
     let mut archive = zip::ZipWriter::new(fs::File::create(path).unwrap());
     for (name, bytes) in [
         (
             "manifest.json".to_owned(),
-            serde_json::to_vec(&manifest).unwrap(),
+            serde_json::to_vec(manifest).unwrap(),
         ),
-        ("config.json".to_owned(), INITIAL_CONFIG.as_bytes().to_vec()),
+        ("config.json".to_owned(), config.as_bytes().to_vec()),
         (format!("lib/{filename}"), library.to_vec()),
     ] {
         archive
@@ -53,6 +63,70 @@ fn package_with_options(path: &Path, library: &[u8], version: &str, header: &str
         archive.write_all(&bytes).unwrap();
     }
     archive.finish().unwrap();
+}
+
+fn check_status_cards(root: &Path, library: &[u8]) {
+    use codey_plugin_sdk::status_panel::{CAPABILITY, READ_METHOD, Reading};
+    use host::status_panel::{self, Failure};
+    assert!(status_panel::list().unwrap().is_empty());
+    let fixture = |id: &str, label: &str, value: &str, capabilities| {
+        let path = root.join(format!("{id}.codey-plugin"));
+        let entry = library_filename("plugin");
+        let manifest = json!({
+            "id":id,"name":label,"version":"1.0.0","abiVersion":1,"platform":consts::OS,
+            "arch":consts::ARCH,"entry":format!("lib/{entry}"),
+            "librarySha256":format!("{:x}",Sha256::digest(library)),"capabilities":capabilities,"headerNames":[]
+        });
+        let config = json!({"value":"fixture","panel":{"rows":[
+            {"id":"test","label":label,"reading":{"state":"ready","value":value,"observedAt":1723190000000_i64}}
+        ]}});
+        write_package(&path, &entry, library, &manifest, &config.to_string());
+        path
+    };
+    let incompatible = fixture(
+        "dev.codey.status-mixed",
+        "Mixed",
+        "",
+        vec![CAPABILITY, "request.lifecycle.v1"],
+    );
+    assert!(host::inspect(&incompatible).is_err());
+    let ids = [
+        ("dev.codey.test-balance", "余额", "¥0.00"),
+        ("dev.codey.test-health", "服务状态", "正常"),
+    ];
+    for (id, label, value) in ids {
+        let path = fixture(id, label, value, vec![CAPABILITY]);
+        let inspection = host::inspect(&path).unwrap();
+        host::install(&path, &inspection.sha256).unwrap();
+    }
+    assert!(status_panel::list().unwrap().is_empty());
+    for (id, _, _) in ids {
+        host::set_enabled(id, true).unwrap();
+    }
+    let panels = status_panel::list().unwrap();
+    assert_eq!(panels.len(), 2);
+    for (descriptor, (id, label, value)) in panels.iter().zip(ids) {
+        assert_eq!(descriptor.id, id);
+        assert_eq!(descriptor.name, label);
+        let generation = descriptor.generation.parse().unwrap();
+        let data = status_panel::read(id, generation).unwrap();
+        assert!(
+            matches!(&data.rows[0].reading, Reading::Ready{value: actual,..} if actual == value)
+        );
+        assert!(host::invoke(id, READ_METHOD, json!(null)).is_err());
+        host::set_enabled(id, false).unwrap();
+        assert_eq!(
+            status_panel::read(id, generation).unwrap_err(),
+            Failure::Inactive
+        );
+        host::set_enabled(id, true).unwrap();
+        assert_eq!(
+            status_panel::read(id, generation).unwrap_err(),
+            Failure::Inactive
+        );
+        host::set_enabled(id, false).unwrap();
+    }
+    assert!(status_panel::list().unwrap().is_empty());
 }
 
 fn library_filename(name: &str) -> String {
@@ -449,6 +523,7 @@ async fn complete_native_plugin_lifecycle() {
     package_with_options(&path, &library, "1.4.0", "x-plugin-demo", true);
     let inspection = host::inspect(&path).unwrap();
     host::install(&path, &inspection.sha256).unwrap();
+    check_status_cards(temp.path(), &library);
     host::set_route_handler(std::sync::Arc::new(|id, change| {
         // 同步重入模拟并发管理调用，不依赖调度或 sleep。
         assert!(host::set_enabled(id, true).is_err());

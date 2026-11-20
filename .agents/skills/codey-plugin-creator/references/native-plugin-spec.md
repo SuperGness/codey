@@ -49,6 +49,10 @@ codey_plugin_sdk::export_plugin!(MyPlugin);
 
 需要自定义请求正文或流式协议时，同时声明 `provider.transport.v1` 与 `provider.account.v1`，在描述中提供 `transport.accountEmail`。宿主唯一匹配已保存账号并提供短期访问凭据，分块正文和帧协议沿用 ABI v1；管理方法不能调用 `provider.request.*`。优先使用 SDK 的 `Frame::headers` 和 `Frame::error` 构造响应头及错误帧，复用宿主校验与脱敏规则。实现前完整阅读仓库 `crates/codey-plugin-sdk/PROVIDER_TRANSPORT.md`，落实取消、停用及后台运行时销毁要求。
 
+## 状态卡片
+
+声明 `ui.status.v1` 并实现 `status_panel::READ_METHOD`。读数随用户操作更新，宿主负责布局。返回格式、等待时间与能力组合规则见 [SDK 状态卡片](../../../../crates/codey-plugin-sdk/README.md#状态卡片)。
+
 ## 配置、数据与日志
 
 `config.json` 必须是 UTF-8 JSON 对象，最大 1 MiB。`_comments` 可以出现在任意对象层级，值必须是字符串说明；宿主传给插件前会移除它们。SDK 的 `config::validate` 只返回格式诊断，`config::parse` 返回移除说明后的运行配置，与宿主安装、保存共用规则。已连接管理桥接时可用 `validate_codey_plugin_config` 预检查文本，用 `get_codey_plugin_host_info` 查询协议限制；两者不执行插件或提供额外权限。插件数据写入 `context.data_dir`，日志通过 `context.log`，固定文件名并自行限制业务数据大小和并发更新。

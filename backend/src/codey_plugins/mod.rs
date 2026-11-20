@@ -9,6 +9,7 @@ pub(crate) mod turn_state;
 pub(crate) use provider::{PluginRouteSpec, RouteChange, set_route_handler};
 mod native;
 mod package;
+pub(crate) mod status_panel;
 
 use native::Native;
 pub use package::Inspection;
@@ -174,6 +175,7 @@ struct Active {
     manifest: Manifest,
     config: Value,
     lifecycle: Arc<lifecycle::LifecyclePlugin>,
+    status_generation: Option<uuid::Uuid>,
 }
 
 struct PreparedLoad {
@@ -558,6 +560,9 @@ pub fn uninstall(id: &str, remove_data: bool) -> Result<PluginList, String> {
 }
 
 pub fn invoke(id: &str, method: &str, params: Value) -> Result<Value, String> {
+    if method == codey_plugin_sdk::status_panel::READ_METHOD {
+        return Err("状态卡片由宿主调用".into());
+    }
     if codey_plugin_sdk::transport::is_reserved(method) {
         return Err("该方法只允许宿主请求传输调用".into());
     }
@@ -1144,6 +1149,11 @@ impl Manager {
             return Err((native, "插件未安装".into()));
         };
         let manifest = record.manifest.clone();
+        let status_generation = manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability == codey_plugin_sdk::status_panel::CAPABILITY)
+            .then(uuid::Uuid::new_v4);
         let generations = self.generations.entry(prepared.id.clone()).or_default();
         generations.retain(|generation| generation.strong_count() > 0);
         generations.push(native.lifetime());
@@ -1160,6 +1170,7 @@ impl Manager {
                 manifest,
                 config: prepared.config.clone(),
                 lifecycle,
+                status_generation,
             },
         );
         self.log_event(&prepared.id, "loaded");

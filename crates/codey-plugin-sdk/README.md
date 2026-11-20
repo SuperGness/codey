@@ -59,6 +59,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 同时声明 `provider.transport.v1` 与 `provider.account.v1` 可接管本插件线路的请求传输，通过邮箱绑定已保存账号并声明模型上下文预算。正文通过有界分块传递，客户端断开或插件停用时取消请求；管理接口拒绝整个 `provider.request.*` 前缀。使用 `transport::Frame::headers` 构造经过宿主规则校验的响应头帧，使用 `Frame::error` 构造隐藏未知错误文本的错误帧；这些辅助接口不改变 ABI。完整协议与清理约定见 [供应商传输协议](PROVIDER_TRANSPORT.md)。
 
+### 状态卡片
+
+声明 `ui.status.v1` 后，用户打开或刷新 Codey 的状态入口时，宿主以 `null` 调用 `status_panel::READ_METHOD`。插件返回 `status_panel::Panel`；同一项在连续查询中使用相同 ID。卡片标题来自清单名称，布局、主题和刷新控件由宿主管理。
+
+```json
+{"rows":[
+  {"id":"main","label":"主服务","detail":"最近一次探测","reading":{"state":"ready","value":"正常","observedAt":1789128000000}},
+  {"id":"backup","label":"备用服务","reading":{"state":"unavailable","message":"等待配置"}}
+]}
+```
+
+`observedAt` 为 Unix 毫秒。查询失败但仍有可用的上次读数时返回 `stale`，包含原读数、原时间和面向用户的简短说明。缺少读数时返回 `unavailable`。最多 12 行；标签、数值和说明均为纯文本。宿主最多等待 8 秒，插件应设置网络超时并在回调结束时收回工作。状态卡片与请求生命周期、自定义传输分开部署；它不接收线路凭据。通过宿主的 `acceptedCapabilities` 检查版本支持。
+
 ## 只读预检查
 
 已有 Codey 管理桥接支持以下命令；无需安装或启用插件，也不调用插件方法。SDK 不提供桥接连接或认证令牌，原生插件不能仅靠能力声明取得管理权限。

@@ -58,6 +58,7 @@ python3 ../../../scripts/package-plugin.py \
 ## 能力选择
 
 - 普通插件：实现自定义管理方法，不声明 capability；适合配置、持久化、健康检查和本地业务。
+- 状态卡片：声明 `ui.status.v1`，按需返回 `status_panel::Panel`；独立于请求生命周期和自定义传输。
 - 请求生命周期：仅修改已声明的请求头，严格遵守阶段允许的动作；不要尝试修改正文、URL、认证头或流式正文。
 - 线路描述：返回固定的 `name`、`baseUrl`、`upstreamProtocol` 和有限模型列表；普通线路的密钥由宿主管理。自定义传输须完整阅读 `../../../crates/codey-plugin-sdk/PROVIDER_TRANSPORT.md`，遵守邮箱绑定、有界传输、错误白名单和后台清理要求，不持久化凭据。脚手架的传输占位会明确失败，完成业务实现后才能作为可用插件交付。
 - 任务数量：`appserver.call.v1` 仅为兼容声明；通过本地路由 `POST /codey/api/appserver` 发送 `Request::get_tasks()` 的 JSON，须携带路由 Bearer token。`PluginContext` 不注入地址或令牌，SDK 不提供网络客户端；不能仅靠 capability 完成调用。校验响应 schema 和 error 后读取 `running` 和 `failed`。

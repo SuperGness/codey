@@ -52,6 +52,13 @@ class PackageScopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(manifest["id"], "dev._demo-")
 
+    def test_status_panels_use_a_separate_plugin_instance(self):
+        result, manifest = self.package(capabilities=("ui.status.v1",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(manifest["capabilities"], ["ui.status.v1"])
+        result, _ = self.package(capabilities=("ui.status.v1", LIFECYCLE))
+        self.assertNotEqual(result.returncode, 0)
+
     def test_sensitive_and_invalid_headers_fail_before_writing(self):
         for flag in ("--header", "--response-header"):
             for header in ("Authorization", "COOKIE", "x-codey-private", "sec-test",

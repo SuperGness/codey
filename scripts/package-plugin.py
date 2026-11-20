@@ -52,7 +52,7 @@ parser.add_argument("--version", required=True)
 parser.add_argument("--platform", choices=["macos", "windows", "linux"], default={"Darwin":"macos", "Windows":"windows", "Linux":"linux"}.get(platform.system()))
 parser.add_argument("--arch", default={"arm64":"aarch64", "AMD64":"x86_64"}.get(platform.machine(), platform.machine()))
 parser.add_argument("--header", action="append", default=[])
-parser.add_argument("--capability", action="append", default=[], choices=["request.lifecycle.v1", "request.lifecycle.auth", "request.lifecycle.api_key", "request.lifecycle.turn_state", "provider.route.v1", "provider.transport.v1", "provider.account.v1", "appserver.call.v1"])
+parser.add_argument("--capability", action="append", default=[], choices=["request.lifecycle.v1", "request.lifecycle.auth", "request.lifecycle.api_key", "request.lifecycle.turn_state", "provider.route.v1", "provider.transport.v1", "provider.account.v1", "appserver.call.v1", "ui.status.v1"])
 parser.add_argument("--api-key-url", action="append", default=[], help="精确授权的 HTTPS Responses endpoint（回环测试允许 HTTP）")
 parser.add_argument("--response-header", action="append", default=[])
 parser.add_argument("--lifecycle-failure-policy", choices=["abort", "continue"])
@@ -69,6 +69,8 @@ if (transport and "provider.route.v1" not in capabilities) or (("provider.accoun
 if len(set(capabilities)) != len(capabilities):
     parser.error("扩展能力不能重复声明")
 lifecycle = "request.lifecycle.v1" in capabilities
+if "ui.status.v1" in capabilities and (lifecycle or transport):
+    parser.error("状态卡片须与请求生命周期和自定义传输分开部署")
 if not lifecycle and ("request.lifecycle.auth" in capabilities or "request.lifecycle.api_key" in capabilities or "request.lifecycle.turn_state" in capabilities or args.response_header
                       or args.lifecycle_failure_policy is not None or args.lifecycle_max_wait_ms is not None):
     parser.error("生命周期参数需要 --capability request.lifecycle.v1")

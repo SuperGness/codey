@@ -26,6 +26,7 @@ impl Plugin for HeaderPlugin {
 
     fn invoke(&mut self, method: &str, params: Value) -> Result<Value, String> {
         match method {
+            codey_plugin_sdk::status_panel::READ_METHOD => self.received_config.get("panel").cloned().ok_or("缺少测试卡片".into()),
             "provider.describe" => Ok(json!({
                 "name": "Fixture",
                 "baseUrl": "https://example.invalid/v1",

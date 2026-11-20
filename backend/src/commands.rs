@@ -19,6 +19,7 @@ mod official_accounts;
 mod plugins;
 mod prompt_optimization;
 mod runtime;
+mod status_panels;
 mod updates;
 mod webhooks;
 mod wechat_claw;
@@ -489,6 +490,8 @@ impl AppState {
             }
             "/backend/health" => json!({"status":"ok"}),
             "/account/usage" => account_usage_snapshot(self).await,
+            "/plugin-status/list" => status_panels::list(),
+            "/plugin-status/read" => status_panels::read(&payload).await,
             "/session/wake-watcher" => {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})

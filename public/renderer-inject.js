@@ -1106,6 +1106,12 @@
       : "Codey 内嵌配置面板尚未加载，请退出 Codex 后重新启动 Codey");
   };
 
+  const pluginStatusPanels = window.__codeyCreatePluginStatusPanels?.({
+    callBridge,
+    openSettings,
+    connected: () => runtimeHealthState !== "unavailable",
+  });
+
   const mountableRect = (element) => {
     if (!(element instanceof HTMLElement)) return null;
     const style = window.getComputedStyle(element);
@@ -1273,6 +1279,7 @@
     // 仅无图标栏的旧版布局使用顶部入口，侧栏重建期间等待它恢复。
     const mount = railMount || (!navigationRailSeen ? findHeaderMount() : null);
     if (!mount) {
+      pluginStatusPanels?.close();
       existingButton?.remove?.();
       document.getElementById(buttonMeasureId)?.remove();
       return;
@@ -1288,7 +1295,8 @@
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        void openSettings();
+        if (pluginStatusPanels) void pluginStatusPanels.open(button);
+        else void openSettings();
       }, true);
       button.addEventListener("pointerenter", scheduleSettingsPreload, { passive: true });
       button.addEventListener("pointerleave", cancelSettingsPreload, { passive: true });
