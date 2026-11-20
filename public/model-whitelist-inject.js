@@ -310,15 +310,10 @@
     route?.officialAccount === true
     || legacyOfficialRouteProviderIds.has(modelKey(route?.routeProviderId))
   );
-  const providersAreCompatible = (method, currentProviderId, targetProviderId, threadId) => (
+  const providersAreCompatible = (currentProviderId, targetProviderId) => (
     modelKey(currentProviderId) === modelKey(targetProviderId)
     || (routerProviderIds.has(modelKey(currentProviderId))
       && routerProviderIds.has(modelKey(targetProviderId)))
-    || (
-      method === "thread/resume"
-      && routerProviderIds.has(modelKey(targetProviderId))
-      && !threadRuntimeProviders.has(threadId)
-    )
   );
   const markPatchedProvider = (params, providerId) => {
     try {
@@ -345,11 +340,38 @@
   const threadIdFromParams = (params) => (
     typeof params?.threadId === "string" ? params.threadId.trim() : ""
   );
-  const knownThreadProvider = (params) => {
+  const boundThreadProvider = (params) => {
     const threadId = threadIdFromParams(params);
     return requestProviderId(threadRuntimeProviders.get(threadId))
-      || requestProviderId(threadPersistedProviders.get(threadId))
-      || paramsProviderId(params);
+      || requestProviderId(threadPersistedProviders.get(threadId));
+  };
+  const knownThreadProvider = (params) => boundThreadProvider(params) || paramsProviderId(params);
+  const usesCodeyRouter = (providerId) => routerProviderIds.has(modelKey(providerId));
+  const withoutProviderConfig = (config) => Object.fromEntries(Object.entries(config).filter(([key]) => (
+    key !== "model_provider" && !key.startsWith("model_provider.")
+    && key !== "model_providers" && !key.startsWith("model_providers.")
+  )));
+  const isCodeySelector = (model) => {
+    const key = modelKey(model);
+    const route = routeForModel(model);
+    return Boolean((catalog.legacyAliases.has(key)
+      && !catalog.modelNamesByKey.has(key) && !catalog.routesBySourceKey.has(key))
+      || (route && modelKey(route.selectorModel) !== modelKey(route.sourceModel)
+        && modelKey(route.selectorModel) === key));
+  };
+  const resumeWithSavedProvider = (source, stripLegacyModel = false) => {
+    const config = source.config;
+    const cleanedConfig = config && typeof config === "object" ? withoutProviderConfig(config) : config;
+    const stripModel = stripLegacyModel || isCodeySelector(source.model);
+    if (!Object.hasOwn(source, "modelProvider") && !Object.hasOwn(source, "model_provider")
+      && !stripModel && (!(config && typeof config === "object")
+        || Object.keys(config).length === Object.keys(cleanedConfig).length)) return source;
+    const next = { ...source };
+    delete next.modelProvider;
+    delete next.model_provider;
+    if (cleanedConfig !== config) next.config = cleanedConfig;
+    if (stripModel) delete next.model;
+    return next;
   };
   const markBlockedProviderRequest = (params, detail) => {
     try {
@@ -390,20 +412,18 @@
         settings: { ...collaborationSettings, model: routedModel } };
     }
     delete next.model_provider;
-    if (threadProviderRequestMethods.has(method)) {
+    if (method === "thread/resume") {
+      delete next.modelProvider;
+      if (source.config && typeof source.config === "object") next.config = withoutProviderConfig(source.config);
+    } else if (threadProviderRequestMethods.has(method)) {
       next.modelProvider = routedProviderId;
       // Request-local config has higher priority than launch defaults. Keep
       // provider transport owned by the launcher even for restored tasks.
       if (source.config && typeof source.config === "object") {
-        next.config = Object.fromEntries(Object.entries(source.config).filter(([key]) => (
-          key !== "model_provider" && !key.startsWith("model_provider.")
-          && key !== "model_providers" && !key.startsWith("model_providers.")
-        )));
+        next.config = withoutProviderConfig(source.config);
       }
     } else {
-      // `turn/start` has no modelProvider field. New, forked, and resumed
-      // threads may use the HTTP-only Codey carrier; the persisted rollout
-      // metadata remains untouched by a resume-time override.
+      // `turn/start` has no modelProvider field.
       delete next.modelProvider;
     }
     if (method === "turn/start" && routeProviderId) {
@@ -421,15 +441,11 @@
       else delete next[routeMetadataParam];
     }
     let blocked = false;
-    if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
-      // Only an unloaded thread can migrate from an external provider during
-      // resume. Both Codey provider IDs share the same gateway carrier.
+    if (providerBoundExistingThreadMethods.has(method) && method !== "thread/resume") {
       if (
         threadId
-        && ((method !== "thread/resume" && unconfirmedThreadProviders.has(threadId)
-          && !routerProviderIds.has(modelKey(currentProviderId))) || (!currentProviderId
-          ? method !== "thread/resume"
-          : !providersAreCompatible(method, currentProviderId, routedProviderId, threadId)))
+        && ((unconfirmedThreadProviders.has(threadId) && !usesCodeyRouter(currentProviderId))
+          || !currentProviderId || !providersAreCompatible(currentProviderId, routedProviderId))
       ) {
         blocked = true;
         markBlockedProviderRequest(next, {
@@ -2924,7 +2940,11 @@
     }
     let changed = false;
     const next = { ...value };
-    if (value.thread && typeof value.thread === "object") {
+    const runtimeProvider = requestProviderId(value.modelProvider)
+      || requestProviderId(threadRuntimeProviders.get(value.thread?.id))
+      || providerFromThread(value.thread);
+    if (value.thread && typeof value.thread === "object"
+      && (!runtimeProvider || usesCodeyRouter(runtimeProvider))) {
       const thread = patchedThreadDisplayModel(value.thread);
       if (thread !== value.thread) {
         next.thread = thread;
@@ -3030,8 +3050,15 @@
   const patchedRequestParams = (method, params) => {
     if (!modelBoundRequestMethods.has(method)) return params;
     let source = params && typeof params === "object" ? params : {};
+    const boundProvider = boundThreadProvider(source);
+    if (method === "thread/resume" && !usesCodeyRouter(boundProvider)) {
+      return resumeWithSavedProvider(source);
+    }
     const collaborationSettings = collaborationSettingsForRequest(method, source);
     if (collaborationSettings) source = { ...source, model: collaborationSettings.model };
+    if (providerBoundExistingThreadMethods.has(method) && boundProvider && !usesCodeyRouter(boundProvider)
+      && !isCodeySelector(source.model) && !pendingIntentRouteForRequest()
+      && !source[routeMetadataParam]?.[routeMetadataKey]) return params;
     if (method === "thread/resume" && restoredRequestEfforts.has(source)) {
       const evidence = restoredRequestEfforts.get(source);
       const effort = evidence.revision === threadEffortRevisions.get(threadIdFromParams(source))
@@ -3080,8 +3107,7 @@
     if (!catalog.loaded) {
       // Before the catalog arrives there is no safe way to distinguish a
       // legacy route alias from a legitimate upstream model containing `/`.
-      // Preserve the model byte-for-byte, but keep every new, forked, or resumed
-      // thread on Codey's carrier so a route alias cannot reach the old provider.
+      // Preserve the model byte-for-byte before the catalog arrives.
       const safeSource = method === "turn/start"
         ? paramsWithoutUnverifiedRouteMetadata(source, requestedModel)
         : source;
@@ -3204,10 +3230,7 @@
         null,
       );
     }
-    // Any task can be resumed through the
-    // HTTP-only Codey carrier without rewriting its rollout. Preserve an
-    // unknown model exactly so the gateway can report it rather than falling
-    // back to an unrelated default.
+    // Preserve unknown models so the selected provider can report them.
     if (method === "thread/resume" || method === "thread/fork") {
       return routedRequestParams(method, source, requestedModel, null);
     }
@@ -3309,10 +3332,10 @@
     // normal page resumes, so they cannot distinguish those two consumers.
     if ((method && method !== "thread/resume" && method !== "send-cli-request-for-host")
       || value?.modelProvider !== officialProviderId
-      || value?.codeyRuntimeModelProvider !== localRouterProviderId
+      || !usesCodeyRouter(value?.codeyRuntimeModelProvider)
       || typeof value?.thread?.id !== "string" || !value.thread.id.trim()
       || Array.isArray(value.data)) return value;
-    const next = { ...value, modelProvider: localRouterProviderId };
+    const next = { ...value, modelProvider: value.codeyRuntimeModelProvider };
     delete next.codeyRuntimeModelProvider;
     return next;
   };
@@ -3436,8 +3459,8 @@
     rememberThreadRuntimeProvider(resultThread || pending?.threadId, runtimeProvider);
     const routeProvider = threadProviderRequestMethods.has(pending?.method)
       ? reportedRuntimeProvider : runtimeProvider;
-    const confirmedRoute = pending?.route && routeProvider && modelKey(routeProvider) === modelKey(
-      pending.providerId || pending.route.providerId,
+    const confirmedRoute = pending?.route && routeProvider && providersAreCompatible(
+      routeProvider, pending.providerId || pending.route.providerId,
     ) ? pending.route : null;
     if (pending?.method === "thread/resume" && confirmedRoute?.selectorModel && restoredThreadModels.has(resultThreadId)) {
       rememberBoundedMap(restoredThreadModels, resultThreadId, confirmedRoute.selectorModel, maxTrackedThreadProviders);
@@ -3492,6 +3515,7 @@
     const oldCarrier = routerProviderIds.has(modelKey(currentProvider))
       || (modelKey(currentProvider) === "codey" && modelKey(catalog.nativeProviderId) !== "codey");
     if (!historicalSource && !binding && !oldCarrier) return params;
+    if (method === "thread/resume") return resumeWithSavedProvider(params, Boolean(oldCarrier && historicalSource));
     const sourceModel = historicalSource || binding?.sourceModel || model;
     const canonical = catalog.modelNamesByKey.get(modelKey(sourceModel));
     const targetProvider = catalog.nativeProviderId;
@@ -3502,7 +3526,7 @@
       return markBlockedProviderRequest(next, {
         reason: "historical_route_unavailable",
         message: needsResume
-          ? "该任务仍使用旧线路，请重新打开任务，恢复到当前线路后重试。"
+          ? "该任务仍使用旧线路。请启用原线路，或从原对话创建分支后选择当前线路。"
           : !catalog.loaded
             ? "模型目录尚未加载，请稍后重试。"
             : !targetProvider
@@ -3569,7 +3593,9 @@
     const blocked = blockedProviderRequest(detail);
     if (!blocked) return false;
     const target = blocked.routeName || "所选线路";
-    const message = blocked.message || `暂时无法确认此任务的线路配置。请重启 Codex 后恢复任务，或用 ${target} 新建任务。`;
+    const message = blocked.message || (blocked.currentProviderId && !usesCodeyRouter(blocked.currentProviderId)
+      ? `此任务不能原地切到 ${target}。请从原对话创建分支后切换线路。`
+      : `暂时无法确认此任务的线路配置。请重启 Codex 后恢复任务，或用 ${target} 新建任务。`);
     console.warn("[Codey] provider migration required before routed turn", blocked);
     try {
       const noticeId = "codey-provider-mismatch-notice";
@@ -3893,6 +3919,7 @@
     && Boolean(portableQueues.get(threadIdFromParams(params))?.needsInterrupt);
   const needsHistoricalModel = (method, params) => !nativeSelectionOnly
     && method === "thread/resume" && Boolean(threadIdFromParams(params))
+    && (!boundThreadProvider(params) || usesCodeyRouter(boundThreadProvider(params)))
     && !threadModelSelections.has(threadIdFromParams(params))
     && (!catalog.loaded || !selectedThreadModels.has(threadIdFromParams(params)))
     && !params?.[patchedRouteKey] && !pendingIntentRouteForRequest()
@@ -3900,23 +3927,39 @@
       || routeMatchesModel(routeForModel(catalog.defaultModel), params.model));
   const restoreHistoricalModel = async (params, request) => {
     const threadId = threadIdFromParams(params);
+    const knownRouter = usesCodeyRouter(boundThreadProvider(params));
+    // An unknown binding must still be able to open natively if Codey's
+    // metadata is unavailable. Only known routed threads need it to restore.
+    const bridge = window.__codexSessionDeleteBridge;
+    if (typeof bridge !== "function") {
+      if (knownRouter) throw portableFailure("会话模型读取服务尚未就绪，请稍后重试。");
+      return;
+    }
     if (!catalog.loaded) await request.checked(loadModelCatalog());
     request.check();
-    if (!catalog.loaded) throw portableFailure("无法读取模型列表，已暂停恢复会话，请稍后重试。");
+    if (!catalog.loaded) {
+      if (knownRouter) throw portableFailure("无法读取模型列表，已暂停恢复会话，请稍后重试。");
+      return;
+    }
     if (!needsHistoricalModel("thread/resume", params)) return;
-    const bridge = window.__codexSessionDeleteBridge;
-    if (typeof bridge !== "function") throw portableFailure("会话模型读取服务尚未就绪，请稍后重试。");
     let saved;
     const effortRevision = threadEffortRevisions.get(threadId);
     try { saved = await request.checked(bridge("/session/model", { threadId }, { timeoutMs: 20_000 })); }
     catch {
       request.check();
-      if (!threadModelSelections.has(threadId)) throw portableFailure("无法读取会话保存的模型，已暂停恢复会话，请稍后重试。");
+      if (knownRouter && !threadModelSelections.has(threadId)) throw portableFailure("无法读取会话保存的模型，已暂停恢复会话，请稍后重试。");
+      return;
     }
     request.check();
     // A newer explicit selection also wins over a late failed metadata read.
     if (pendingIntentRouteForRequest() || selectedThreadModels.has(threadId) || threadModelSelections.has(threadId)) return;
+    if (saved?.threadId === threadId) {
+      rememberThreadPersistedProvider({ id: threadId, modelProvider: saved.indexedModelProvider });
+    }
+    const provider = boundThreadProvider(params);
+    if (provider && !usesCodeyRouter(provider)) return;
     if (saved?.status === "missing" && saved.threadId === threadId) {
+      if (!knownRouter) return;
       restoredThreadModels.delete(threadId);
       if (threadRoutes.delete(threadId)) persistThreadRoutes();
       clearRequestedThreadRoute(threadId);
@@ -3925,9 +3968,10 @@
     }
     if (saved?.status !== "ok" || saved.threadId !== threadId
       || typeof saved.model !== "string" || !saved.model.trim()) {
-      throw portableFailure("无法确认会话保存的模型，已暂停恢复会话，请稍后重试。");
+      if (knownRouter) throw portableFailure("无法确认会话保存的模型，已暂停恢复会话，请稍后重试。");
+      return;
     }
-    rememberThreadPersistedProvider({ id: threadId, modelProvider: saved.modelProvider });
+    if (!usesCodeyRouter(provider)) return;
     const route = routeForModel(saved.model) || routeForProviderAlias(saved.model)
       || uniqueRouteForProviderModel(saved.modelProvider, saved.model)
       || uniqueRouteForRawModel(saved.model)
@@ -3947,6 +3991,8 @@
     if (nativeSelectionOnly) return null;
     // Prepare history only when sending a turn, never while selecting or reopening a model.
     if (method !== "turn/start" || !threadIdFromParams(params)) return null;
+    const binding = boundThreadProvider(params);
+    if (binding && !usesCodeyRouter(binding)) return null;
     let next;
     previewingPortableRoute = true;
     try { next = nativeSelectionOnly ? patchedNativeRequestParams(method, params) : patchedRequestParams(method, params); }
@@ -4200,12 +4246,15 @@
     if (!catalog.loaded || disposed) return null;
     let model = requestedModel;
     let provider = "";
+    const binding = boundThreadProvider({ threadId });
+    if (binding && !usesCodeyRouter(binding)) return null;
     if (!model) {
       // 未改模型时沿用会话最近确认的设置，宿主每次更新设置都会写入这份记录。
       const bridge = window.__codexSessionDeleteBridge;
       if (typeof bridge !== "function") return null;
       const saved = await bridge("/session/model", { threadId }, { timeoutMs: 20_000 });
       if (saved?.status !== "ok" || saved.threadId !== threadId || typeof saved.model !== "string") return null;
+      if (saved.indexedModelProvider && !usesCodeyRouter(saved.indexedModelProvider)) return null;
       model = saved.model.trim();
       provider = typeof saved.modelProvider === "string" ? saved.modelProvider : "";
     }
@@ -4219,9 +4268,28 @@
     const proceed = () => rpc[method](threadId, options, ...rest);
     if (disposed || nativeSelectionOnly || globalThis.__codeyAppServerManagerHosted !== true
       || typeof threadId !== "string" || !threadId.trim()) return proceed();
+    const requestedModel = hostedTurnModel(options);
+    if (requestedModel && !catalog.loaded) await loadModelCatalog();
+    if (isCodeySelector(requestedModel)) {
+      // Hosted sends bypass the renderer's request and response tracking.
+      let binding = boundThreadProvider({ threadId });
+      if (!binding) {
+        try {
+          const result = await hostedRpcResult(() => rpc.sendRequest("thread/read", { threadId, includeTurns: false }));
+          binding = providerFromThread(result?.thread);
+        } catch (error) {
+          console.warn("[Codey] cannot read thread provider before hosted send", error);
+        }
+        if (!binding) throw portableFailure("无法确认当前对话的提供方，请重新打开对话后再试。");
+        rememberBoundedThreadPersistedProvider(threadId, binding);
+      }
+      if (!usesCodeyRouter(binding)) {
+        throw portableFailure("此任务不能原地切到 Codey 线路。请从原对话创建分支后切换线路。");
+      }
+    }
     let target = null;
     try {
-      if (await hostedThreadIdle(rpc, threadId)) target = await hostedPortableTarget(threadId, hostedTurnModel(options));
+      if (await hostedThreadIdle(rpc, threadId)) target = await hostedPortableTarget(threadId, requestedModel);
     } catch {
       target = null;
     }

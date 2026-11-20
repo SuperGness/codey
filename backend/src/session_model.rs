@@ -234,17 +234,20 @@ pub(crate) fn remember_settings(
     Ok(())
 }
 
-pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
-    validate_thread_id(thread_id)?;
-    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
-    let confirmed = confirmed_model(&home, thread_id)?;
-    let mut rollout = None;
-    let mut saved_model = None;
-    for path in codex_session_db_paths_from_home(&home) {
+#[derive(Default)]
+struct IndexedSessionModel {
+    provider: Option<String>,
+    model: Option<(String, Option<String>)>,
+    rollout: Option<std::path::PathBuf>,
+}
+
+fn read_index(home: &Path, thread_id: &str) -> Result<IndexedSessionModel> {
+    let mut index = IndexedSessionModel::default();
+    for path in codex_session_db_paths_from_home(home) {
         if !path.is_file() {
             continue;
         }
-        let path = checked_path(&home, &path)?;
+        let path = checked_path(home, &path)?;
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let columns = crate::sqlite_util::table_columns(&db, "threads")?;
@@ -268,14 +271,62 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
             })
             .optional()?;
         if let Some((model, saved_provider, saved_rollout)) = row {
-            if saved_model.is_none() {
-                saved_model = model
+            if index.provider.is_none() {
+                index.provider = saved_provider.clone().filter(|p| !p.trim().is_empty());
+            }
+            if index.model.is_none() {
+                index.model = model
                     .filter(|m| !m.trim().is_empty())
                     .map(|model| (model, saved_provider));
             }
-            rollout = saved_rollout.map(|p| home.join(p)).or(rollout);
+            index.rollout = saved_rollout.map(|p| home.join(p)).or(index.rollout);
         }
     }
+    Ok(index)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn indexed_provider(home: &Path, thread_id: &str) -> Result<Option<String>> {
+    validate_thread_id(thread_id)?;
+    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
+    Ok(read_index(&home, thread_id)?.provider)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn read_routed_resume_model(home: &Path, thread_id: &str) -> Result<Option<Value>> {
+    validate_thread_id(thread_id)?;
+    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
+    let index = read_index(&home, thread_id)?;
+    if !index
+        .provider
+        .as_deref()
+        .is_some_and(crate::local_router::is_router_provider)
+    {
+        return Ok(None);
+    }
+    read_saved_model(&home, thread_id, index.model, index.rollout).map(Some)
+}
+
+pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
+    validate_thread_id(thread_id)?;
+    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
+    let index = read_index(&home, thread_id)?;
+    let mut response = read_saved_model(&home, thread_id, index.model, index.rollout)?;
+    // Paginated resume uses the indexed binding, not the provider from the
+    // last turn (or from the original rollout header).
+    if let Some(provider) = index.provider {
+        response["indexedModelProvider"] = provider.into();
+    }
+    Ok(response)
+}
+
+fn read_saved_model(
+    home: &Path,
+    thread_id: &str,
+    saved_model: Option<(String, Option<String>)>,
+    rollout: Option<std::path::PathBuf>,
+) -> Result<Value> {
+    let confirmed = confirmed_model(home, thread_id)?;
     // 恢复会话会刷新数据库中的模型；最后一轮记录才是实际使用的模型。
     // 只有文件确实不存在才允许回退，权限或其他读取错误必须返回。
     let rollout = match rollout {
@@ -294,12 +345,12 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
         Some((model, provider, effort)) => model_response(thread_id, model, provider, effort),
         None => json!({"status":"missing", "threadId":thread_id}),
     };
-    let Some(rollout) = rollout
-        .or_else(|| crate::message_delete::find_rollout_file_by_session_id(&home, thread_id))
+    let Some(rollout) =
+        rollout.or_else(|| crate::message_delete::find_rollout_file_by_session_id(home, thread_id))
     else {
         return Ok(fallback());
     };
-    let path = checked_path(&home, &rollout)?;
+    let path = checked_path(home, &rollout)?;
     let model = read_rollout_model(&path, thread_id)?;
     let Some((model, provider, timestamp, effort)) = model else {
         return Ok(fallback());
@@ -854,7 +905,8 @@ mod tests {
         assert_eq!(
             read(home.path(), "saved").unwrap(),
             json!({
-                "status":"ok","threadId":"saved","model":"child/database","modelProvider":"child-database"
+                "status":"ok","threadId":"saved","model":"child/database",
+                "modelProvider":"child-database","indexedModelProvider":"child-database"
             })
         );
         remember_settings(
@@ -868,7 +920,8 @@ mod tests {
         assert_eq!(
             read(home.path(), "saved").unwrap(),
             json!({
-                "status":"ok","threadId":"saved","model":"child/confirmed","modelProvider":"child-confirmed"
+                "status":"ok","threadId":"saved","model":"child/confirmed",
+                "modelProvider":"child-confirmed","indexedModelProvider":"child-database"
             })
         );
     }
@@ -1472,7 +1525,8 @@ mod tests {
         let db_before = std::fs::read(&db_path).unwrap();
         assert_eq!(
             read(home.path(), "saved").unwrap(),
-            json!({"status":"ok","threadId":"saved","model":"latest","modelProvider":"latest-provider"})
+            json!({"status":"ok","threadId":"saved","model":"latest",
+                "modelProvider":"latest-provider","indexedModelProvider":"database-provider"})
         );
         assert_eq!(std::fs::read(&db_path).unwrap(), db_before);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
@@ -1488,7 +1542,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             read(home.path(), "saved").unwrap(),
-            json!({"status":"ok","threadId":"saved","model":"newest","modelProvider":"session-provider"})
+            json!({"status":"ok","threadId":"saved","model":"newest",
+                "modelProvider":"session-provider","indexedModelProvider":"database-provider"})
         );
     }
 
@@ -1500,7 +1555,8 @@ mod tests {
             "CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT, rollout_path TEXT);
              INSERT INTO threads VALUES ('saved', 'default', 'database-provider', 'session.jsonl');",
         ).unwrap();
-        let expected = json!({"status":"ok","threadId":"saved","model":"default","modelProvider":"database-provider"});
+        let expected = json!({"status":"ok","threadId":"saved","model":"default",
+            "modelProvider":"database-provider","indexedModelProvider":"database-provider"});
         assert_eq!(read(home.path(), "saved").unwrap(), expected);
         let path = home.path().join("session.jsonl");
         std::fs::write(&path, json!({"type":"session_meta","payload":{"id":"saved","model_provider":"other-provider"}}).to_string()).unwrap();
@@ -1575,7 +1631,8 @@ mod tests {
         assert_eq!(
             read(home.path(), "saved").unwrap(),
             json!({
-                "status":"ok", "threadId":"saved", "model":"account/astra", "modelProvider":"codey_router"
+                "status":"ok", "threadId":"saved", "model":"account/astra",
+                "modelProvider":"codey_router", "indexedModelProvider":"codey_router"
             })
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);

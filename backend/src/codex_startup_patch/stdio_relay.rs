@@ -313,8 +313,7 @@ pub(super) fn rewrite_prediction_resume_response(line: &[u8]) -> Option<Vec<u8>>
         return None;
     }
     let result = message.get_mut("result")?.as_object_mut()?;
-    let official = result.get("modelProvider")?.as_str()?
-        == crate::local_router::ROUTER_PROVIDER_ID
+    let official = crate::local_router::is_router_provider(result.get("modelProvider")?.as_str()?)
         && crate::model_id::parse_alias(result.get("model")?.as_str()?)
             .is_some_and(|alias| crate::config::is_official_profile_id(alias.provider_key));
     if !official {
@@ -468,7 +467,6 @@ pub(super) fn forward_app_server_input(
                             resolved_misc_model.as_deref(),
                         );
                         if local_router_enabled {
-                            let method = method_name.to_owned();
                             if message.get("params").is_none_or(serde_json::Value::is_null) {
                                 message["params"] = serde_json::json!({});
                             }
@@ -476,7 +474,40 @@ pub(super) fn forward_app_server_input(
                                 .get_mut("params")
                                 .and_then(serde_json::Value::as_object_mut)
                             {
-                                if method == "thread/resume"
+                                if method_name == "thread/resume"
+                                    && let Some(model) =
+                                        params.get("model").and_then(serde_json::Value::as_str)
+                                    && crate::model_id::parse_alias(model).is_some()
+                                    && super::runtime_override_string(runtime_overrides, "model")
+                                        .is_some_and(|default| {
+                                            crate::model_id::equal(&default, model)
+                                        })
+                                {
+                                    // Desktop may send the launcher default before it has read the
+                                    // thread. A Codey selector is not a native model override.
+                                    let provider = match (
+                                        codex_home,
+                                        params.get("threadId").and_then(serde_json::Value::as_str),
+                                    ) {
+                                        (Some(home), Some(id)) => {
+                                            crate::session_model::indexed_provider(home, id)
+                                                .unwrap_or_else(|error| {
+                                                    eprintln!(
+                                                        "Codey 读取会话提供方失败：{error:#}"
+                                                    );
+                                                    None
+                                                })
+                                        }
+                                        _ => None,
+                                    };
+                                    if !provider
+                                        .as_deref()
+                                        .is_some_and(crate::local_router::is_router_provider)
+                                    {
+                                        params.remove("model");
+                                    }
+                                }
+                                if method_name == "thread/resume"
                                     && params
                                         .get("model")
                                         .and_then(serde_json::Value::as_str)
@@ -486,7 +517,7 @@ pub(super) fn forward_app_server_input(
                                 {
                                     live_threads.insert(thread_id.to_owned());
                                 }
-                                if method == "thread/resume"
+                                if method_name == "thread/resume"
                                     && params.get("model").is_none_or(|model| {
                                         model.is_null()
                                             || model
@@ -539,12 +570,15 @@ pub(super) fn forward_app_server_input(
                                         }
                                     }
                                 }
-                                let provider = super::router_provider_for_params(
-                                    &method,
-                                    params,
-                                    runtime_overrides,
-                                );
-                                params.insert("modelProvider".into(), provider.into());
+                                if method_name == "thread/resume" {
+                                    // No provider override: Codex must reopen the stored carrier.
+                                    params.remove("modelProvider");
+                                } else {
+                                    params.insert(
+                                        "modelProvider".into(),
+                                        crate::local_router::ROUTER_PROVIDER_ID.into(),
+                                    );
+                                }
                                 params.remove("model_provider");
                                 if let Some(config) = params
                                     .get_mut("config")
@@ -656,7 +690,9 @@ pub(super) fn restored_resume_settings(
     thread_id: &str,
     overrides: &[String],
 ) -> Result<Option<(String, Option<serde_json::Value>)>> {
-    let saved = crate::session_model::read(home, thread_id)?;
+    let Some(saved) = crate::session_model::read_routed_resume_model(home, thread_id)? else {
+        return Ok(None);
+    };
     let model = resolve_resume_model(&saved, overrides)?;
     Ok(model.map(|model| (model, saved.get("reasoningEffort").cloned())))
 }
@@ -700,7 +736,10 @@ fn cached_catalog_slugs(catalog_path: &str) -> Result<Vec<String>> {
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
-fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Result<Option<String>> {
+pub(super) fn resolve_resume_model(
+    saved: &serde_json::Value,
+    overrides: &[String],
+) -> Result<Option<String>> {
     let Some(model) = saved.get("model").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };

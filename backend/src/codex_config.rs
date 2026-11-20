@@ -2631,6 +2631,7 @@ fn build_isolated_runtime_overrides(
     )?;
 
     // 原生压缩与网关摘要共用本地网关，上游凭据不进入 Codex 配置。
+    let router_overrides_start = overrides.len();
     for provider_id in local_router::ROUTER_PROVIDER_IDS
         .into_iter()
         .filter(|_| provider_id.is_some())
@@ -2674,6 +2675,20 @@ fn build_isolated_runtime_overrides(
             &Value::from(local_router::COMPACTION_CLIENT_STREAM_IDLE_TIMEOUT.as_millis() as i64),
         );
     }
+    // 已发布的会话仍可能绑定到旧的压缩 Provider。仅在本次路由运行中
+    // 为它配置同一个回环网关；新会话仍只选 codey_router。
+    let prefix = format!("model_providers.{}.", local_router::ROUTER_PROVIDER_ID);
+    let legacy_overrides: Vec<_> = overrides[router_overrides_start..]
+        .iter()
+        .filter_map(|entry| entry.strip_prefix(&prefix))
+        .map(|entry| {
+            format!(
+                "model_providers.{}.{entry}",
+                local_router::REMOTE_COMPACTION_PROVIDER_ID
+            )
+        })
+        .collect();
+    overrides.extend(legacy_overrides);
 
     if fastctx_namespace.is_some() {
         for (path, key) in [
