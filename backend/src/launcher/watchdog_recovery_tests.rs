@@ -346,13 +346,21 @@ async fn cdp_watchdog_recovers_after_repeated_endpoint_loss_and_resets_interval(
 async fn cdp_watchdog_rebuilds_a_closed_bridge_pump_without_waiting_for_the_interval() {
     let mock = MockCdp::start().await;
     let watchdog = mock.watchdog().await;
+    let initial_target = watchdog.websocket_url.read().await.clone();
     let _clock = ManualClock::pause();
     tokio::task::yield_now().await;
 
     mock.state.close_bridges.notify_waiters();
-    // The paused clock never reaches the watchdog interval, so only the pump
-    // closure itself can trigger this reinjection.
-    wait_until(|| mock.state.injections.load(Ordering::SeqCst) == 2).await;
+    // The binding counter increments before injection finishes. Wait for the
+    // replacement target to be published before advancing the paused clock.
+    wait_until(|| {
+        watchdog
+            .websocket_url
+            .try_read()
+            .is_ok_and(|current| !Arc::ptr_eq(&current, &initial_target))
+    })
+    .await;
+    assert_eq!(mock.state.injections.load(Ordering::SeqCst), 2);
     assert_eq!(mock.state.health_checks.load(Ordering::SeqCst), 0);
     for _ in 0..1000 {
         tokio::task::yield_now().await;
