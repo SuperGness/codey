@@ -590,13 +590,11 @@ pub(super) async fn spawn_windows_codex(
         || requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref());
     let environment =
         windows_codex_launch_environment(environment, crate::codex_config::codex_home())?;
-    if let Some(activation) =
-        codey_runtime_core::launcher::build_packaged_activation(app_dir, debug_port, extra_args)
-        && let codey_runtime_core::launcher::CodexLaunch::PackagedActivation {
-            app_user_model_id,
-            arguments,
-            ..
-        } = activation
+    if let Some(codey_runtime_core::launcher::CodexLaunch::PackagedActivation {
+        app_user_model_id,
+        arguments,
+        ..
+    }) = codey_runtime_core::launcher::build_packaged_activation(app_dir, debug_port, extra_args)
     {
         return activate_windows_codex(
             app_dir,
