@@ -1423,15 +1423,44 @@ mod tests {
 
     #[test]
     fn advertised_capabilities_are_accepted_with_required_manifest_fields() {
+        use codey_plugin_sdk::{appserver, lifecycle, provider, status_panel, transport};
+
         let info = host_info();
+        let existing = [
+            appserver::CAPABILITY,
+            lifecycle::CAPABILITY,
+            lifecycle::AUTH_CAPABILITY,
+            lifecycle::API_KEY_CAPABILITY,
+            lifecycle::TURN_STATE_CAPABILITY,
+            provider::CAPABILITY,
+            transport::CAPABILITY,
+            transport::ACCOUNT_CAPABILITY,
+        ];
+        let mut covered = [existing.as_slice(), &[status_panel::CAPABILITY]].concat();
+        let mut advertised: Vec<_> = info
+            .accepted_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect();
+        covered.sort_unstable();
+        advertised.sort_unstable();
+        assert_eq!(covered, advertised);
+
         let mut manifest = fixture_package().inspection.manifest;
-        manifest.capabilities = info.accepted_capabilities.clone();
+        manifest.capabilities = existing.map(str::to_owned).into();
         manifest.api_key_urls = vec!["https://example.test/v1/responses".into()];
+        package::validate_manifest(&manifest).unwrap();
+
+        manifest.capabilities = vec![status_panel::CAPABILITY.into()];
+        manifest.api_key_urls.clear();
+        package::validate_manifest(&manifest).unwrap();
+        manifest.capabilities.push(provider::CAPABILITY.into());
         package::validate_manifest(&manifest).unwrap();
         manifest
             .capabilities
             .push("unknown.future.capability".into());
         assert!(package::validate_manifest(&manifest).is_err());
+
         let encoded = serde_json::to_value(&info).unwrap();
         assert_eq!(
             serde_json::from_value::<codey_plugin_sdk::host::HostInfo>(encoded).unwrap(),
@@ -1439,6 +1468,32 @@ mod tests {
         );
         assert_eq!(info.limits.max_config_bytes as u64, MAX_CONFIG_BYTES);
         assert_eq!(info.limits.max_package_bytes, MAX_PACKAGE);
+    }
+
+    #[test]
+    fn status_capability_cannot_share_a_manifest_with_lifecycle_or_transport() {
+        use codey_plugin_sdk::{lifecycle, provider, status_panel, transport};
+
+        let mut manifest = fixture_package().inspection.manifest;
+        for capabilities in [
+            &[lifecycle::CAPABILITY][..],
+            &[
+                provider::CAPABILITY,
+                transport::CAPABILITY,
+                transport::ACCOUNT_CAPABILITY,
+            ][..],
+        ] {
+            manifest.capabilities = capabilities
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect();
+            package::validate_manifest(&manifest).unwrap();
+            manifest.capabilities.push(status_panel::CAPABILITY.into());
+            assert_eq!(
+                package::validate_manifest(&manifest).unwrap_err(),
+                "状态卡片须与请求生命周期和自定义传输分开部署"
+            );
+        }
     }
 
     #[test]
