@@ -55,7 +55,7 @@
   ];
   const remainingQuotaTextPattern = /(?:剩余\s*\d+\s*%|\b\d+\s*%\s*(?:left|remaining)\b)/i;
   const goalBannerPrefixPattern = /^(?:[^\p{L}\p{N}]*\s*)?(?:(?:已(?:暂停|完成|停止|取消)|进行中|运行中)的目标|目标已(?:暂停|完成|停止|取消)|(?:paused|active|running|completed|stopped|cancel+ed)\s+goal|goal\s+(?:paused|active|running|completed|stopped|cancel+ed))(?:\s|$)/iu;
-  const reactInternalKeyPattern = /^__(?:reactProps|reactFiber|reactInternalInstance)\$/;
+  const reactInternalKeyPattern = /^__(?:reactProps|reactFiber)\$/;
   const reactTraversalIgnoredKeys = new Set([
     "return",
     "child",
@@ -126,10 +126,17 @@
     const allowChildren = isLeafElement || isControlElement;
     const entries = [];
     const seen = new Set();
-    const pushPayload = (value, ignoreChildren = !allowChildren) => {
+    const pushPayload = (value, ignoreChildren = !allowChildren, isComponentName = false) => {
+      if (isComponentName) {
+        if (typeof value === "string" && value && !seen.has(value)) {
+          seen.add(value);
+          entries.push({ ignoreChildren: true, isComponentName: true, value });
+        }
+        return;
+      }
       if (value && typeof value === "object" && !seen.has(value)) {
         seen.add(value);
-        entries.push({ ignoreChildren, value });
+        entries.push({ ignoreChildren, isComponentName: false, value });
       }
     };
     for (const internal of internals) {
@@ -145,7 +152,7 @@
           pushPayload(owner.memoizedProps ?? owner.pendingProps, true);
           const typeName = owner.type?.displayName || owner.type?.name;
           if (typeof typeName === "string" && typeName) {
-            pushPayload({ __componentName: typeName }, true);
+            pushPayload(typeName, true, true);
           }
         }
         if (allowChildren) {
@@ -302,15 +309,19 @@
       }
     };
     for (const entry of payloadEntries) {
-      visit(entry.value, 0, "", entry.ignoreChildren);
+      if (entry.isComponentName) {
+        visit(entry.value, 0, "__componentName", true);
+      } else {
+        visit(entry.value, 0, "", entry.ignoreChildren);
+      }
     }
     reactSignalCache.set(element, { payloads, signals });
     return signals;
   };
 
-  const isOwnGoalElement = (element) => {
+  const isOwnGoalElement = (element, precomputedReact = null) => {
     if (!(element instanceof Element)) return false;
-    if (inspectElementReactSignals(element).goal) return true;
+    if ((precomputedReact || inspectElementReactSignals(element)).goal) return true;
     if (controlAttributeCandidates(element).some((attr) => reactGoalIdPattern.test(attr))) {
       return true;
     }
@@ -326,7 +337,7 @@
     const cached = cache.get(element);
     if (cached) return cached;
     const own = inspectElementReactSignals(element);
-    let goal = isOwnGoalElement(element);
+    let goal = isOwnGoalElement(element, own);
     let title = own.title;
     let support = own.support;
     const stack = [...(element.children || [])];
@@ -335,11 +346,11 @@
       const node = stack.pop();
       if (!(node instanceof Element)) continue;
       visited += 1;
-      if (isOwnGoalElement(node)) {
+      const childOwn = inspectElementReactSignals(node);
+      if (isOwnGoalElement(node, childOwn)) {
         goal = true;
         break;
       }
-      const childOwn = inspectElementReactSignals(node);
       if (childOwn.title) title = true;
       if (childOwn.support) support = true;
       if (node.children?.length) {
@@ -364,32 +375,35 @@
     control?.textContent,
   ].map(normalizedValue).filter(Boolean);
 
-  const isNoticeControl = (control) => (
+  const isNoticeControl = (control, precomputedReact = null) => (
     control instanceof Element
     && control.matches?.(controlSelector)
     && control.getAttribute?.(closeAttribute) !== "true"
     && !control.closest?.(`[${dismissedAttribute}="true"]`)
     && (
-      inspectElementReactSignals(control).control
+      (precomputedReact || inspectElementReactSignals(control)).control
       || controlAttributeCandidates(control).some((attr) => reactControlIdPattern.test(attr))
       || controlLabelCandidates(control).some((label) => matchesAny(label, controlLabels))
     )
   );
 
-  const isNoticeActionControl = (control) => (
-    isNoticeControl(control)
-    || (
-      control instanceof Element
-      && control.matches?.(controlSelector)
-      && control.getAttribute?.(closeAttribute) !== "true"
-      && !control.closest?.(`[${dismissedAttribute}="true"]`)
-      && (
-        inspectElementReactSignals(control).actionControl
-        || controlAttributeCandidates(control).some((attr) => reactActionControlIdPattern.test(attr))
-        || controlLabelCandidates(control).some((label) => matchesAny(label, actionControlLabels))
-      )
-    )
-  );
+  const isNoticeActionControl = (control, precomputedReact = null) => {
+    if (
+      !(control instanceof Element)
+      || !control.matches?.(controlSelector)
+      || control.getAttribute?.(closeAttribute) === "true"
+      || control.closest?.(`[${dismissedAttribute}="true"]`)
+    ) {
+      return false;
+    }
+    const react = precomputedReact || inspectElementReactSignals(control);
+    if (isNoticeControl(control, react)) return true;
+    return (
+      react.actionControl
+      || controlAttributeCandidates(control).some((attr) => reactActionControlIdPattern.test(attr))
+      || controlLabelCandidates(control).some((label) => matchesAny(label, actionControlLabels))
+    );
+  };
 
   const shouldSkipMountedTurnMutation = (mutation, target, isNotice) => {
     if (
@@ -551,62 +565,33 @@
 
   const isQuotaNotice = (element) => createNoticeDetector()(element);
 
-  const createFrame = (element) => ({
-    element,
-    nextChildIndex: 0,
-    visited: false,
-  });
-  const createContinuation = (root, continuation = null) => {
-    const segments = continuation?.segments
-      ? [...continuation.segments]
-      : [];
-    segments.push([createFrame(root)]);
-    return { segments };
-  };
+  const createContinuation = (root, continuation = null) => (
+    window.__codeySharedRuntime.createElementContinuation(root, continuation)
+  );
   const hasContinuation = (continuation) => (
-    continuation?.segments?.some?.((segment) => segment.length > 0) === true
+    window.__codeySharedRuntime.hasElementContinuation(continuation)
   );
 
   const anchorsWithin = (root, { continuation = null, remaining = null } = {}) => {
     const titleAnchors = [];
     const noticeControls = [];
-    const state = continuation || createContinuation(
-      root instanceof Element ? root : document.documentElement,
-    );
-    let visited = 0;
-    while (remaining ? remaining.value > 0 : true) {
-      const segment = state.segments[0];
-      if (!segment?.length) {
-        state.segments.shift();
-        if (!state.segments.length) break;
-        continue;
-      }
-      const frame = segment[segment.length - 1];
-      const element = frame.element;
-      if (!(element instanceof Element)) {
-        segment.pop();
-        continue;
-      }
-      if (!frame.visited) {
-        frame.visited = true;
-        if (remaining) remaining.value -= 1;
-        visited += 1;
+    const traversal = window.__codeySharedRuntime.walkElementsBudgeted(
+      root,
+      (element) => {
         const dismissedTarget = element.getAttribute?.(dismissedAttribute) === "true"
           || dismissedNotices.has(element)
           ? element
           : element.closest?.(`[${dismissedAttribute}="true"]`);
         if (dismissedTarget) {
           hideNotice(dismissedTarget);
-          segment.pop();
-          continue;
-        }
-        if (isOwnGoalElement(element)) {
-          element.removeAttribute?.(noticeAttribute);
-          element.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
-          segment.pop();
-          continue;
+          return false;
         }
         const ownReact = inspectElementReactSignals(element);
+        if (isOwnGoalElement(element, ownReact)) {
+          element.removeAttribute?.(noticeAttribute);
+          element.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
+          return false;
+        }
         if (
           ownReact.title
           || element.getAttribute?.(noticeAttribute) === "true"
@@ -614,23 +599,14 @@
         ) {
           titleAnchors.push(element);
         }
-        if (isNoticeControl(element)) noticeControls.push(element);
-      }
-      if (remaining?.value <= 0) break;
-      if (frame.nextChildIndex < element.children.length) {
-        const child = element.children[frame.nextChildIndex];
-        frame.nextChildIndex += 1;
-        childExpansions += 1;
-        segment.push(createFrame(child));
-      } else {
-        segment.pop();
-      }
-    }
-    scannedElements += visited;
-    return {
-      continuation: {
-        segments: state.segments.filter((segment) => segment.length > 0),
+        if (isNoticeControl(element, ownReact)) noticeControls.push(element);
       },
+      { continuation, remaining },
+    );
+    scannedElements += traversal.visited;
+    childExpansions += traversal.childExpansions;
+    return {
+      continuation: traversal.continuation,
       noticeControls,
       titleAnchors,
     };

@@ -144,7 +144,7 @@ test("streaming childList changes inside a mounted turn skip selector scans", ()
   assert.equal(runtime.timers.size, 0);
 });
 
-test("turn-external sidebar and header changes still schedule probes", () => {
+test("turn-external sidebar and navigation rail changes still schedule probes", () => {
   const runtime = createRuntime();
   const sidebarRoot = runtime.body.appendChild(new FakeElement("div"));
   const sidebarMarker = new FakeElement("div", {
@@ -158,16 +158,20 @@ test("turn-external sidebar and header changes still schedule probes", () => {
   assert.ok([...runtime.timers.values()].some(({ delay }) => delay === 60));
 
   runtime.timers.clear();
-  const header = runtime.body.appendChild(new FakeElement("header"));
-  const headerChild = header.appendChild(new FakeElement("button"));
-  runtime.bootstrap.handler([childListMutation(header, [headerChild])]);
+  const rail = runtime.body.appendChild(new FakeElement("nav", {
+    attributes: { "data-app-navigation-rail": "true" },
+  }));
+  const railChild = rail.appendChild(new FakeElement("button"));
+  runtime.bootstrap.handler([childListMutation(rail, [railChild])]);
   assert.equal(runtime.timers.size, 1);
 });
 
-test("turn-external attribute changes still process header and sidebar updates", () => {
+test("turn-external attribute changes still process navigation rail and sidebar updates", () => {
   const runtime = createRuntime();
-  const header = runtime.body.appendChild(new FakeElement("header"));
-  runtime.bootstrap.handler([attributeMutation(header)]);
+  const rail = runtime.body.appendChild(new FakeElement("nav", {
+    attributes: { "data-app-navigation-rail": "true" },
+  }));
+  runtime.bootstrap.handler([attributeMutation(rail)]);
   assert.equal(runtime.timers.size, 1);
 
   runtime.timers.clear();
@@ -365,5 +369,61 @@ test("open-within sync remains active after session tools disconnect bootstrap a
   assert.equal(customCard.hasAttribute("data-codey-open-within"), false);
   assert.equal(cardChild.hasAttribute("data-codey-open-within"), false);
   assert.equal(buttonHost.hasAttribute("data-codey-open-within"), false);
+});
+
+test("harvests pre-patched open-within classes from :root metadata without walking earlier cssRules", () => {
+  const prePatchedLink = new FakeElement("link", {
+    attributes: {
+      rel: "stylesheet",
+      href: "app://-/assets/async/meta-patched-11223344.css",
+    },
+  });
+  const encodedMeta = encodeURIComponent(JSON.stringify({
+    d: ["customMetaGroup"],
+    a: ["has-meta-any"],
+    b: ["has-meta-button"],
+  }));
+  let earlierRuleReads = 0;
+  const untouchedRule = {
+    get selectorText() {
+      earlierRuleReads += 1;
+      return ".unused";
+    },
+    get cssText() {
+      earlierRuleReads += 1;
+      return ".unused { color: red; }";
+    },
+  };
+  const prePatchedSheet = {
+    ownerNode: prePatchedLink,
+    disabled: false,
+    cssRules: [
+      untouchedRule,
+      untouchedRule,
+      {
+        selectorText: ":root",
+        cssText: `:root { --codey-css-open-state-has-patched: 1; --codey-open-within-classes: "${encodedMeta}"; }`,
+      },
+    ],
+  };
+  const runtime = createRuntime({ styleSheets: [prePatchedSheet] });
+  assert.equal(earlierRuleReads, 0, "O(1) :root metadata must avoid scanning earlier CSS rules");
+
+  const card = runtime.documentElement.appendChild(new FakeElement("div", {
+    attributes: { class: "customMetaGroup" },
+  }));
+  const anyHost = card.appendChild(new FakeElement("div", {
+    attributes: { class: "has-meta-any" },
+  }));
+  const btnHost = anyHost.appendChild(new FakeElement("div", {
+    attributes: { class: "has-meta-button" },
+  }));
+  const trigger = btnHost.appendChild(new FakeElement("button", {
+    attributes: { "data-state": "open" },
+  }));
+  runtime.bootstrap.handler([attributeMutation(trigger, "data-state")]);
+  assert.equal(card.getAttribute("data-codey-open-within"), "");
+  assert.equal(anyHost.getAttribute("data-codey-open-within"), "");
+  assert.equal(btnHost.getAttribute("data-codey-open-within"), "");
 });
 

@@ -34,10 +34,9 @@ const DISCOVERY_RETRY_MAX_INTERVAL: Duration = Duration::from_millis(200);
 // 列表的 loopback 请求，远低于此值。
 const DISCOVERY_RETRY_COST_BUDGET: Duration = Duration::from_millis(100);
 const BRIDGE_RETRY_MAX_INTERVAL: Duration = Duration::from_millis(500);
-// 门禁要等 Codex 自己建好 request client（实测导航后 6-9 秒），且只是增强：
-// 启动注入完全不碰它，就绪由后台轮询确认；未就绪期间请求路由由 CLI 包装层的
-// stdin 改写兜底。
-const REQUEST_GATE_SETTLE_ROUNDS: u32 = 3;
+// 门禁只作诊断与增强：等源码补丁或托管 AppServerManager 就绪即可，不再主动
+// 触发会话工具加载或原型修补；未就绪期间请求路由由 CLI 包装层的 stdin 改写兜底。
+const REQUEST_GATE_SETTLE_ROUNDS: u32 = 2;
 const REQUEST_GATE_CDP_MARGIN: Duration = Duration::from_secs(1);
 // 就绪探针是一次同步求值；忙碌的 renderer 也会排队执行并回包，单次预算给足，
 // 超时只保留桥接重探，不触发重装。
@@ -81,7 +80,6 @@ enum InjectionPhase {
     SelectTarget,
     InstallBridge,
     VerifyReadiness,
-    ReadStatuses,
 }
 
 impl InjectionPhase {
@@ -90,7 +88,6 @@ impl InjectionPhase {
             value if value == Self::SelectTarget as u8 => Self::SelectTarget,
             value if value == Self::InstallBridge as u8 => Self::InstallBridge,
             value if value == Self::VerifyReadiness as u8 => Self::VerifyReadiness,
-            value if value == Self::ReadStatuses as u8 => Self::ReadStatuses,
             _ => Self::DiscoverTargets,
         }
     }
@@ -101,7 +98,6 @@ impl InjectionPhase {
             Self::SelectTarget => "选择 Codex renderer",
             Self::InstallBridge => "安装 CDP bridge 与注入脚本",
             Self::VerifyReadiness => "确认页面注入就绪",
-            Self::ReadStatuses => "读取注入状态",
         }
     }
 
@@ -112,7 +108,6 @@ impl InjectionPhase {
             Self::SelectTarget => "selectTarget",
             Self::InstallBridge => "installBridge",
             Self::VerifyReadiness => "verifyReadiness",
-            Self::ReadStatuses => "readStatuses",
         }
     }
 
@@ -123,12 +118,11 @@ impl InjectionPhase {
     }
 }
 
-const INJECTION_PHASES: [InjectionPhase; 5] = [
+const INJECTION_PHASES: [InjectionPhase; 4] = [
     InjectionPhase::DiscoverTargets,
     InjectionPhase::SelectTarget,
     InjectionPhase::InstallBridge,
     InjectionPhase::VerifyReadiness,
-    InjectionPhase::ReadStatuses,
 ];
 const INJECTION_PHASE_COUNT: usize = INJECTION_PHASES.len();
 
@@ -1139,17 +1133,14 @@ struct RequestGateVerdict {
     #[serde(default)]
     source_gate: bool,
     #[serde(default)]
-    module_gate: bool,
-    #[serde(default)]
     host_managed: bool,
     #[serde(default)]
     patch_present: bool,
 }
 
 /// 后台每轮的页内等待上限。测试或诊断可用 `window.__codeyRequestGateWaitMs` 再缩短。
-const REQUEST_GATE_WAIT_BUDGET: Duration = Duration::from_secs(10);
-/// 单次 ensureRequestGate 调用的页内上限：会话工具加载与模块探测各有自己的
-/// 预算，卡住的调用不拖累整轮等待的终止判定。
+const REQUEST_GATE_WAIT_BUDGET: Duration = Duration::from_secs(5);
+/// 单次 ensureRequestGate 调用的页内上限。
 const REQUEST_GATE_POLL_STEP_MS: u64 = 200;
 const REQUEST_GATE_POLL_CALL_MS: u64 = 2_000;
 
@@ -1175,7 +1166,6 @@ const REQUEST_GATE_VERIFY_SCRIPT_TEMPLATE: &str = r#"(async () => {
     waitedMs: Date.now() - started,
     polls,
     sourceGate: window.__codeyModelRequestSourceGateInstalled === true,
-    moduleGate: window.__codeyModelRequestModuleGateInstalled === true,
     hostManaged: window.__codeyAppServerManagerHosted === true,
   });
   for (;;) {
@@ -1243,7 +1233,11 @@ struct RequestGateBudget {
 
 impl RequestGateBudget {
     fn with_wait(wait: Duration) -> Self {
-        let call_timeout = wait + REQUEST_GATE_CDP_MARGIN;
+        Self::with_wait_and_margin(wait, REQUEST_GATE_CDP_MARGIN)
+    }
+
+    fn with_wait_and_margin(wait: Duration, margin: Duration) -> Self {
+        let call_timeout = wait + margin;
         Self {
             deadline: tokio::time::Instant::now() + call_timeout,
             call_timeout,
@@ -1322,12 +1316,8 @@ fn record_request_gate_verdict(
     verdict: &RequestGateVerdict,
     settle_ms: Option<u64>,
 ) {
-    // sourceGate/moduleGate 区分源码补丁、模块级 DI 直取与 React 遍历三条
-    // 就绪路径；patchSession 记录补丁服务是否赶在首个文档前挂上该页面，
-    // attachedBeforeLoad 为 false 时主 bundle 没有补丁，属于预期内的降级。
-    // hostManaged 表示请求由桌面宿主进程发出，页面里的源码门禁不在请求路径上：
-    // 线路由 CLI 输入中继固定，跨线路交接改由输入框发送入口的补丁完成，
-    // sourceGate 不代表请求已被页面校验。
+    // sourceGate/hostManaged 区分源码补丁与桌面宿主托管两条就绪路径；
+    // patchSession 记录补丁服务是否赶在首个文档前挂上该页面。
     let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
         event,
         serde_json::json!({
@@ -1337,7 +1327,6 @@ fn record_request_gate_verdict(
             "polls": verdict.polls,
             "settleMs": settle_ms,
             "sourceGate": verdict.source_gate,
-            "moduleGate": verdict.module_gate,
             "hostManaged": verdict.host_managed,
             "patchSession": crate::renderer_asset_patch::page_stats(target_id),
         }),
@@ -1425,7 +1414,6 @@ async fn run_injection_attempt(
     };
     match verify_injection(&mut bridge, phase, deadline).await {
         Ok(probe) => {
-            phase.store(InjectionPhase::ReadStatuses as u8, Ordering::Release);
             // 状态探测只用于诊断，不进启动关键路径：桥接与浮层已证明注入可用，
             // 真实状态由界面请求时的 refresh_injection_statuses 补齐。
             AttemptOutcome::Injected {
@@ -2239,13 +2227,33 @@ fn target_health_from_evaluate_response(response: &serde_json::Value) -> TargetH
 }
 
 pub async fn is_target_healthy(websocket_url: &str) -> Result<TargetHealth> {
-    match codey_runtime_core::bridge::evaluate_script_with_await_promise(
-        websocket_url,
-        bridge_health_check_script(),
-        true,
-    )
-    .await
-    {
+    is_target_healthy_with_timeout(websocket_url, None).await
+}
+
+async fn is_target_healthy_with_timeout(
+    websocket_url: &str,
+    timeout: Option<Duration>,
+) -> Result<TargetHealth> {
+    let response = match timeout {
+        Some(timeout) => {
+            codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+                websocket_url,
+                bridge_health_check_script(),
+                true,
+                timeout,
+            )
+            .await
+        }
+        None => {
+            codey_runtime_core::bridge::evaluate_script_with_await_promise(
+                websocket_url,
+                bridge_health_check_script(),
+                true,
+            )
+            .await
+        }
+    };
+    match response {
         Ok(result) => Ok(target_health_from_evaluate_response(&result)),
         Err(error) => {
             // 探测每次都新建 CDP 连接。命令超时意味着端点收下了连接却不执行
@@ -2462,7 +2470,6 @@ assert.equal(nextPage.window.attempts, 1);
             ),
             (vec![InjectionPhase::InstallBridge], false),
             (vec![InjectionPhase::VerifyReadiness], false),
-            (vec![InjectionPhase::ReadStatuses], false),
             (
                 vec![
                     InjectionPhase::InstallBridge,
@@ -2690,9 +2697,13 @@ assert.equal(nextPage.window.attempts, 1);
     async fn request_gate_unresponsive_cdp_never_degrades_including_handshake() {
         for stall_handshake in [false, true] {
             let (url, server) = mock_request_gate(None, stall_handshake).await;
+            let budget = RequestGateBudget::with_wait_and_margin(
+                Duration::from_millis(30),
+                Duration::from_millis(30),
+            );
             let failure = tokio::time::timeout(
-                Duration::from_secs(3),
-                verify_request_gate(&url, RequestGateBudget::with_wait(TEST_GATE_WAIT)),
+                Duration::from_secs(1),
+                verify_request_gate(&url, budget),
             )
             .await
             .expect("the whole CDP call must finish before the injection deadline")
@@ -2701,7 +2712,7 @@ assert.equal(nextPage.window.attempts, 1);
             assert!(failure.reinstall);
             let detail = failure.error.to_string();
             assert!(detail.contains("CDP 调用未在响应预算内完成"), "{detail}");
-            assert!(detail.contains("pageBudgetMs=200"), "{detail}");
+            assert!(detail.contains("pageBudgetMs=30"), "{detail}");
         }
     }
 
@@ -3048,7 +3059,6 @@ const run = async (patch, waitMs = 40, onPending = () => {}) => {
         for phase in [
             InjectionPhase::InstallBridge,
             InjectionPhase::VerifyReadiness,
-            InjectionPhase::ReadStatuses,
         ] {
             assert!(!phase.is_discovery());
             assert_eq!(
@@ -3114,7 +3124,6 @@ const run = async (patch, waitMs = 40, onPending = () => {}) => {
             (InjectionPhase::SelectTarget, "selectTarget"),
             (InjectionPhase::InstallBridge, "installBridge"),
             (InjectionPhase::VerifyReadiness, "verifyReadiness"),
-            (InjectionPhase::ReadStatuses, "readStatuses"),
         ] {
             assert_eq!(phase.key(), key);
             assert_eq!(InjectionPhase::from_raw(phase as u8) as u8, phase as u8);
@@ -3282,7 +3291,9 @@ const run = async (patch, waitMs = 40, onPending = () => {}) => {
         });
 
         assert_eq!(
-            is_target_healthy(&format!("ws://{address}")).await.unwrap(),
+            is_target_healthy_with_timeout(&format!("ws://{address}"), Some(Duration::from_millis(50)))
+                .await
+                .unwrap(),
             TargetHealth::Unresponsive,
         );
 

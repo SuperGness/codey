@@ -3,11 +3,17 @@
     window.__codeyBridgeHelpersInstalled
     && window.__codeyMutationDispatcher?.createShieldLifecycle
     && window.__codeyMutationDispatcher?.controlDescriptor
-    && window.__codeyMutationDispatcher?.controlsWithin
+    && window.__codeySharedRuntime?.appServerRequestClient
+    && window.__codeySharedRuntime?.callBridge
+    && window.__codeySharedRuntime?.codeyTimed
+    && window.__codeySharedRuntime?.publishInjectionStatus
+    && window.__codeySharedRuntime?.reactFiberFor
     && window.__codeySharedRuntime?.reactInternalGraphIncludes
     && window.__codeySharedRuntime?.reactInternalKeys
     && window.__codeySharedRuntime?.registerFetchInterceptor
+    && window.__codeySharedRuntime?.showRuntimeToast
     && window.__codeySharedRuntime?.statsigClients
+    && window.__codeySharedRuntime?.walkElementsBudgeted
   ) return;
   window.__codeyBridgeHelpersInstalled = true;
 
@@ -38,8 +44,8 @@
     );
   };
 
-  const reactInternalKeyPattern = /^__(?:reactProps|reactFiber|reactInternalInstance)\$.*/;
-  const reactInspectableKeyPattern = /^__(?:reactProps|reactFiber|reactInternalInstance)/;
+  const reactInternalKeyPattern = /^__(?:reactProps|reactFiber)\$.*/;
+  const reactInspectableKeyPattern = /^__(?:reactProps|reactFiber)/;
   const reactContainerKeyPattern = /^__reactContainer/;
   const reactInternalKeys = (element, options = {}) => {
     if (!element || (typeof element !== "object" && typeof element !== "function")) return [];
@@ -54,6 +60,17 @@
     } catch {
       return [];
     }
+  };
+  const reactFiberFor = (element) => {
+    if (!element || (typeof element !== "object" && typeof element !== "function")) return null;
+    try {
+      const keys = Object.keys(element);
+      for (let index = 0; index < keys.length; index += 1) {
+        if (keys[index].startsWith("__reactFiber$")) return element[keys[index]] || null;
+      }
+    } catch {
+    }
+    return null;
   };
   const reactInternals = (element, options = {}) =>
     reactInternalKeys(element, options).flatMap((key) => {
@@ -131,11 +148,15 @@
   };
 
   const fetchInterceptors = new Map();
+  let sortedFetchInterceptors = [];
   let fetchBase = typeof window.fetch === "function" ? window.fetch : null;
+  const rebuildSortedFetchInterceptors = () => {
+    sortedFetchInterceptors = [...fetchInterceptors.values()]
+      .sort((left, right) => right.priority - left.priority);
+  };
   const dispatchFetch = function dispatchCodeyFetch(...args) {
     const receiver = this;
-    const interceptors = [...fetchInterceptors.values()]
-      .sort((left, right) => right.priority - left.priority);
+    const interceptors = sortedFetchInterceptors;
     const invoke = (index, currentArgs) => {
       const entry = interceptors[index];
       if (!entry) {
@@ -169,38 +190,19 @@
     const key = String(id);
     const entry = { interceptor, priority: Number(priority) || 0 };
     fetchInterceptors.set(key, entry);
+    rebuildSortedFetchInterceptors();
     syncFetchDispatcher();
     let registered = true;
     return () => {
       if (!registered) return;
       registered = false;
-      if (fetchInterceptors.get(key) === entry) fetchInterceptors.delete(key);
+      if (fetchInterceptors.get(key) === entry) {
+        fetchInterceptors.delete(key);
+        rebuildSortedFetchInterceptors();
+      }
       syncFetchDispatcher();
     };
   };
-
-  window.__codeySharedRuntime = Object.freeze({
-    fetchSnapshot: () => Object.freeze({
-      installed: window.fetch === dispatchFetch,
-      interceptorCount: fetchInterceptors.size,
-    }),
-    objectGraphIncludes,
-    reactInternalGraphIncludes,
-    reactInternalKeys,
-    reactInternals,
-    registerFetchInterceptor,
-    statsigClients,
-  });
-
-  const mutationSubscribers = new Map();
-  let mutationObserver = null;
-  let installedMutationOptions = null;
-  let nextMutationSubscriberId = 1;
-  const pendingMutationBatches = [];
-  let mutationDispatchRunning = false;
-  let mutationDispatchScheduled = false;
-  const mutationDispatchBudgetMs = 8;
-  const maxMutationSubscribersPerFrame = 16;
 
   const codeyNow = () =>
     typeof performance === "object" && typeof performance.now === "function"
@@ -209,8 +211,6 @@
 
   // Lightweight observer telemetry: per-handler call count, mutation count and
   // wall time, exposed on window.__codeyObserverStats for performance triage.
-  // No behavior change; timing falls back to Date.now() where performance is
-  // unavailable (test sandboxes).
   const codeyTimed = (name, count, run) => {
     const stats = (window.__codeyObserverStats ||= {});
     const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
@@ -225,6 +225,168 @@
       if (elapsed > entry.maxMs) entry.maxMs = elapsed;
     }
   };
+
+  const callBridge = (path, payload = {}, options = {}) => {
+    if (typeof window.__codexSessionDeleteBridge === "function") {
+      return window.__codexSessionDeleteBridge(path, payload, options);
+    }
+    if (options?.rejectOnUnavailable) {
+      return Promise.reject(new Error("Codey bridge 尚未就绪"));
+    }
+    return Promise.resolve({
+      status: "failed",
+      code: "bridge_unavailable",
+      message: "Codey bridge 不可用",
+    });
+  };
+
+  const appServerRequestClient = () => {
+    const clients = window.__codeyAppServerRequestClients;
+    if (!clients || typeof clients.get !== "function") return null;
+    const local = clients.get("local");
+    if (local && typeof local.sendRequest === "function") return local;
+    if (typeof clients.values !== "function") return null;
+    const all = [...clients.values()].filter((client) => typeof client?.sendRequest === "function");
+    return all.length === 1 ? all[0] : null;
+  };
+
+  const runtimeToastId = "codey-runtime-toast";
+  const runtimeToastStyleId = "codey-runtime-toast-style";
+  const showRuntimeToast = (message, tone = "success") => {
+    if (!document?.documentElement) return;
+    if (!document.getElementById?.(runtimeToastStyleId) && typeof document.createElement === "function") {
+      const style = document.createElement("style");
+      style.id = runtimeToastStyleId;
+      style.textContent = `#${runtimeToastId} { -webkit-app-region: no-drag !important; position: fixed; right: 20px; bottom: 22px; z-index: 2147483645; max-width: 360px; border: 1px solid rgba(124, 140, 255, .4); border-radius: 11px; padding: 10px 13px; background: rgba(20, 24, 36, .97); color: #eef2ff; box-shadow: 0 12px 36px rgba(0,0,0,.4); font: 12px/1.45 system-ui, sans-serif; } #${runtimeToastId}[data-tone="error"] { border-color: rgba(248, 113, 113, .6); color: #fecaca; }`;
+      document.documentElement.appendChild(style);
+    }
+    document.getElementById?.(runtimeToastId)?.remove?.();
+    const toast = document.createElement("div");
+    toast.id = runtimeToastId;
+    toast.dataset.tone = tone;
+    toast.setAttribute("role", tone === "error" ? "alert" : "status");
+    toast.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
+    toast.textContent = message;
+    document.documentElement.appendChild(toast);
+    const schedule = typeof window.setTimeout === "function" ? window.setTimeout.bind(window) : globalThis.setTimeout;
+    schedule?.(() => toast.remove?.(), tone === "error" ? 8_000 : 3_500);
+  };
+  if (typeof window.__codeyShowRuntimeToast !== "function") {
+    window.__codeyShowRuntimeToast = showRuntimeToast;
+  }
+
+  const injectionStatusChangedEvent = "codey-injection-status-changed";
+  const publishInjectionStatus = (id, status, detail) => {
+    const entry = window.__codeyInjectionStatus?.[id];
+    if (!entry || entry.status === "pending") return;
+    if (entry.status === status && entry.detail === detail && !entry.error) return;
+    entry.status = status;
+    entry.detail = detail;
+    entry.error = null;
+    if (
+      typeof window.dispatchEvent === "function"
+      && typeof window.CustomEvent === "function"
+    ) {
+      window.dispatchEvent(new window.CustomEvent(injectionStatusChangedEvent, {
+        detail: { id, status },
+      }));
+    }
+  };
+
+  const createElementFrame = (element) => ({
+    element,
+    nextChildIndex: 0,
+    visited: false,
+  });
+  const createElementContinuation = (root, continuation = null) => {
+    const segments = continuation?.segments
+      ? [...continuation.segments]
+      : [];
+    segments.push([createElementFrame(root)]);
+    return { segments };
+  };
+  const hasElementContinuation = (continuation) => (
+    continuation?.segments?.some?.((segment) => segment.length > 0) === true
+  );
+  const walkElementsBudgeted = (root, visitor, { continuation = null, remaining = null } = {}) => {
+    const state = continuation || createElementContinuation(
+      root instanceof Element ? root : document.documentElement,
+    );
+    let visited = 0;
+    let childExpansions = 0;
+    while (remaining ? remaining.value > 0 : true) {
+      const segment = state.segments[0];
+      if (!segment?.length) {
+        state.segments.shift();
+        if (!state.segments.length) break;
+        continue;
+      }
+      const frame = segment[segment.length - 1];
+      const element = frame.element;
+      if (!(element instanceof Element)) {
+        segment.pop();
+        continue;
+      }
+      if (!frame.visited) {
+        frame.visited = true;
+        if (remaining) remaining.value -= 1;
+        visited += 1;
+        if (visitor(element) === false) {
+          segment.pop();
+          continue;
+        }
+      }
+      if (remaining?.value <= 0) break;
+      if (frame.nextChildIndex < element.children.length) {
+        const child = element.children[frame.nextChildIndex];
+        frame.nextChildIndex += 1;
+        childExpansions += 1;
+        segment.push(createElementFrame(child));
+      } else {
+        segment.pop();
+      }
+    }
+    return {
+      childExpansions,
+      continuation: {
+        segments: state.segments.filter((segment) => segment.length > 0),
+      },
+      visited,
+    };
+  };
+
+  window.__codeySharedRuntime = Object.freeze({
+    appServerRequestClient,
+    callBridge,
+    codeyTimed,
+    createElementContinuation,
+    fetchSnapshot: () => Object.freeze({
+      installed: window.fetch === dispatchFetch,
+      interceptorCount: fetchInterceptors.size,
+    }),
+    hasElementContinuation,
+    objectGraphIncludes,
+    publishInjectionStatus,
+    reactFiberFor,
+    reactInternalGraphIncludes,
+    reactInternalKeys,
+    reactInternals,
+    registerFetchInterceptor,
+    showRuntimeToast,
+    statsigClients,
+    walkElementsBudgeted,
+  });
+
+  const mutationSubscribers = new Map();
+  let mutationObserver = null;
+  let installedMutationOptions = null;
+  let nextMutationSubscriberId = 1;
+  const pendingMutationBatches = [];
+  let mutationDispatchRunning = false;
+  let mutationDispatchScheduled = false;
+  const mutationDispatchBudgetMs = 8;
+  const maxMutationSubscribersPerFrame = 16;
+
   const dispatchMutations = (mutations) => {
     codeyTimed("bridge.dispatchMutations", mutations?.length ?? 0, () => {
       dispatchMutationsImpl(mutations);
@@ -477,15 +639,6 @@
       mutationSubscribers.delete(id);
       syncMutationObserver();
     };
-  };
-
-  const controlsWithin = (root, selector) => {
-    const controls = [];
-    if (root instanceof HTMLElement && root.matches?.(selector)) controls.push(root);
-    if (root && typeof root.querySelectorAll === "function") {
-      controls.push(...root.querySelectorAll(selector));
-    }
-    return controls;
   };
 
   const controlDescriptor = (control) => [
@@ -779,7 +932,6 @@
 
   window.__codeyMutationDispatcher = Object.freeze({
     controlDescriptor,
-    controlsWithin,
     createScopedObserver,
     createShieldLifecycle,
     snapshot: () => Object.freeze({
@@ -792,10 +944,5 @@
     }),
     subscribe: subscribeMutations,
   });
-  window.__codeyCall = (path, payload = {}) => {
-    if (typeof window.__codexSessionDeleteBridge === "function") {
-      return window.__codexSessionDeleteBridge(path, payload);
-    }
-    return Promise.resolve({ status: "failed", message: "Codey bridge unavailable" });
-  };
+  window.__codeyCall = (path, payload = {}, options = {}) => callBridge(path, payload, options);
 })();

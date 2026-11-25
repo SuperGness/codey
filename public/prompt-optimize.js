@@ -44,10 +44,14 @@
 
   const publishInjectionStatus = () => {
     if (!ready) return;
-    const entry = window.__codeyInjectionStatus?.[injectionStatusId];
-    if (!entry || entry.status === "pending") return;
     const status = enabled ? "effective" : "inactive";
     const detail = enabled ? "提示词优化按钮已就绪" : "提示词优化已关闭";
+    if (typeof window.__codeySharedRuntime?.publishInjectionStatus === "function") {
+      window.__codeySharedRuntime.publishInjectionStatus(injectionStatusId, status, detail);
+      return;
+    }
+    const entry = window.__codeyInjectionStatus?.[injectionStatusId];
+    if (!entry || entry.status === "pending") return;
     if (entry.status === status && entry.detail === detail && !entry.error) return;
     entry.status = status;
     entry.detail = detail;
@@ -71,12 +75,16 @@
   let configLoadAttempts = 0;
   let observer = null;
   let observerActive = false;
+  let listenersBound = false;
   let unsubscribeMutations = null;
   const pendingOptimizations = new Map();
 
   const MAX_CONFIG_LOAD_ATTEMPTS = 10;
 
   const callBridge = (path, payload = {}) => {
+    if (typeof window.__codeySharedRuntime?.callBridge === "function") {
+      return window.__codeySharedRuntime.callBridge(path, payload, { rejectOnUnavailable: true });
+    }
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload);
     }
@@ -397,7 +405,7 @@
       element?.getAttribute?.("aria-label"),
       element?.getAttribute?.("title"),
       element?.getAttribute?.("data-testid"),
-      element?.textContent || element?.innerText,
+      typeof element?.textContent === "string" ? element.textContent : "",
     ]
       .filter((value) => typeof value === "string" && value.trim())
       .join(" ")
@@ -412,7 +420,7 @@
       return Number.NEGATIVE_INFINITY;
     }
     const descriptor = controlDescriptor(control);
-    const visibleText = (control.textContent || control.innerText || "")
+    const visibleText = (typeof control.textContent === "string" ? control.textContent : "")
       .replace(/\s+/g, " ")
       .trim();
     const hasAccessHint =
@@ -895,7 +903,7 @@
     );
   };
 
-  const composerRegionChanged = (mutation) => {
+  const composerRegionChanged = (mutation, cachedAnchorParent) => {
     const changedNodes = [
       ...(mutation?.addedNodes || []),
       ...(mutation?.removedNodes || []),
@@ -910,8 +918,7 @@
     if (
       mutation?.type === "childList" &&
       (mutation.target === inputElement?.parentElement ||
-        mutation.target ===
-          document.querySelector(composerAnchorSelector)?.parentElement)
+        (cachedAnchorParent !== null && mutation.target === cachedAnchorParent))
     ) {
       return true;
     }
@@ -939,34 +946,18 @@
     );
   };
 
-  const mutationRequiresComposerScan = (mutation) => {
+  const mutationRequiresComposerScan = (mutation, getAnchorParent) => {
     if (!inputElement?.isConnected || !button?.isConnected) return true;
-    if (buttonHiddenWithoutTarget) return composerRegionChanged(mutation);
+    if (buttonHiddenWithoutTarget) return composerRegionChanged(mutation, getAnchorParent());
     if (isPlainTrackedInputMutation(mutation)) return false;
-    return composerRegionChanged(mutation);
+    return composerRegionChanged(mutation, getAnchorParent());
   };
 
-  // Lightweight observer telemetry: per-handler call count, mutation count and
-  // wall time, exposed on window.__codeyObserverStats for performance triage.
-  // No behavior change; timing falls back to Date.now() where performance is
-  // unavailable (test sandboxes).
   const codeyTimed = (name, count, run) => {
-    const now = () =>
-      typeof performance === "object" && typeof performance.now === "function"
-        ? performance.now()
-        : Date.now();
-    const stats = (window.__codeyObserverStats ||= {});
-    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
-    const startedAt = now();
-    try {
-      return run();
-    } finally {
-      const elapsed = now() - startedAt;
-      entry.calls += 1;
-      entry.items += count;
-      entry.totalMs += elapsed;
-      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+    if (typeof window.__codeySharedRuntime?.codeyTimed === "function") {
+      return window.__codeySharedRuntime.codeyTimed(name, count, run);
     }
+    return run();
   };
   const handleComposerMutations = (mutations) =>
     codeyTimed("prompt-optimize.composerMutations", mutations?.length ?? 0, () => handleComposerMutationsImpl(mutations));
@@ -980,6 +971,15 @@
       (!buttonConnected || !inputConnected) ||
       (button.style.display === "none" && !buttonHiddenWithoutTarget);
     if (!buttonConnected || !inputConnected) composerChanged = true;
+    let anchorParent;
+    const getAnchorParent = () => {
+      if (anchorParent === undefined) {
+        anchorParent = inputConnected
+          ? findClosestComposerAnchorNode(inputElement?.parentElement)?.parentElement ?? null
+          : document.querySelector(composerAnchorSelector)?.parentElement ?? null;
+      }
+      return anchorParent;
+    };
     for (const mutation of mutations) {
       const target = mutation?.target;
       if (!target) {
@@ -991,6 +991,14 @@
         continue;
       }
       if (target.closest?.(`#${buttonId}, #${toastId}`)) continue;
+      if (
+        (mutation.type === "childList" || mutation.type === "characterData") &&
+        !mutationInsideTrackedInput(mutation)
+      ) {
+        const targetEl = target.closest ? target : target.parentElement;
+        const turn = targetEl?.closest?.("[data-turn-key]");
+        if (turn && turn.isConnected !== false) continue;
+      }
       if (
         mutation.type === "attributes" &&
         mutation.attributeName === "style" &&
@@ -1010,7 +1018,7 @@
         conversationChanged = true;
         continue;
       }
-      if (mutationRequiresComposerScan(mutation)) {
+      if (mutationRequiresComposerScan(mutation, getAnchorParent)) {
         composerChanged = true;
       }
     }
@@ -1140,14 +1148,42 @@
     observerActive = false;
   };
 
+  const handleNavigationScan = () => scheduleScan(true);
+  const handleDocumentInput = (event) => {
+    // innerText 会强制布局；输入事件与 DOM 变化共用一次延后读取。
+    if (nodeInsideTrackedInput(event.target)) scheduleButtonStateUpdate();
+  };
+
+  const bindActiveListeners = () => {
+    if (listenersBound) return;
+    listenersBound = true;
+    window.addEventListener?.("scroll", handleScrollReposition, true);
+    window.addEventListener?.("resize", scheduleReposition);
+    window.addEventListener?.("hashchange", handleNavigationScan);
+    window.addEventListener?.("popstate", handleNavigationScan);
+    document.addEventListener?.("input", handleDocumentInput, true);
+  };
+
+  const unbindActiveListeners = () => {
+    if (!listenersBound) return;
+    listenersBound = false;
+    window.removeEventListener?.("scroll", handleScrollReposition, true);
+    window.removeEventListener?.("resize", scheduleReposition);
+    window.removeEventListener?.("hashchange", handleNavigationScan);
+    window.removeEventListener?.("popstate", handleNavigationScan);
+    document.removeEventListener?.("input", handleDocumentInput, true);
+  };
+
   const applyEnabledState = (nextEnabled) => {
     enabled = nextEnabled;
     if (enabled) {
+      bindActiveListeners();
       observeComposerMutations();
       refreshButton();
       return;
     }
 
+    unbindActiveListeners();
     disconnectComposerObserver();
     clearTimeout(buttonStateTimer);
     clearTimeout(scanTimer);
@@ -1199,18 +1235,6 @@
     ready = false;
     loadConfig();
   });
-  window.addEventListener("scroll", handleScrollReposition, true);
-  window.addEventListener("resize", scheduleReposition);
-  window.addEventListener("hashchange", () => scheduleScan(true));
-  window.addEventListener("popstate", () => scheduleScan(true));
-  document.addEventListener(
-    "input",
-    (event) => {
-      // innerText 会强制布局；输入事件与 DOM 变化共用一次延后读取。
-      if (nodeInsideTrackedInput(event.target)) scheduleButtonStateUpdate();
-    },
-    true,
-  );
 
   addStyle();
   installRuntimeToast();

@@ -43,13 +43,12 @@
     "[data-app-action-sidebar-project-row]",
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
   ].join(", ");
-  const headerSelector = "header, nav";
   // Codex 把左侧图标栏收进 nav[data-app-navigation-rail]，图标栏底部的贴底
   // 堆栈里放着帮助与个人资料按钮，Codey 入口跟随它们落在这里。
   const navigationRailSelector = '[data-app-navigation-rail="true"]';
   const railHelpLabelPattern = /帮助|help/i;
   const railProfileLabelPattern = /个人资料|账户|账号|profile|account/i;
-  const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}, ${navigationRailSelector}`;
+  const bootstrapProbeSelector = `${navigationRailSelector}, ${sidebarSelector}`;
   const settingsIcon = `
     <img class="codey-settings-icon" src="__CODEY_APP_ICON_DATA_URL__" alt="" aria-hidden="true" draggable="false">
   `;
@@ -78,9 +77,9 @@
   let openStateObserver = null;
   let ensureOpenStateObserver = null;
   let headerMountDirty = true;
-  let navigationRailSeen = false;
   const openWithinAttribute = "data-codey-open-within";
   const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
+  const openWithinClassesMetaPattern = /--codey-open-within-classes\s*:\s*["']([^"']*)["']/;
   const openStateCssPatchedDatasetKey = "data-codey-open-state-patched";
   const openWithinAncestorClasses = [
     "group",
@@ -114,6 +113,9 @@
   };
 
   const callBridge = (path, payload = {}, options = {}) => {
+    if (typeof window.__codeySharedRuntime?.callBridge === "function") {
+      return window.__codeySharedRuntime.callBridge(path, payload, options);
+    }
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload, options);
     }
@@ -674,6 +676,14 @@
 
   // Codex 把侧边栏底部内容收进贴底的绝对定位 footer 容器后，容器内容由 Codex
   // 自己渲染，可能暂时为空，所以不能再要求它一定含控件。
+  const visibleMountRect = (element) => {
+    if (!(element instanceof HTMLElement)) return null;
+    const style = window.getComputedStyle(element);
+    if (!style || style.display === "none" || style.visibility === "hidden") return null;
+    const rect = element.getBoundingClientRect();
+    return rect && rect.width > 0 && rect.height > 0 ? rect : null;
+  };
+
   const sidebarFooterSlot = (element) => {
     const style = window.getComputedStyle(element);
     if (!style || style.display === "none" || style.visibility === "hidden") return false;
@@ -1111,11 +1121,6 @@
       : null;
   };
 
-  const visibleMountRect = (element) =>
-    element instanceof HTMLElement && element.closest("[hidden], [aria-hidden=true]")
-      ? null
-      : mountableRect(element);
-
   // Codex 打开模态对话框时只给图标栏等背景内容补 aria-hidden，布局不变；
   // 把它当成隐藏会让对话框弹出期间的扫描把入口当成失效挂载卸载。
   const railMountRect = (element) =>
@@ -1123,57 +1128,11 @@
       ? null
       : mountableRect(element);
 
-  const isTopChromeMountTarget = (element) => {
-    const rect = visibleMountRect(element);
-    if (!rect) return false;
-    const viewportWidth = Math.max(
-      window.innerWidth || 0,
-      document.documentElement?.clientWidth || 0,
-      document.documentElement?.getBoundingClientRect?.().width || 0,
-      rect.right,
-    );
-    return rect.top <= 96
-      && rect.height <= 120
-      && rect.width >= 48
-      && rect.right >= viewportWidth - 48;
-  };
-
-  const findHeaderMount = () => {
-    const header = [...document.querySelectorAll("header")].find(isTopChromeMountTarget)
-      || [...document.querySelectorAll("nav")].find(isTopChromeMountTarget);
-    if (!header) return null;
-
-    const rightmostControl = [...header.querySelectorAll("button, [role=button], a[href]")]
-      .reduce((rightmost, control) => {
-        if (control.id === buttonId) return rightmost;
-        const rect = visibleMountRect(control);
-        if (!rect || (rightmost && rect.right <= rightmost.right)) return rightmost;
-        return { control, right: rect.right };
-      }, null)?.control || null;
-    if (!rightmostControl) return { header, target: header };
-
-    let headerChild = rightmostControl;
-    while (headerChild.parentElement && headerChild.parentElement !== header) {
-      headerChild = headerChild.parentElement;
-    }
-    const headerRect = header.getBoundingClientRect();
-    const childRect = headerChild.getBoundingClientRect();
-    const hasTrailingActionRegion = headerChild !== rightmostControl
-      && childRect.width <= 240
-      && childRect.right >= headerRect.right - 24;
-    return {
-      header,
-      target: header,
-      before: hasTrailingActionRegion ? headerChild : null,
-    };
-  };
-
   // 图标栏底部的贴底堆栈：nav 的最后一个可见子容器 → 它的 flex 列容器，
   // 帮助菜单可能不再显示，此时将 Codey 入口放在个人资料菜单之前。
   const findRailFooterMount = () => {
     const rail = document.querySelector(navigationRailSelector);
     if (!(rail instanceof HTMLElement)) return null;
-    navigationRailSeen = true;
     if (!railMountRect(rail)) return null;
     const cluster = [...rail.children]
       .filter((child) => railMountRect(child))
@@ -1197,39 +1156,23 @@
       return false;
     }
     const parent = button.parentElement;
-    if (!(parent instanceof HTMLElement)) {
+    if (!(parent instanceof HTMLElement) || button.dataset.codeyRailSlot !== "true") {
       return false;
     }
-    if (button.dataset.codeyRailSlot === "true") {
-      // 模态对话框给背景补的 aria-hidden 不算真实隐藏，与 railMountRect 一致。
-      if (button.closest("[hidden]")) return false;
-      const rail = button.closest?.(navigationRailSelector);
-      return !!rail
-        && rail.isConnected !== false
-        && parent === button.__codeyRailStack
-        && button.nextElementSibling === button.__codeyRailAnchor;
-    }
-    if (button.closest("[hidden], [aria-hidden=true]")) {
-      return false;
-    }
-    // 页面先渲染顶部、后渲染侧栏时，已挂载的顶部入口也需要迁移。
-    if (document.querySelector(navigationRailSelector)) return false;
-    const validParent = parent.matches?.(headerSelector);
-    const anchored = button.dataset.codeyHeaderActions !== "true"
-      || (
-        !!button.nextElementSibling
-        && button.nextElementSibling === button.__codeyHeaderAnchor
-      );
-    return !!validParent && anchored;
+    // 模态对话框给背景补的 aria-hidden 不算真实隐藏，与 railMountRect 一致。
+    if (button.closest("[hidden]")) return false;
+    const rail = button.closest?.(navigationRailSelector);
+    return !!rail
+      && rail.isConnected !== false
+      && parent === button.__codeyRailStack
+      && button.nextElementSibling === button.__codeyRailAnchor;
   };
 
   const mountButton = () => {
     addStyle();
     const existingButton = document.getElementById(buttonId);
     if (mountedButtonIsUsable(existingButton)) return;
-    const railMount = findRailFooterMount();
-    // 仅无图标栏的窗口（如独立对话窗）使用顶部入口，侧栏重建期间等待它恢复。
-    const mount = railMount || (!navigationRailSeen ? findHeaderMount() : null);
+    const mount = findRailFooterMount();
     if (!mount) {
       existingButton?.remove?.();
       return;
@@ -1252,35 +1195,12 @@
       button.addEventListener("pointerdown", preloadSettingsOverlay, { passive: true });
       button.addEventListener("focus", preloadSettingsOverlay);
     }
-    if (railMount) {
-      button.dataset.codeyRailSlot = "true";
-      delete button.dataset.codeyHeaderActions;
-      button.__codeyHeaderAnchor = null;
-      button.__codeyRailStack = mount.target;
-      button.__codeyRailAnchor = mount.before;
-      if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
-        mount.target.insertBefore(button, mount.before);
-      }
-      applyUpdateBadge(button);
-      headerMountDirty = false;
-      return;
+    button.dataset.codeyRailSlot = "true";
+    button.__codeyRailStack = mount.target;
+    button.__codeyRailAnchor = mount.before;
+    if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
+      mount.target.insertBefore(button, mount.before);
     }
-    delete button.dataset.codeyRailSlot;
-    button.__codeyRailStack = null;
-    button.__codeyRailAnchor = null;
-    if (mount.before) {
-      button.dataset.codeyHeaderActions = "true";
-    } else {
-      delete button.dataset.codeyHeaderActions;
-    }
-    if (mount.before) {
-      if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
-        mount.target.insertBefore(button, mount.before);
-      }
-    } else if (button.parentElement !== mount.target) {
-      mount.target.appendChild(button);
-    }
-    button.__codeyHeaderAnchor = mount.before || null;
     applyUpdateBadge(button);
     headerMountDirty = false;
   };
@@ -1395,15 +1315,9 @@
     scheduleScan(root || document);
   };
 
-  const appServerRequestClient = () => {
-    const clients = window.__codeyAppServerRequestClients;
-    if (!clients || typeof clients.get !== "function") return null;
-    const local = clients.get("local");
-    if (local && typeof local.sendRequest === "function") return local;
-    if (typeof clients.values !== "function") return null;
-    const all = [...clients.values()].filter((client) => typeof client?.sendRequest === "function");
-    return all.length === 1 ? all[0] : null;
-  };
+  const appServerRequestClient = () => (
+    window.__codeySharedRuntime?.appServerRequestClient?.() ?? null
+  );
   const bootstrapReloadMcpServers = async () => {
     const client = appServerRequestClient();
     if (client) {
@@ -1467,28 +1381,11 @@
     return false;
   };
 
-  // Lightweight observer telemetry: per-handler call count, mutation count and
-  // wall time, exposed on window.__codeyObserverStats for performance triage.
-  // No behavior change; timing falls back to Date.now() where performance is
-  // unavailable (test sandboxes).
-  const codeyTimed = (name, count, run) => {
-    const now = () =>
-      typeof performance === "object" && typeof performance.now === "function"
-        ? performance.now()
-        : Date.now();
-    const stats = (window.__codeyObserverStats ||= {});
-    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
-    const startedAt = now();
-    try {
-      return run();
-    } finally {
-      const elapsed = now() - startedAt;
-      entry.calls += 1;
-      entry.items += count;
-      entry.totalMs += elapsed;
-      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
-    }
-  };
+  const codeyTimed = (name, count, run) => (
+    typeof window.__codeySharedRuntime?.codeyTimed === "function"
+      ? window.__codeySharedRuntime.codeyTimed(name, count, run)
+      : run()
+  );
   const elementClassText = (element) => {
     if (!element) return "";
     if (typeof element.className === "string" && element.className) {
@@ -1759,6 +1656,43 @@
     }
     return false;
   };
+  const harvestOpenWithinClassesFromMeta = (ruleText) => {
+    const match = openWithinClassesMetaPattern.exec(ruleText);
+    if (!match) return { found: false, added: false };
+    try {
+      const parsed = JSON.parse(decodeURIComponent(match[1]));
+      if (!parsed || typeof parsed !== "object") return { found: false, added: false };
+      let added = false;
+      for (const token of Array.isArray(parsed.d) ? parsed.d : []) {
+        if (typeof token !== "string" || !token) continue;
+        if (!openWithinDynamicDirectClasses.has(token)) {
+          openWithinDynamicDirectClasses.add(token);
+          added = true;
+        }
+        if (!openWithinDynamicAncestorClasses.has(token)) {
+          openWithinDynamicAncestorClasses.add(token);
+          added = true;
+        }
+      }
+      for (const token of Array.isArray(parsed.a) ? parsed.a : []) {
+        if (typeof token !== "string" || !token) continue;
+        if (!openWithinDynamicAncestorClasses.has(token)) {
+          openWithinDynamicAncestorClasses.add(token);
+          added = true;
+        }
+      }
+      for (const token of Array.isArray(parsed.b) ? parsed.b : []) {
+        if (typeof token !== "string" || !token) continue;
+        if (!openWithinDynamicButtonAncestorClasses.has(token)) {
+          openWithinDynamicButtonAncestorClasses.add(token);
+          added = true;
+        }
+      }
+      return { found: true, added };
+    } catch {
+      return { found: false, added: false };
+    }
+  };
   const patchLoadedOpenStateStylesheets = () => {
     const sheets = document.styleSheets;
     if (!sheets || typeof sheets.length !== "number") return 0;
@@ -1785,7 +1719,10 @@
       }
       const lastRuleText = String(rules[rules.length - 1]?.cssText || "");
       if (lastRuleText.includes(openStateCssPatchedMarker)) {
-        if (harvestOpenWithinClassesFromRuleList(rules)) {
+        const metaResult = harvestOpenWithinClassesFromMeta(lastRuleText);
+        if (metaResult.found) {
+          if (metaResult.added) harvestedNewClasses = true;
+        } else if (harvestOpenWithinClassesFromRuleList(rules)) {
           harvestedNewClasses = true;
         }
         ownerNode.setAttribute?.(openStateCssPatchedDatasetKey, "true");
@@ -1873,6 +1810,7 @@
   }
   collectOpenStateElements(document);
   const handleOpenStateMutationsImpl = (mutations) => {
+    let needsSync = false;
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
@@ -1889,28 +1827,24 @@
           if (target?.getAttribute?.("data-state") === "open") {
             if (!openStateElements.has(target)) {
               openStateElements.add(target);
-              syncOpenWithinContainers();
+              needsSync = true;
             }
           } else if (target && openStateElements.delete(target)) {
-            syncOpenWithinContainers();
+            needsSync = true;
           }
         }
         continue;
       }
+      if (mutation.type !== "childList") continue;
+      const conversationTurn = target?.closest?.("[data-turn-key]");
+      if (conversationTurn && conversationTurn.isConnected !== false) {
+        continue;
+      }
       if (
-        mutation.type === "childList"
-        && openStateElements.size > 0
+        openStateElements.size > 0
         && (mutation.removedNodes?.length ?? 0) > 0
       ) {
-        syncOpenWithinContainers();
-      }
-      const conversationTurn = target?.closest?.("[data-turn-key]");
-      if (
-        mutation.type === "childList"
-        && conversationTurn
-        && conversationTurn.isConnected !== false
-      ) {
-        continue;
+        needsSync = true;
       }
       if (
         target?.id === accountUsageId
@@ -1918,13 +1852,11 @@
       ) {
         continue;
       }
-      if (
-        mutation.type === "childList"
-        && (mutation.addedNodes?.length ?? 0) > 0
-      ) {
+      if ((mutation.addedNodes?.length ?? 0) > 0) {
         collectAddedOpenStateElements(mutation.addedNodes);
       }
     }
+    if (needsSync) syncOpenWithinContainers();
   };
   const handleOpenStateMutations = (mutations) =>
     codeyTimed(
@@ -1974,7 +1906,7 @@
             && target
             && (openStateElements.has(target) || target.hasAttribute?.("data-state"))
           )
-          && !target?.matches?.(headerSelector)
+          && !target?.matches?.(navigationRailSelector)
           && !target?.matches?.(sidebarSelector)
         ) {
           continue;
@@ -2012,23 +1944,23 @@
         return;
       }
       if (mutation.type === "attributes") {
-        if (target?.matches?.(headerSelector) || target?.matches?.(sidebarSelector)) {
-          if (target.matches?.(headerSelector)) headerMountDirty = true;
+        if (target?.matches?.(navigationRailSelector) || target?.matches?.(sidebarSelector)) {
+          if (target.matches?.(navigationRailSelector)) headerMountDirty = true;
           scheduleScan(target);
           return;
         }
         continue;
       }
-      const targetHeader = target?.matches?.(headerSelector)
+      const targetRail = target?.matches?.(navigationRailSelector)
         ? target
-        : target?.closest?.(headerSelector);
-      const headerChildrenChanged = targetHeader && (
+        : target?.closest?.(navigationRailSelector);
+      const railChildrenChanged = targetRail && (
         headerNodesChanged(mutation.addedNodes)
         || headerNodesChanged(mutation.removedNodes)
       );
-      if (headerChildrenChanged) {
+      if (railChildrenChanged) {
         headerMountDirty = true;
-        scheduleScan(targetHeader);
+        scheduleScan(targetRail);
         return;
       }
       for (const node of mutation.addedNodes || []) {
@@ -2040,7 +1972,7 @@
           ? element
           : element.querySelector?.(bootstrapProbeSelector);
         if (!matched) continue;
-        if (element.matches?.(headerSelector) || element.querySelector?.(headerSelector)) {
+        if (element.matches?.(navigationRailSelector) || element.querySelector?.(navigationRailSelector)) {
           headerMountDirty = true;
         }
         scheduleScan(element);

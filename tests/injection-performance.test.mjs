@@ -56,14 +56,9 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(inject, /scheduleScan\(element\)/);
   assert.match(inject, /const mountedButtonIsUsable = \(button\) =>/);
   assert.match(inject, /if \(mountedButtonIsUsable\(existingButton\)\) return;/);
-  assert.match(inject, /button\.nextElementSibling === button\.__codeyHeaderAnchor/);
-  assert.match(inject, /const isTopChromeMountTarget = \(element\) =>/);
+  assert.match(inject, /button\.nextElementSibling === button\.__codeyRailAnchor/);
+  assert.doesNotMatch(inject, /const isTopChromeMountTarget = \(element\) =>/);
   assert.match(inject, /const visibleMountRect = \(element\) =>/);
-  assert.match(inject, /return \{ control, right: rect\.right \};/);
-  assert.doesNotMatch(
-    inject,
-    /control\.getBoundingClientRect\(\)\.right > rightmost\.getBoundingClientRect\(\)\.right/,
-  );
   assert.doesNotMatch(inject, /querySelector\("main"\)/);
   assert.match(inject, /headerMountDirty = true/);
   assert.match(inject, /window\.__codeyRendererInvalidateHeaderMount = invalidateHeaderMount/);
@@ -96,7 +91,8 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(sessionTools, /window\.__codeyAppServerRequestClients/);
   assert.match(sessionTools, /sendRequest\("config\/mcpServer\/reload", \{\}\)/);
   assert.match(sessionTools, /capabilityProbes\.delete\("mcpReload"\)/);
-  assert.match(inject, /window\.__codeyAppServerRequestClients/);
+  assert.match(bridge, /window\.__codeyAppServerRequestClients/);
+  assert.match(inject, /appServerRequestClient/);
   assert.match(inject, /bootstrapReloadMcpServers/);
   assert.doesNotMatch(
     sessionTools,
@@ -201,7 +197,7 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(petShield, /if \(!enabled\) \{/);
   assert.match(bridge, /window\.__codeyMutationDispatcher = Object\.freeze/);
   assert.match(bridge, /const createShieldLifecycle = \(\{/);
-  assert.match(bridge, /const controlsWithin = \(root, selector\) =>/);
+  assert.doesNotMatch(bridge, /const controlsWithin = \(root, selector\) =>/);
   assert.doesNotMatch(petShield, /const controlsWithin = \(root, selector\) =>/);
   assert.match(petShield, /__codeyMutationDispatcher\?\.createShieldLifecycle/);
   assert.match(securityShield, /__codeyMutationDispatcher\.subscribe/);

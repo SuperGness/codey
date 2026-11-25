@@ -6,6 +6,10 @@ import vm from "node:vm";
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const root = new URL("../", import.meta.url);
+const bridgeSource = await readFile(
+  new URL("public/codey-bridge.js", root),
+  "utf8",
+);
 const source = await readFile(
   new URL("public/quota-notice-dismiss.js", root),
   "utf8",
@@ -131,10 +135,22 @@ function createRuntime({ beforeInstall } = {}) {
   const sandbox = {
     document,
     Element: FakeElement,
+    HTMLElement: FakeElement,
     window,
   };
+  const context = vm.createContext(sandbox);
+  vm.runInContext(bridgeSource, context);
+  window.__codeyMutationDispatcher = {
+    subscribe(callback) {
+      subscriptions += 1;
+      mutationCallback = callback;
+      return () => {
+        unsubscriptions += 1;
+      };
+    },
+  };
   beforeInstall?.({ body, document, window });
-  vm.runInNewContext(source, sandbox);
+  vm.runInContext(source, context);
   return {
     body,
     document,
@@ -966,6 +982,35 @@ test("bounds element and child expansion for a wide subtree across batches", () 
   }
   assert.ok(scannedBatches > 1);
   assert.ok(findCloseButton(notice));
+});
+
+test("caches React signal inspection across rescans when owner type has displayName", () => {
+  const runtime = createRuntime();
+  const { notice, reset } = appendNotice(runtime.body);
+  let propReads = 0;
+  const props = {};
+  Object.defineProperty(props, "id", {
+    enumerable: true,
+    get() {
+      propReads += 1;
+      return "codex.rateLimit.reset";
+    },
+  });
+  reset.__reactFiber$test = {
+    memoizedProps: props,
+    _debugOwner: { type: { displayName: "RateLimitResetButton" }, memoizedProps: null },
+  };
+  runtime.emit([{ addedNodes: [notice], target: runtime.body, type: "childList" }]);
+  assert.ok(findCloseButton(notice));
+  const readsAfterFirstScan = propReads;
+  assert.ok(readsAfterFirstScan >= 1);
+
+  runtime.emit([{ addedNodes: [notice], target: runtime.body, type: "childList" }]);
+  assert.equal(
+    propReads,
+    readsAfterFirstScan,
+    "WeakMap cache must hit when owner typeName is cached directly as a string",
+  );
 });
 
 test("CDP preparation registers the script after bridge and status dependencies", async () => {

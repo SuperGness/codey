@@ -4,16 +4,9 @@
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
-  const legacyRemoteCompactionProviderId = "codey_router_remote";
-  const routerProviderIds = new Set([localRouterProviderId, legacyRemoteCompactionProviderId]);
-  const legacyOfficialRouteProviderIds = new Set([
-    officialProviderId,
-    "local-official",
-  ]);
   const gatewayProviderIds = new Set([
     officialProviderId,
     localRouterProviderId,
-    legacyRemoteCompactionProviderId,
   ]);
   const existingPatch = window.__codeyModelWhitelistPatch;
   if (existingPatch?.version === patchVersion
@@ -91,8 +84,6 @@
   const maxKnownModelQueryClients = 8;
   const maxReactScanNodes = 120;
   const maxReactScanVisits = 6_000;
-  const maxMutationProbeNodes = 24;
-  const maxMutationProbeVisits = 96;
   let nextFullReactDiscoveryAt = 0;
   const modelListRequestIds = new Set();
   const knownModelQueryClients = new Set();
@@ -308,15 +299,13 @@
   );
   const isOfficialRoute = (route) => (
     route?.officialAccount === true
-    || legacyOfficialRouteProviderIds.has(modelKey(route?.routeProviderId))
+    || modelKey(route?.routeProviderId) === officialProviderId
   );
   const providersAreCompatible = (method, currentProviderId, targetProviderId, threadId) => (
     modelKey(currentProviderId) === modelKey(targetProviderId)
-    || (routerProviderIds.has(modelKey(currentProviderId))
-      && routerProviderIds.has(modelKey(targetProviderId)))
     || (
       method === "thread/resume"
-      && routerProviderIds.has(modelKey(targetProviderId))
+      && modelKey(targetProviderId) === localRouterProviderId
       && !threadRuntimeProviders.has(threadId)
     )
   );
@@ -423,11 +412,11 @@
     let blocked = false;
     if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
       // Only an unloaded thread can migrate from an external provider during
-      // resume. Both Codey provider IDs share the same gateway carrier.
+      // resume.
       if (
         threadId
         && ((method !== "thread/resume" && unconfirmedThreadProviders.has(threadId)
-          && !routerProviderIds.has(modelKey(currentProviderId))) || (!currentProviderId
+          && modelKey(currentProviderId) !== localRouterProviderId) || (!currentProviderId
           ? method !== "thread/resume"
           : !providersAreCompatible(method, currentProviderId, routedProviderId, threadId)))
       ) {
@@ -554,8 +543,7 @@
           sourceModel,
           routeName,
           officialAccount: metadataBoolean(metadata, "official_account"),
-          supportsRemoteCompaction: typeof metadata?.supports_remote_compaction === "boolean"
-            ? metadata.supports_remote_compaction : modelKey(providerId) === legacyRemoteCompactionProviderId,
+          supportsRemoteCompaction: metadata?.supports_remote_compaction === true,
         }];
       }).filter(([, route]) => (
         route.providerId && route.routeProviderId && route.sourceModel
@@ -1218,15 +1206,10 @@
   const statsigClients = window.__codeySharedRuntime.statsigClients;
 
   const offlineStatsigMarker = "codey_offline_statsig";
-  const forkPlacementGateKeys = new Set([
-    "sidebarCustomSectionsEnabled",
-    "useAppServerCustomSections",
-  ]);
   const forkFallbackPollMs = 1_500;
   const maxForkFallbackPolls = 24;
   let forkFallbackTimer = 0;
   let forkFallbackPolls = 0;
-  const forkCapabilitiesRestorers = [];
 
   const statsigContextWithoutAccount = (client) => {
     if (!client || typeof client !== "object" || typeof client.getContext !== "function") {
@@ -1283,81 +1266,6 @@
     return true;
   };
 
-  const forkPlacementSettingsProxy = (settings) => new Proxy(settings, {
-    get(target, property) {
-      if (property === "read") {
-        return (key, ...rest) => {
-          const value = target.read(key, ...rest);
-          return value === undefined && forkPlacementGateKeys.has(key)
-            ? false
-            : value;
-        };
-      }
-      const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-
-  const forkCapabilitiesFallbackActive = (manager) => {
-    if (disposed) return false;
-    try {
-      if (typeof manager?.settings?.read !== "function") return false;
-      return manager.runtime?.accountId?.() == null;
-    } catch {
-      return false;
-    }
-  };
-
-  const installForkCapabilitiesOnPrototype = (prototype) => {
-    if (!prototype || typeof prototype !== "object") return false;
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, "getForkCapabilities");
-    const original = descriptor?.value;
-    if (typeof original !== "function") return false;
-    if (original.__codeyForkReadinessPatchVersion === patchVersion) return true;
-    if (descriptor.writable === false && descriptor.configurable === false) return false;
-    const patched = function getForkCapabilities(...args) {
-      if (!forkCapabilitiesFallbackActive(this)) return original.apply(this, args);
-      const receiver = Object.create(this, {
-        settings: { value: forkPlacementSettingsProxy(this.settings) },
-      });
-      return original.apply(receiver, args);
-    };
-    Object.defineProperty(patched, "__codeyForkReadinessPatchVersion", {
-      value: patchVersion,
-    });
-    try {
-      Object.defineProperty(prototype, "getForkCapabilities", {
-        ...descriptor,
-        value: patched,
-      });
-    } catch {
-      return false;
-    }
-    if (prototype.getForkCapabilities !== patched) return false;
-    forkCapabilitiesRestorers.push(() => {
-      if (prototype.getForkCapabilities === patched) {
-        Object.defineProperty(prototype, "getForkCapabilities", descriptor);
-      }
-    });
-    return true;
-  };
-
-  const installLocalForkCapabilitiesFallback = () => {
-    const registry = globalThis.__codeyAppServerManagers || window.__codeyAppServerManagers;
-    const manager = registry instanceof Map ? registry.get("local") : null;
-    if (!manager || typeof manager !== "object") return false;
-    for (
-      let proto = Object.getPrototypeOf(manager), depth = 0;
-      proto && proto !== Object.prototype && depth < 6;
-      proto = Object.getPrototypeOf(proto), depth += 1
-    ) {
-      if (Object.prototype.hasOwnProperty.call(proto, "getForkCapabilities")) {
-        return installForkCapabilitiesOnPrototype(proto);
-      }
-    }
-    return false;
-  };
-
   const clearForkFallbackTimer = () => {
     if (!forkFallbackTimer) return;
     window.clearTimeout(forkFallbackTimer);
@@ -1392,8 +1300,7 @@
       clearForkFallbackTimer();
       forkFallbackPolls = 0;
     }
-    const patchedCapabilities = installLocalForkCapabilitiesFallback();
-    return seededAny || patchedCapabilities;
+    return seededAny;
   };
 
   const notifyStatsigClients = () => {
@@ -1915,73 +1822,6 @@
     return element.closest?.(groupedMenuSelector) || null;
   };
 
-  const modelMutationContextSelector = [
-    groupedMenuSelector,
-    modelPickerTriggerSelector,
-    subagentModelLabelSelector,
-    "[class*='h-toolbar-pane']",
-  ].join(", ");
-  const boundedMutationProbe = (roots, target) => {
-    const seen = new Set();
-    const menus = [];
-    const targetElement = groupedMenuElement(target);
-    const targetInMenuContext = Boolean(targetElement?.closest?.(groupedMenuSelector));
-    const targetInModelContext = Boolean(targetElement?.closest?.(modelMutationContextSelector));
-    let nodes = 0;
-    let visits = 0;
-    let hasContext = targetInModelContext;
-    let menuContext = targetInMenuContext;
-    const inspect = (element) => {
-      if (!element || element.nodeType === 3 || seen.has(element)) return false;
-      if (nodes >= maxMutationProbeNodes || visits >= maxMutationProbeVisits) return false;
-      seen.add(element);
-      nodes += 1;
-      if (element.matches?.(groupedMenuSelector)) {
-        hasContext = true;
-        menuContext = true;
-        menus.push(element);
-        return true;
-      }
-      if (element.matches?.(modelPickerTriggerSelector)) {
-        if (observeModelPickerTrigger(element, true)) {
-          hasContext = true;
-          return false;
-        }
-      }
-      if (element.matches?.(subagentModelLabelSelector)) {
-        hasContext = observeSubagentModelLabel(element) || hasContext;
-      }
-      return true;
-    };
-    const queue = [];
-    const enqueue = (root) => {
-      const element = groupedMenuElement(root);
-      if (element) queue.push(element);
-    };
-    roots.forEach(enqueue);
-    for (let index = 0; index < queue.length
-      && nodes < maxMutationProbeNodes && visits < maxMutationProbeVisits; index += 1) {
-      const current = queue[index];
-      if (!current || current.nodeType === 3 || seen.has(current)) continue;
-      visits += 1;
-      if (!inspect(current)) continue;
-      for (const child of current.children || []) {
-        if (queue.length >= maxMutationProbeVisits) break;
-        queue.push(child);
-      }
-    }
-    return { hasContext, menuContext, menus, nodes, visits };
-  };
-
-  const probeAddedMutationNodes = (nodes, target, targetTurn = turnAncestor(target)) => {
-    if (!targetTurn) return null;
-    const roots = Array.from(nodes || [])
-      .filter((node) => node?.nodeType !== 3)
-      .map(groupedMenuElement)
-      .filter(Boolean);
-    return roots.length > 0 ? boundedMutationProbe(roots, target) : null;
-  };
-
   const menusWithin = (node) => {
     const element = groupedMenuElement(node);
     if (!element) return [];
@@ -1994,11 +1834,6 @@
   };
 
   const turnAncestor = (target) => target?.closest?.("[data-turn-key]") || null;
-
-  const isStreamingMutationInsideTurn = (mutation, target, targetTurn = turnAncestor(target)) => (
-    mutation.type === "childList"
-    && Boolean(targetTurn)
-  );
 
   const stopGroupedMenuTextObserver = (container) => {
     const observer = groupedMenuTextObservers.get(container);
@@ -2031,28 +1866,7 @@
     for (const menu of menus) observeGroupedMenuText(menu);
   };
 
-  // Lightweight observer telemetry: per-handler call count, mutation count and
-  // wall time, exposed on window.__codeyObserverStats for performance triage.
-  // No behavior change; timing falls back to Date.now() where performance is
-  // unavailable (test sandboxes).
-  const codeyTimed = (name, count, run) => {
-    const now = () =>
-      typeof performance === "object" && typeof performance.now === "function"
-        ? performance.now()
-        : Date.now();
-    const stats = (window.__codeyObserverStats ||= {});
-    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
-    const startedAt = now();
-    try {
-      return run();
-    } finally {
-      const elapsed = now() - startedAt;
-      entry.calls += 1;
-      entry.items += count;
-      entry.totalMs += elapsed;
-      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
-    }
-  };
+  const codeyTimed = window.__codeySharedRuntime.codeyTimed;
   const handleGroupedMenuMutations = (mutations) =>
     codeyTimed("model-whitelist.groupedMenuMutations", mutations?.length ?? 0, () => handleGroupedMenuMutationsImpl(mutations));
   const handleGroupedMenuMutationsImpl = (mutations) => {
@@ -2061,17 +1875,7 @@
     let relevant = false;
     for (const mutation of mutations) {
       const target = groupedMenuElement(mutation.target);
-      const targetTurn = turnAncestor(target);
-      const turnProbe = probeAddedMutationNodes(mutation.addedNodes || [], mutation.target, targetTurn);
-      if (isStreamingMutationInsideTurn(mutation, target, targetTurn)) {
-        if (turnProbe?.hasContext) {
-          relevant = true;
-          if (!nativeSelectionOnly && turnProbe.menuContext) {
-            discoveredMenus.push(...turnProbe.menus);
-          }
-        }
-        continue;
-      }
+      if (turnAncestor(target)) continue;
       const label = target?.closest?.(subagentModelLabelSelector);
       if (label) observeSubagentModelLabel(label);
       const trigger = target?.closest?.(modelPickerTriggerSelector);
@@ -2872,7 +2676,7 @@
         ? model.slice(prefix.length).trim()
         : model;
     })();
-    const providerRoute = providerId && !routerProviderIds.has(modelKey(providerId))
+    const providerRoute = providerId && modelKey(providerId) !== localRouterProviderId
       ? uniqueRouteForProviderModel(providerId, providerModel)
       : null;
     if (providerRoute?.selectorModel) return providerRoute;
@@ -3489,7 +3293,7 @@
     const binding = !Object.hasOwn(params, "model") ? threadRoutes.get(threadId) : null;
     const historicalSource = historicalSourceModel(model);
     const currentProvider = knownThreadProvider(params);
-    const oldCarrier = routerProviderIds.has(modelKey(currentProvider))
+    const oldCarrier = modelKey(currentProvider) === localRouterProviderId
       || (modelKey(currentProvider) === "codey" && modelKey(catalog.nativeProviderId) !== "codey");
     if (!historicalSource && !binding && !oldCarrier) return params;
     const sourceModel = historicalSource || binding?.sourceModel || model;
@@ -3699,20 +3503,22 @@
   };
   const handleInteraction = (event) => {
     const pickerInteraction = Boolean(
-      event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
+      event?.target?.closest?.(`${groupedMenuSelector}, ${groupedMenuItemSelector}, [aria-haspopup]`),
     );
     if (event?.type === "keydown"
       && (!pickerInteraction || !["Enter", " ", "ArrowDown"].includes(event.key))) return;
-    ensureForkReadinessFallback({ resetPollBudget: true });
     if (pickerInteraction) {
+      ensureForkReadinessFallback({ resetPollBudget: true });
       observeModelPickerTrigger(event.target.closest?.(modelPickerTriggerSelector));
     }
     installGroupedModelMenuObserver();
     if (nativeSelectionOnly && !pickerInteraction) return;
-    if (!nativeSelectionOnly) {
+    if (!nativeSelectionOnly && pickerInteraction) {
       rememberMenuRouteIntent(event);
     }
-    scheduleGroupedModelMenuEnhancement();
+    if (pickerInteraction || groupedMenuTextObservers.size > 0) {
+      scheduleGroupedModelMenuEnhancement();
+    }
     const now = Date.now();
     if (!pickerInteraction && now - lastInteractionApply < interactionApplyIntervalMs) return;
     lastInteractionApply = now;
@@ -4155,17 +3961,11 @@
     portablePendingMessages.add(detail);
     const client = { hostId: "local" };
     const send = async (method, value, request) => {
-      let actual = window.__codeyAppServerRequestClients?.get?.("local");
+      const actual = window.__codeyAppServerRequestClients?.get?.("local");
       request.check();
-      if (!actual) {
-        if (typeof window.__codeyLoadCodexRequestClient !== "function") {
-          await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
-        }
-        actual = await window.__codeyLoadCodexRequestClient?.();
+      if (actual?.hostId !== "local" || typeof actual.enqueueRequest !== "function") {
+        throw new Error("模型请求校验尚未就绪");
       }
-      request.check();
-      if (actual?.hostId !== "local" || typeof actual.enqueueRequest !== "function") throw new Error("模型请求校验尚未就绪");
-      (window.__codeyAppServerRequestClients ||= new Map()).set("local", actual);
       return actual.enqueueRequest(method, value);
     };
     return guardOutgoingRequest(client, method, params, () => {
@@ -4227,90 +4027,16 @@
       { target, compactionSettled: () => hostedThreadIdle(rpc, threadId) });
     return guarded ?? proceed();
   };
-  let requestGatePending = null;
-  const requestGateRestorers = [];
-  // 门禁只改 prototype：实例与类共享同一原型，描述符与替换逻辑完全一致。
-  const installRequestClientGateOnPrototype = (prototype) => {
-    const methods = ["enqueueRequest", "createRequest", "onResult"];
-    const descriptors = methods.map((name) => Object.getOwnPropertyDescriptor(prototype, name));
-    if (descriptors.some((descriptor) => !descriptor?.writable || typeof descriptor.value !== "function")) {
-      throw new Error("当前客户端的模型请求入口不可校验");
-    }
-    const [enqueue, create, result] = descriptors.map((descriptor) => descriptor.value);
-    // Electron may already have the synchronous source gate. Its identity and
-    // response events remain authoritative; avoid wrapping it a second time.
-    if (Function.prototype.toString.call(enqueue).includes("__codeyModelWhitelistPatch")) return true;
-    const replacements = [
-      function (method, params, ...args) {
-        if (this.hostId !== "local" || disposed) return enqueue.call(this, method, params, ...args);
-        (window.__codeyAppServerRequestClients ||= new Map()).set(this.hostId, this);
-        const guarded = guardOutgoingRequest(this, method, params,
-          () => replacements[0].call(this, method, params, ...args),
-          (name, value) => enqueue.call(this, name, value));
-        if (guarded) return guarded;
-        const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
-        if (blockedProviderRequest(routed)) {
-          showBlockedProviderNotice(routed);
-          return Promise.reject(new Error("Codey blocked provider migration"));
-        }
-        return enqueue.call(this, routed.request.method, routed.request.params, ...args);
-      },
-      function (...args) {
-        const created = create.apply(this, args);
-        if (this.hostId === "local" && !disposed && created?.request) {
-          rememberOutgoingThreadRequest({ type: "mcp-request", request: created.request });
-          rememberOutgoingModelListRequest({ type: "mcp-request", request: created.request });
-          if (created.promise?.then) {
-            void Promise.resolve(created.promise).catch((error) => {
-              if (!disposed) rememberThreadProvidersFromResponse(null, { id: created.request.id, error: error || true });
-            });
-          }
-        }
-        return created;
-      },
-      function (id, value, ...args) {
-        if (this.hostId === "local" && !disposed) {
-          const method = this.requestPromises?.get(id)?.method;
-          const message = { id, result: value, requestMethod: method };
-          rememberThreadProvidersFromResponse(null, message);
-          value = rewrittenIncomingResult(method, message.result, this.hostId);
-        }
-        return result.call(this, id, value, ...args);
-      },
-    ];
-    methods.forEach((name, index) => {
-      Object.defineProperty(prototype, name, { ...descriptors[index], value: replacements[index] });
-      requestGateRestorers.push(() => {
-        if (prototype[name] === replacements[index]) Object.defineProperty(prototype, name, descriptors[index]);
-      });
-    });
-    return true;
-  };
-  const installRequestClientGate = (client) => {
-    if (disposed) throw new Error("模型请求校验已重新加载");
-    if (!client || client.hostId !== "local") throw new Error("未找到本机模型请求入口");
-    const installed = installRequestClientGateOnPrototype(Object.getPrototypeOf(client));
-    if (installed) (window.__codeyAppServerRequestClients ||= new Map()).set(client.hostId, client);
-    return installed;
-  };
   const ensureRequestGate = () => {
     if (disposed) return Promise.reject(new Error("模型请求校验已重新加载"));
-    if (nativeSelectionOnly || window.__codeyModelRequestSourceGateInstalled === true) return Promise.resolve(true);
-    if (requestGateRestorers.length) return Promise.resolve(true);
-    if (requestGatePending) return requestGatePending;
-    requestGatePending = Promise.resolve().then(async () => {
-      const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
-      if (knownClient) return installRequestClientGate(knownClient);
-      if (typeof window.__codeyLoadCodexRequestClient !== "function"
-        && typeof window.__codexSessionDeleteBridge === "function") {
-        await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
-      }
-      if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
-      const client = await window.__codeyLoadCodexRequestClient();
-      if (disposed) throw new Error("模型请求校验已重新加载");
-      return installRequestClientGate(client);
-    }).finally(() => { requestGatePending = null; });
-    return requestGatePending;
+    if (
+      nativeSelectionOnly
+      || globalThis.__codeyModelRequestSourceGateInstalled === true
+      || globalThis.__codeyAppServerManagerHosted === true
+    ) {
+      return Promise.resolve(true);
+    }
+    return Promise.reject(new Error("模型请求校验尚未就绪"));
   };
 
   const api = {
@@ -4355,11 +4081,7 @@
       disposed = true;
       clearForkFallbackTimer();
       forkFallbackPolls = 0;
-      forkCapabilitiesRestorers.reverse().forEach((restore) => restore());
-      forkCapabilitiesRestorers.length = 0;
       for (const cancel of portableCancels) cancel();
-      requestGateRestorers.reverse().forEach((restore) => restore());
-      requestGateRestorers.length = 0;
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;
       window.clearTimeout(groupedMenuTimer);

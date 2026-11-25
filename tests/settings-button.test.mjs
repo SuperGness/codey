@@ -206,17 +206,6 @@ test("mounts above the profile menu when the navigation rail has no help entry",
   }
 });
 
-test("moves a stable header entry into a navigation rail rendered later", () => {
-  const { document, documentElement, header, rail, stack, window } = createProfileRailFixture({ attach: false });
-  const button = document.getElementById("codey-settings-button");
-  assert.equal(button.parentElement, header);
-  documentElement.appendChild(rail);
-  window.__codeyRendererScan();
-  assert.equal(document.getElementById("codey-settings-button"), button);
-  assert.equal(button.parentElement, stack);
-  assert.equal(button.dataset.codeyRailSlot, "true");
-});
-
 test("waits for a visible footer entry instead of falling back to the header", () => {
   const { document, header, profile, stack, window } = createProfileRailFixture({ profileVisible: false });
   assert.equal(document.getElementById("codey-settings-button"), null);
@@ -264,75 +253,18 @@ test("keeps the rail entry while Codex marks the rail aria-hidden for a modal", 
   assert.equal(restored.parentElement, replacement);
 });
 
-test("moves the Codey button beside the visible header's trailing action region", () => {
-  const hiddenHeader = new FakeElement("header", { visible: false });
-  const visibleHeader = new FakeElement("header", { right: 1200 });
-  const rightRegion = new FakeElement("div", { right: 1200, width: 70 });
-  const actionRow = new FakeElement("div", { right: 1192, width: 62 });
-  const controlWrapper = new FakeElement("span", { right: 1192, width: 28 });
-  const nativeButton = new FakeElement("button", { right: 1192, width: 28 });
-  const codeyButton = new FakeElement("button", { right: 200, width: 32 });
-  codeyButton.id = "codey-settings-button";
-  hiddenHeader.appendChild(codeyButton);
-  visibleHeader.appendChild(rightRegion);
-  rightRegion.appendChild(actionRow);
-  actionRow.appendChild(controlWrapper);
-  controlWrapper.appendChild(nativeButton);
-
-  const placeholders = {
-    "codey-injected-style": new FakeElement("style"),
-    "codey-message-toolbar": new FakeElement(),
-    "codey-settings-button": codeyButton,
-  };
-  const document = {
-    body: new FakeElement("body"),
-    documentElement: new FakeElement("html"),
-    createElement: (tagName) => new FakeElement(tagName),
-    getElementById: (id) => placeholders[id] || null,
-    querySelector: () => null,
-    querySelectorAll: (selector) => (selector === "header" ? [hiddenHeader, visibleHeader] : []),
-  };
-  const window = {
-    addEventListener() {},
-    clearTimeout() {},
-    dispatchEvent() {},
-    getComputedStyle: (element) => ({
-      display: element.visible ? "flex" : "none",
-      visibility: element.visible ? "visible" : "hidden",
-    }),
-    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
-    setTimeout: () => 1,
-  };
-  window.window = window;
-
-  runRenderer({
-    console,
-    document,
-    HTMLElement: FakeElement,
-    location: { pathname: "/", search: "" },
-    MutationObserver: class {
-      disconnect() {}
-      observe() {}
-    },
-    URLSearchParams,
-    window,
-  });
-
-  assert.equal(codeyButton.parentElement, visibleHeader);
-  assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
-  assert.equal(hiddenHeader.children.includes(codeyButton), false);
-  assert.deepEqual(visibleHeader.children, [codeyButton, rightRegion]);
-});
-
 test("renders weekly and optional five-hour usage above the sidebar account", async () => {
-  const visibleHeader = new FakeElement("header", { right: 1200 });
-  const sessionTitle = new FakeElement("div", { right: 700, width: 240 });
-  sessionTitle.textContent = "当前会话";
-  const rightRegion = new FakeElement("div", { right: 1200, width: 70 });
-  const nativeButton = new FakeElement("button", { right: 1192, width: 28 });
-  rightRegion.appendChild(nativeButton);
-  visibleHeader.appendChild(sessionTitle);
-  visibleHeader.appendChild(rightRegion);
+  const rail = new FakeElement("nav", { right: 52, width: 52, height: 800, top: 44 });
+  rail.setAttribute("data-app-navigation-rail", "true");
+  const railCluster = new FakeElement("div", { right: 44, width: 36, height: 36, top: 750 });
+  const railStack = new FakeElement("div", { right: 44, width: 36, height: 36, top: 750 });
+  const railProfileSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 750 });
+  const railProfile = new FakeElement("button", { right: 44, width: 36, height: 36, top: 750 });
+  railProfile.setAttribute("aria-label", "打开个人资料菜单");
+  railProfileSlot.appendChild(railProfile);
+  railStack.appendChild(railProfileSlot);
+  railCluster.appendChild(railStack);
+  rail.appendChild(railCluster);
 
   const sidebarRoot = new FakeElement("div", {
     right: 320,
@@ -378,7 +310,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     width: 1200,
     height: 800,
   });
-  documentElement.appendChild(sidebarRoot);
+  documentElement.append(rail, sidebarRoot);
   const findById = (id) => {
     let result = null;
     const visit = (element) => {
@@ -391,7 +323,6 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     };
     visit(documentElement);
     visit(document.body);
-    visit(visibleHeader);
     return result;
   };
   const document = {
@@ -400,9 +331,11 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     visibilityState: "visible",
     createElement: (tagName) => new FakeElement(tagName),
     getElementById: findById,
-    querySelector: (selector) => document.querySelectorAll(selector)[0] || null,
+    querySelector: (selector) => {
+      if (String(selector).includes("data-app-navigation-rail")) return rail;
+      return document.querySelectorAll(selector)[0] || null;
+    },
     querySelectorAll: (selector) => {
-      if (selector === "header") return [visibleHeader];
       if (selector === "nav") return [sidebarNavigation];
       return documentElement.querySelectorAll(selector);
     },
@@ -567,9 +500,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.equal(usage.nextElementSibling, nativeProfileFooter);
   assert.deepEqual(sidebarFooterHost.children, [usage, nativeProfileFooter]);
   assert.equal(sidebarFooterHost.getAttribute("data-codey-usage-host"), "true");
-  assert.equal(sessionTitle.parentElement, visibleHeader);
-  assert.equal(visibleHeader.children[0], sessionTitle);
-  assert.equal(visibleHeader.getAttribute("data-codey-usage-host"), null);
+  assert.equal(rail.getAttribute("data-codey-usage-host"), null);
   assert.match(usage.innerHTML, /class="codey-usage-list"/);
   assert.match(usage.innerHTML, /每周<\/span>\s*<\/span>\s*<span class="codey-usage-value">60<span class="codey-usage-unit">%[\s\S]*?5 小时<\/span>\s*<\/span>\s*<span class="codey-usage-value">85</);
   assert.match(usage.innerHTML, /data-window="weekly" data-tone="normal"/);
@@ -668,7 +599,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   await window.__codeyRefreshAccountUsage();
   assert.equal(findById("codey-account-usage"), null);
   assert.equal(sidebarFooterHost.getAttribute("data-codey-usage-host"), null);
-  assert.equal(visibleHeader.getAttribute("data-codey-usage-host"), null);
+  assert.equal(rail.getAttribute("data-codey-usage-host"), null);
   assert.equal(
     scheduledDelays.filter((delay) => delay === 60_000).length,
     refreshSchedulesBeforeUnavailable,
@@ -776,8 +707,19 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
 });
 
 const createStartupUpdateFixture = (bridge) => {
-  const visibleHeader = new FakeElement("header", { right: 1200 });
+  const rail = new FakeElement("nav", { right: 52, width: 52, height: 846, top: 44 });
+  rail.setAttribute("data-app-navigation-rail", "true");
+  const cluster = new FakeElement("div", { right: 44, width: 36, height: 36, top: 850 });
+  const stack = new FakeElement("div", { right: 44, width: 36, height: 36, top: 850 });
+  const profileSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 850 });
+  const profile = new FakeElement("button", { right: 44, width: 36, height: 36, top: 850 });
+  profile.setAttribute("aria-label", "打开个人资料菜单");
+  profileSlot.appendChild(profile);
+  stack.appendChild(profileSlot);
+  cluster.appendChild(stack);
+  rail.appendChild(cluster);
   const documentElement = new FakeElement("html");
+  documentElement.appendChild(rail);
   const elementsById = new Map();
   let nextTimerId = 1;
   let clock = Date.now();
@@ -832,9 +774,11 @@ const createStartupUpdateFixture = (bridge) => {
         : elementsById.get(id);
       return element?.isConnected ? element : null;
     },
-    querySelector: () => null,
-    querySelectorAll: (selector) =>
-      selector === "header" ? [visibleHeader] : [],
+    querySelector: (selector) =>
+      String(selector).includes("data-app-navigation-rail") && rail.isConnected
+        ? rail
+        : null,
+    querySelectorAll: () => [],
   };
   const window = {
     __codexSessionDeleteBridge: async (path, payload, options) => {
@@ -1270,96 +1214,35 @@ test("widens the health check budget right after the machine resumes from sleep"
   assert.equal(button.getAttribute("data-codey-runtime-state"), "checking");
 });
 
-test("ignores sidebar nav and main content until top chrome is available", () => {
-  const sidebarNav = new FakeElement("nav", { right: 84, width: 84, height: 720 });
-  const main = new FakeElement("main", { right: 1200, width: 1200, height: 640, top: 80 });
-  const mainContent = new FakeElement("div", { right: 1080, width: 960, height: 640, top: 80 });
-  const staleButton = new FakeElement("button", { right: 60, width: 28 });
-  staleButton.id = "codey-settings-button";
-  sidebarNav.appendChild(staleButton);
-  main.appendChild(mainContent);
+test("repeated scans fast-path an already mounted rail button without layout reads", () => {
+  const rail = new FakeElement("nav", { right: 52, width: 52, height: 846, top: 44 });
+  rail.setAttribute("data-app-navigation-rail", "true");
+  const cluster = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const stack = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const profileSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 850 });
+  const profile = new FakeElement("button", { right: 44, width: 36, height: 36, top: 850 });
+  profile.setAttribute("aria-label", "打开个人资料菜单");
+  profileSlot.appendChild(profile);
+  stack.appendChild(profileSlot);
+  cluster.appendChild(stack);
+  rail.appendChild(cluster);
+  const documentElement = new FakeElement("html");
+  documentElement.appendChild(rail);
 
-  let topNav = null;
-  const placeholders = {
-    "codey-core-injected-style": new FakeElement("style"),
-    "codey-settings-button": staleButton,
-  };
+  let railQueries = 0;
   const document = {
     body: new FakeElement("body"),
-    documentElement: new FakeElement("html", { right: 1200, width: 1200, height: 800 }),
+    documentElement,
     createElement: (tagName) => new FakeElement(tagName),
-    getElementById: (id) => placeholders[id] || null,
-    querySelector: (selector) => (selector === "main" ? main : null),
-    querySelectorAll: (selector) => {
-      if (selector === "header") return [];
-      if (selector === "nav") return topNav ? [sidebarNav, topNav] : [sidebarNav];
-      return [];
+    getElementById: (id) => documentElement.querySelector(`#${id}`),
+    querySelector: (selector) => {
+      if (String(selector).includes("data-app-navigation-rail")) {
+        railQueries += 1;
+        return rail.isConnected ? rail : null;
+      }
+      return null;
     },
-  };
-  const window = {
-    addEventListener() {},
-    alert() {},
-    clearTimeout() {},
-    getComputedStyle: (element) => ({
-      display: element.visible ? "flex" : "none",
-      visibility: element.visible ? "visible" : "hidden",
-    }),
-    innerWidth: 1200,
-    setTimeout: () => 1,
-  };
-  window.window = window;
-
-  runRenderer({
-    console,
-    document,
-    HTMLElement: FakeElement,
-    location: { pathname: "/", search: "" },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
-    URLSearchParams,
-    window,
-  });
-
-  assert.equal(staleButton.parentElement, null);
-  assert.equal(sidebarNav.children.includes(staleButton), false);
-  assert.equal(mainContent.children.length, 0);
-
-  topNav = new FakeElement("nav", { right: 1200, width: 96, height: 46 });
-  window.__codeyRendererScan();
-
-  assert.equal(staleButton.parentElement, topNav);
-  assert.deepEqual(topNav.children, [staleButton]);
-});
-
-test("repeated scans fast-path an already mounted button without layout reads", () => {
-  const visibleHeader = new FakeElement("header", { right: 1200 });
-  const rightRegion = new FakeElement("div", { right: 1200, width: 70 });
-  const nativeButton = new FakeElement("button", { right: 1192, width: 28 });
-  const codeyButton = new FakeElement("button", { right: 1120, width: 28 });
-  codeyButton.id = "codey-settings-button";
-  codeyButton.dataset.codeyHeaderActions = "true";
-  codeyButton.isConnected = true;
-  visibleHeader.appendChild(codeyButton);
-  visibleHeader.appendChild(rightRegion);
-  rightRegion.appendChild(nativeButton);
-
-  const placeholders = {
-    "codey-core-injected-style": new FakeElement("style"),
-    "codey-settings-button": codeyButton,
-  };
-  let headerQueries = 0;
-  const document = {
-    body: new FakeElement("body"),
-    documentElement: new FakeElement("html"),
-    createElement: (tagName) => new FakeElement(tagName),
-    getElementById: (id) => placeholders[id] || null,
-    querySelector: () => null,
-    querySelectorAll: (selector) => {
-      if (selector === "header" || selector === "nav") headerQueries += 1;
-      return selector === "header" ? [visibleHeader] : [];
-    },
+    querySelectorAll: () => [],
   };
   const window = {
     addEventListener() {},
@@ -1369,7 +1252,6 @@ test("repeated scans fast-path an already mounted button without layout reads", 
     setTimeout: () => 1,
   };
   window.window = window;
-  let observerCallback = null;
 
   runRenderer({
     console,
@@ -1377,10 +1259,6 @@ test("repeated scans fast-path an already mounted button without layout reads", 
     HTMLElement: FakeElement,
     location: { pathname: "/", search: "" },
     MutationObserver: class {
-      constructor(callback) {
-        observerCallback = callback;
-      }
-
       observe() {}
       disconnect() {}
     },
@@ -1388,36 +1266,35 @@ test("repeated scans fast-path an already mounted button without layout reads", 
     window,
   });
 
-  headerQueries = 0;
-  for (const element of [visibleHeader, rightRegion, nativeButton, codeyButton]) {
+  const codeyButton = document.getElementById("codey-settings-button");
+  assert.ok(codeyButton);
+  assert.equal(codeyButton.parentElement, stack);
+  railQueries = 0;
+  for (const element of [rail, cluster, stack, profileSlot, profile, codeyButton]) {
     element.rectReads = 0;
   }
   for (let scan = 0; scan < 10; scan += 1) {
     window.__codeyRendererScan();
   }
-  assert.equal(headerQueries, 0);
-  assert.equal(visibleHeader.rectReads, 0);
-  assert.equal(rightRegion.rectReads, 0);
-  assert.equal(nativeButton.rectReads, 0);
+  assert.equal(railQueries, 0);
+  assert.equal(rail.rectReads, 0);
+  assert.equal(stack.rectReads, 0);
+  assert.equal(profile.rectReads, 0);
   assert.equal(codeyButton.rectReads, 0);
-  assert.deepEqual(visibleHeader.children, [codeyButton, rightRegion]);
+  assert.deepEqual(stack.children, [codeyButton, profileSlot]);
 
-  const newRightRegion = new FakeElement("div", { right: 1200, width: 50 });
-  const newRightButton = new FakeElement("button", { right: 1200, width: 28 });
-  newRightRegion.appendChild(newRightButton);
-  visibleHeader.appendChild(newRightRegion);
-  observerCallback([{
-    type: "childList",
-    target: visibleHeader,
-    addedNodes: [newRightRegion],
-    removedNodes: [],
-  }]);
+  const helpSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 806 });
+  const help = new FakeElement("button", { right: 44, width: 36, height: 36, top: 806 });
+  help.setAttribute("aria-label", "帮助菜单");
+  helpSlot.appendChild(help);
+  stack.insertBefore(helpSlot, profileSlot);
+  window.__codeyRendererInvalidateHeaderMount();
   window.__codeyRendererScan();
 
-  assert.ok(headerQueries > 0);
-  assert.equal(codeyButton.__codeyHeaderAnchor, newRightRegion);
-  assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
-  assert.deepEqual(visibleHeader.children, [rightRegion, codeyButton, newRightRegion]);
+  assert.ok(railQueries > 0);
+  assert.equal(codeyButton.__codeyRailAnchor, helpSlot);
+  assert.equal(codeyButton.dataset.codeyRailSlot, "true");
+  assert.deepEqual(stack.children, [codeyButton, helpSlot, profileSlot]);
 });
 
 test("mounts usage into the sidebar footer container Codex renders itself", async () => {

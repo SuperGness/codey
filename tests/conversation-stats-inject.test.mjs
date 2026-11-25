@@ -304,13 +304,13 @@ test("refreshes with one composer scan per async phase and only writes changed t
     const initialCalls = env.calls.length;
     env.refresh();
     await flushTimers(30);
-    assert.deepEqual(counts, { composerScans: 2, textWrites: 0 });
+    assert.deepEqual(counts, { composerScans: 1, textWrites: 0 });
     assert.equal(env.calls.length, initialCalls + 1);
     env.setStats("conversation-1", { ...STATS, totalTokens: 500, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 50 } });
     env.refresh();
     await flushTimers(30);
     // 速度（摘要与详情）和总量（摘要与详情）各写一次。
-    assert.deepEqual(counts, { composerScans: 4, textWrites: 4 });
+    assert.deepEqual(counts, { composerScans: 2, textWrites: 4 });
     assert.equal(metric(env.bar(), "total"), "总计 500 Tokens");
     assert.equal(field(env.bar(), "totalTokens"), "500 Tokens");
     assert.equal(metric(env.bar(), "speed"), "50.0 Token/s");
@@ -341,7 +341,7 @@ test("unchanged refreshes with an open panel reduce geometry reads and repeated 
       await flushTimers(15);
     }
     t.diagnostic(`10 unchanged refreshes: ${counts.composerScans} composer scans, ${geometryReads.button} button geometry reads, ${geometryReads.panel} panel geometry reads, ${counts.textWrites} text writes, ${attributeWrites} label writes`);
-    assert.deepEqual(counts, { composerScans: 20, textWrites: 0 });
+    assert.deepEqual(counts, { composerScans: 10, textWrites: 0 });
     // 轮询期间不切换读取中状态：每次刷新只在响应后渲染一次，且不改写标签。
     assert.deepEqual(geometryReads, { button: 10, panel: 0 });
     assert.equal(attributeWrites, 0);
@@ -349,6 +349,34 @@ test("unchanged refreshes with an open panel reduce geometry reads and repeated 
     await flushTimers(160);
     assert.equal(attributeWrites, 0, "a DOM rescan with the same data must not rewrite labels");
     assert.deepEqual(geometryReads, { button: 11, panel: 0 });
+  } finally {
+    env.dispose();
+  }
+});
+
+test("periodic polls reuse cached composer anchor and skip layout reads when geometry is clean", async () => {
+  const polls = pollTimers();
+  const env = createEnvironment({
+    onTimer: polls.onTimer,
+    statsBySession: {
+      "conversation-1": { ...STATS, lastTurn: { ...LAST_TURN, status: "running" } },
+    },
+  });
+  try {
+    await flushTimers(30);
+    const counts = observeRenderWork(env);
+    let hostRectReads = 0;
+    let inputRectReads = 0;
+    const origHostRect = env.scope.getBoundingClientRect.bind(env.scope);
+    env.scope.getBoundingClientRect = () => { hostRectReads += 1; return origHostRect(); };
+    const origInputRect = env.textarea.getBoundingClientRect.bind(env.textarea);
+    env.textarea.getBoundingClientRect = () => { inputRectReads += 1; return origInputRect(); };
+
+    assert.equal(await polls.fireLatest(), 1_100);
+    assert.equal(await polls.fireLatest(), 1_100);
+    assert.equal(counts.composerScans, 0);
+    assert.equal(hostRectReads, 0);
+    assert.equal(inputRectReads, 0);
   } finally {
     env.dispose();
   }

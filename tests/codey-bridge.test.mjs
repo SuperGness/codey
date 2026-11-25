@@ -710,17 +710,48 @@ test("direct controls stay synchronous after an earlier subscriber exhausts the 
   assert.deepEqual(calls, ["expensive", "direct", "tail"]);
 });
 
-test("shared control lookup includes a matching root and its descendants", () => {
-  const runtime = createRuntime();
-  const child = {};
-  const root = new runtime.FakeHTMLElement();
-  root.matches = (selector) => selector === "button";
-  root.querySelectorAll = (selector) => selector === "button" ? [child] : [];
+test("shared runtime caches sorted fetch interceptors and exposes common helpers", async () => {
+  const runtime = createRuntime({ fetch: async (input) => ({ input }) });
+  const shared = runtime.window.__codeySharedRuntime;
+  const order = [];
+  const unregisterLow = shared.registerFetchInterceptor(
+    "low",
+    async (next, input, init) => {
+      order.push("low");
+      return next(input, init);
+    },
+    10,
+  );
+  const unregisterHigh = shared.registerFetchInterceptor(
+    "high",
+    async (next, input, init) => {
+      order.push("high");
+      return next(input, init);
+    },
+    20,
+  );
+  await runtime.window.fetch("/first");
+  await runtime.window.fetch("/second");
+  assert.deepEqual(order, ["high", "low", "high", "low"]);
+  unregisterHigh();
+  order.length = 0;
+  await runtime.window.fetch("/third");
+  assert.deepEqual(order, ["low"]);
+  unregisterLow();
 
-  const controls = runtime.window.__codeyMutationDispatcher.controlsWithin(root, "button");
-  assert.equal(controls.length, 2);
-  assert.equal(controls[0], root);
-  assert.equal(controls[1], child);
+  for (const name of [
+    "appServerRequestClient",
+    "callBridge",
+    "codeyTimed",
+    "createElementContinuation",
+    "hasElementContinuation",
+    "publishInjectionStatus",
+    "reactFiberFor",
+    "showRuntimeToast",
+    "walkElementsBudgeted",
+  ]) {
+    assert.equal(typeof shared[name], "function", `shared runtime exports ${name}`);
+  }
 });
 
 test("shared control descriptor normalizes accessible labels and text", () => {

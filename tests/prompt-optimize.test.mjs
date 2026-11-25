@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-
-import { flushTimers } from "./helpers/flush.mjs";
 import vm from "node:vm";
 
 import { FakeElementCore } from "./helpers/fake-element.mjs";
@@ -113,7 +111,8 @@ class FakeEvent {
   }
 }
 
-const flush = flushTimers;
+let activeClock = null;
+const flush = (ms = 40) => (activeClock ? activeClock.advance(ms) : Promise.resolve());
 
 const createEnvironment = (options = {}) => {
   const calls = [];
@@ -388,9 +387,64 @@ const createEnvironment = (options = {}) => {
       handlers.push(handler);
       documentListeners.set(type, handlers);
     },
+    removeEventListener(type, handler) {
+      const handlers = documentListeners.get(type);
+      if (!handlers) return;
+      documentListeners.set(type, handlers.filter((candidate) => candidate !== handler));
+    },
   };
 
   let geometryMeasureCount = 0;
+  let nowMs = 0;
+  let nextTimerId = 1;
+  const scheduledTimers = new Map();
+  const fakeSetTimeout = (callback, delay = 0, ...args) => {
+    const id = nextTimerId;
+    nextTimerId += 1;
+    scheduledTimers.set(id, {
+      at: nowMs + Math.max(0, Number(delay) || 0),
+      callback: () => callback(...args),
+    });
+    return id;
+  };
+  const fakeClearTimeout = (id) => {
+    scheduledTimers.delete(id);
+  };
+  const drainMicrotasks = async () => {
+    for (let index = 0; index < 8; index += 1) {
+      await Promise.resolve();
+    }
+  };
+  const advance = async (ms = 40) => {
+    await drainMicrotasks();
+    const target = nowMs + Math.max(0, Number(ms) || 0);
+    let steps = 0;
+    while (steps < 200) {
+      steps += 1;
+      let nextEntry = null;
+      for (const [id, entry] of scheduledTimers) {
+        if (
+          entry.at <= target
+          && (
+            !nextEntry
+            || entry.at < nextEntry.entry.at
+            || (entry.at === nextEntry.entry.at && id < nextEntry.id)
+          )
+        ) {
+          nextEntry = { id, entry };
+        }
+      }
+      if (!nextEntry) break;
+      scheduledTimers.delete(nextEntry.id);
+      nowMs = nextEntry.entry.at;
+      nextEntry.entry.callback();
+      await drainMicrotasks();
+    }
+    nowMs = target;
+    await drainMicrotasks();
+  };
+  activeClock = { advance };
+
   const window = {
     innerHeight: 800,
     innerWidth: 1280,
@@ -403,6 +457,13 @@ const createEnvironment = (options = {}) => {
       handlers.push(handler);
       windowListeners.set(type, handlers);
     },
+    removeEventListener(type, handler) {
+      const handlers = windowListeners.get(type);
+      if (!handlers) return;
+      windowListeners.set(type, handlers.filter((candidate) => candidate !== handler));
+    },
+    setTimeout: fakeSetTimeout,
+    clearTimeout: fakeClearTimeout,
     CustomEvent: class {
       constructor(type, init = {}) {
         this.type = type;
@@ -424,19 +485,14 @@ const createEnvironment = (options = {}) => {
     },
   };
 
-  const testSetTimeout = (callback, delay, ...args) => {
-    const timer = setTimeout(callback, delay, ...args);
-    timer.unref?.();
-    return timer;
-  };
   const sandbox = {
     document,
     window,
     MutationObserver: FakeMutationObserver,
     Event: FakeEvent,
     InputEvent: FakeEvent,
-    setTimeout: testSetTimeout,
-    clearTimeout,
+    setTimeout: fakeSetTimeout,
+    clearTimeout: fakeClearTimeout,
     HTMLElement: class HTMLElement {},
     HTMLTextAreaElement: class HTMLTextAreaElement {},
   };
@@ -488,17 +544,23 @@ const createEnvironment = (options = {}) => {
       }
       return counter.count;
     },
-    measureGeometryAfter: (run, waitMs = 140) => {
+    advance,
+    getListenerCount: (target, type) => (
+      target === "document"
+        ? (documentListeners.get(type) || []).length
+        : (windowListeners.get(type) || []).length
+    ),
+    measureGeometryAfter: async (run, waitMs = 140) => {
       const previousCounter = activeGeometryCounter;
       const counter = { count: 0 };
       activeGeometryCounter = counter;
-      run();
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          activeGeometryCounter = previousCounter;
-          resolve(counter.count);
-        }, waitMs);
-      });
+      try {
+        run();
+        await advance(waitMs);
+      } finally {
+        activeGeometryCounter = previousCounter;
+      }
+      return counter.count;
     },
     emitWindowEvent: (type) => {
       for (const handler of windowListeners.get(type) || []) {
@@ -556,7 +618,7 @@ test("retries config loading when the bridge becomes ready after injection", asy
     bridgeReady: false,
   });
   env.setBridgeReady();
-  await new Promise((resolve) => setTimeout(resolve, 180));
+  await flush(180);
 
   assert.ok(env.getElementById("codey-prompt-optimize-button"));
   assert.equal(env.snapshot().ready, true);
@@ -636,7 +698,7 @@ test("keeps raw turn changes from scanning while the mounted button has no inser
       attributeName: "hidden",
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.parentElement, env.toolbar);
   assert.equal(button.style.display, "none");
   assert.equal(env.snapshot().buttonState, "hidden");
@@ -656,7 +718,7 @@ test("keeps raw turn changes from scanning while the mounted button has no inser
       },
     ]);
   }
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await flush(20);
   assert.equal(env.getComposerQueryCount(), beforeQueries);
   assert.equal(env.getGeometryMeasureCount(), beforeMeasurements);
 
@@ -684,7 +746,7 @@ test("relocates a hidden mounted button for composer replacements and geometry c
       attributeName: "hidden",
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.style.display, "none");
   assert.equal(env.snapshot().buttonState, "hidden");
 
@@ -721,7 +783,7 @@ test("relocates a hidden mounted button for composer replacements and geometry c
       removedNodes: [env.accessButton],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.parentElement, replacementActions);
   assert.equal(button.style.display, "inline-flex");
 
@@ -733,7 +795,7 @@ test("relocates a hidden mounted button for composer replacements and geometry c
       attributeName: "hidden",
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.style.display, "none");
 
   const scrollMeasurements = await env.measureGeometryAfter(() => {
@@ -765,10 +827,10 @@ test("keeps the optimize button in the left access row when it has a single nati
   const status = new FakeElement("span");
   accessActions.appendChild(status);
   env.emitMutation([{ type: "childList", target: accessActions }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   status.remove();
   env.emitMutation([{ type: "childList", target: accessActions }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(button.parentElement, accessActions);
   assert.deepEqual(accessActions.children, [pickerWrapper, button]);
@@ -785,12 +847,12 @@ test("repositions after a picker wrapper changes into a horizontal action row", 
   assert.equal(button.parentElement, env.toolbar);
   pickerWrapper.style.display = "inline-flex";
   env.emitMutation([{ type: "attributes", target: pickerWrapper, attributeName: "style" }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.deepEqual(pickerWrapper.children, [env.accessButton, button]);
 
   pickerWrapper.style.display = "block";
   env.emitMutation([{ type: "attributes", target: pickerWrapper, attributeName: "style" }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.parentElement, env.toolbar);
   assert.equal(pickerWrapper.nextElementSibling, button);
 });
@@ -808,7 +870,7 @@ test("keeps the left position while model controls change and the access mode ch
     modelActions.appendChild(env.modelButton);
     env.toolbar.appendChild(modelActions);
     env.emitMutation([{ type: "childList", target: env.toolbar }]);
-    await new Promise((resolve) => setTimeout(resolve, 280));
+    await flush(280);
     assert.equal(button.parentElement, env.toolbar);
     assert.equal(env.accessButton.nextElementSibling, button);
   }
@@ -820,12 +882,12 @@ test("hides the button while the access picker is absent instead of moving besid
   const button = env.getElementById("codey-prompt-optimize-button");
   env.accessButton.visible = false;
   env.emitMutation([{ type: "attributes", target: env.accessButton, attributeName: "hidden" }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.style.display, "none");
 
   env.accessButton.visible = true;
   env.emitMutation([{ type: "attributes", target: env.accessButton, attributeName: "hidden" }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
   assert.equal(button.style.display, "inline-flex");
   assert.equal(env.accessButton.nextElementSibling, button);
 });
@@ -836,7 +898,7 @@ test("restores the left button when the native toolbar removes injected children
   const button = env.getElementById("codey-prompt-optimize-button");
   button.remove();
   env.emitMutation([{ type: "childList", target: env.toolbar, removedNodes: [button] }]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(env.getElementById("codey-prompt-optimize-button"), button);
   assert.equal(env.accessButton.nextElementSibling, button);
@@ -926,7 +988,7 @@ test("disconnects the document observer when prompt optimization is turned off",
     "none",
   );
   env.emitMutation();
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await flush(300);
   assert.equal(env.getComposerQueryCount(), scansAfterDisable);
 });
 
@@ -1035,7 +1097,7 @@ test("keeps the optimize button in the composer when slash commands open", async
       removedNodes: [],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(button.parentElement, env.toolbar);
   assert.equal(env.slashCommandList.contains(button), false);
@@ -1099,7 +1161,7 @@ test("removes the optimize button if rich paste moves its toolbar into the conte
       removedNodes: [],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(env.getElementById("codey-prompt-optimize-button"), null);
   assert.equal(env.newChatInput.contains(button), false);
@@ -1131,7 +1193,7 @@ test("rescans when a connected composer is replaced during navigation", async ()
       removedNodes: [],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   button.dispatchEvent({
     type: "click",
@@ -1182,7 +1244,7 @@ test("skips geometry scans for child and character changes inside the tracked in
       attributeName: "placeholder",
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(env.getComposerQueryCount(), before);
   assert.equal(button.parentElement, env.toolbar);
@@ -1214,7 +1276,7 @@ test("rescans for structural changes outside the tracked input", async () => {
       removedNodes: [],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.ok(env.getComposerQueryCount() > before);
 });
@@ -1236,7 +1298,7 @@ test("ignores unrelated DOM mutations while the composer remains connected", asy
       attributeName: "class",
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(env.getComposerQueryCount(), queryCount);
 });
@@ -1492,7 +1554,7 @@ test("restores a pending optimization to its original composer after navigation"
       removedNodes: [],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   resolveOptimization({ optimized: "旧会话优化结果" });
   await flush();
@@ -1513,7 +1575,7 @@ test("restores a pending optimization to its original composer after navigation"
       removedNodes: [],
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(env.textarea.value, "旧会话优化结果");
   assert.equal(nextInput.innerText, "新会话提示词");
@@ -1560,7 +1622,7 @@ test("restores a pending optimization when the original conversation reuses a co
       attributeName: "data-above-composer-conversation-id",
     },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 280));
+  await flush(280);
 
   assert.equal(env.textarea.value, "旧会话优化结果");
 });
@@ -1692,5 +1754,41 @@ test("ignores outer container attribute mutations and scroll events while the in
   assert.equal(scrollMeasurements, 0);
   assert.equal(env.getComposerQueryCount(), beforeQueries);
   assert.equal(env.getGeometryMeasureCount(), beforeMeasures);
+});
+
+test("binds active listeners only while enabled and fast-skips turn-internal mutations", async () => {
+  const env = createEnvironment({ enabled: false, apiKeyConfigured: true });
+  await flush();
+  for (const type of ["scroll", "resize", "hashchange", "popstate"]) {
+    assert.equal(env.getListenerCount("window", type), 0, `${type} stays unbound while disabled`);
+  }
+  assert.equal(env.getListenerCount("document", "input"), 0, "input stays unbound while disabled");
+
+  env.setConfig({ promptOptimization: { enabled: true, apiKeyConfigured: true } });
+  env.emitConfigChanged();
+  await flush();
+  for (const type of ["scroll", "resize", "hashchange", "popstate"]) {
+    assert.equal(env.getListenerCount("window", type), 1, `${type} binds when enabled`);
+  }
+  assert.equal(env.getListenerCount("document", "input"), 1);
+
+  const turn = new FakeElement("div");
+  turn.setAttribute("data-turn-key", "turn-fast-skip");
+  const chunk = new FakeElement("span");
+  turn.appendChild(chunk);
+  const queriesBefore = env.getComposerQueryCount();
+  const measuresBefore = env.getGeometryMeasureCount();
+  env.emitMutation([{ type: "childList", target: turn, addedNodes: [chunk], removedNodes: [] }]);
+  await flush(280);
+  assert.equal(env.getComposerQueryCount(), queriesBefore);
+  assert.equal(env.getGeometryMeasureCount(), measuresBefore);
+
+  env.setConfig({ promptOptimization: { enabled: false, apiKeyConfigured: true } });
+  env.emitConfigChanged();
+  await flush();
+  for (const type of ["scroll", "resize", "hashchange", "popstate"]) {
+    assert.equal(env.getListenerCount("window", type), 0, `${type} unbinds when disabled`);
+  }
+  assert.equal(env.getListenerCount("document", "input"), 0);
 });
 
