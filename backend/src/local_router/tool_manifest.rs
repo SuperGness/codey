@@ -147,7 +147,7 @@ mod tests {
         config.profiles[0].supports_remote_compaction = true;
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::new();
+        let client = test_http_client();
         let declaration = manifest("at-current");
         let state = compact("cmp-current");
         let user = json!({"role":"user", "content":"Read the current file"});
@@ -230,7 +230,7 @@ mod tests {
         *router.snapshot.write().unwrap() = Arc::new(snapshot);
         let input = json!([manifest("at-official"),compact("cmp-official"),{"role":"user","content":"Read"}]);
         let endpoint = router.endpoint();
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({"model":model_alias(&provider,&model), "input":input, "stream":false}))
@@ -356,7 +356,7 @@ mod tests {
         let raw = serde_json::to_vec(&body).unwrap();
         assert!(raw.len() > REQUEST_JSON_OFFLOAD_BYTES);
         let compressed = zstd::stream::encode_all(Cursor::new(raw), 3).unwrap();
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .header(CONTENT_TYPE, "application/json")
@@ -524,7 +524,7 @@ mod tests {
         config.profiles[0].supports_remote_compaction = true;
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::new();
+        let client = test_http_client();
         let declaration = manifest("at-retry");
         let state = compact("cmp-retry");
         let user = json!({"role":"user", "content":"Continue"});

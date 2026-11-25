@@ -103,15 +103,16 @@ fn tool_lists_mut(body: &mut Value) -> Vec<&mut Vec<Value>> {
     lists
 }
 
-fn free_alias_namespace(taken: &HashSet<String>) -> Option<String> {
-    [ALIAS_NAMESPACE, FALLBACK_ALIAS_NAMESPACE]
-        .iter()
-        .map(|candidate| candidate.to_string())
-        .chain(
-            (2..=MAX_FALLBACK_ALIAS_INDEX)
-                .map(|index| format!("{FALLBACK_ALIAS_NAMESPACE}_{index}")),
-        )
-        .find(|candidate| !taken.contains(candidate))
+fn free_alias_namespace(taken: &HashSet<&str>) -> Option<String> {
+    if !taken.contains(ALIAS_NAMESPACE) {
+        return Some(ALIAS_NAMESPACE.to_string());
+    }
+    if !taken.contains(FALLBACK_ALIAS_NAMESPACE) {
+        return Some(FALLBACK_ALIAS_NAMESPACE.to_string());
+    }
+    (2..=MAX_FALLBACK_ALIAS_INDEX)
+        .map(|index| format!("{FALLBACK_ALIAS_NAMESPACE}_{index}"))
+        .find(|candidate| !taken.contains(candidate.as_str()))
 }
 
 /// 把请求中的保留命名空间改到空闲的普通命名空间。找不到可改的对象时返回 None，
@@ -119,29 +120,28 @@ fn free_alias_namespace(taken: &HashSet<String>) -> Option<String> {
 pub(crate) fn alias_reserved_collaboration_namespace(
     body: &mut Value,
 ) -> Option<CollaborationAlias> {
-    let mut found = false;
-    let mut names = HashSet::new();
-    let mut taken = HashSet::new();
-    for tools in tool_lists(body) {
-        for tool in tools {
-            if let Some(name) = tool_display_name(tool) {
-                taken.insert(name.to_string());
-            }
-            if is_collaboration_namespace_entry(tool) {
-                found = true;
-                names.extend(namespace_children_names(tool).map(str::to_string));
-            } else if tool.get("namespace").and_then(Value::as_str) == Some(RESERVED_NAMESPACE) {
-                found = true;
+    if !body_has_reserved_collaboration_namespace(body) {
+        return None;
+    }
+    let (target, names) = {
+        let mut names = HashSet::new();
+        let mut taken = HashSet::new();
+        for tools in tool_lists(body) {
+            for tool in tools {
                 if let Some(name) = tool_display_name(tool) {
+                    taken.insert(name);
+                }
+                if is_collaboration_namespace_entry(tool) {
+                    names.extend(namespace_children_names(tool).map(str::to_string));
+                } else if tool.get("namespace").and_then(Value::as_str) == Some(RESERVED_NAMESPACE)
+                    && let Some(name) = tool_display_name(tool)
+                {
                     names.insert(name.to_string());
                 }
             }
         }
-    }
-    if !found {
-        return None;
-    }
-    let target = free_alias_namespace(&taken)?;
+        (free_alias_namespace(&taken)?, names)
+    };
     for tools in tool_lists_mut(body) {
         for tool in tools.iter_mut() {
             if is_collaboration_namespace_entry(tool) {

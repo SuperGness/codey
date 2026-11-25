@@ -104,14 +104,7 @@ impl RouterServer {
             else {
                 return Ok(());
             };
-            let route = crate::appserver_call::Route {
-                base_url: self.endpoint.base_url.clone(),
-                token: self.endpoint.token.clone(),
-                requires_openai_auth: self.endpoint.requires_openai_auth,
-                supports_websockets: self.endpoint.supports_websockets,
-                supports_remote_compaction: self.endpoint.supports_remote_compaction,
-            };
-            let (status, body) = crate::appserver_call::handle(&route, &request.body).await;
+            let (status, body) = crate::appserver_call::handle(&request.body).await;
             write_json_response(&mut stream, status, &body).await?;
             return Ok(());
         }
@@ -459,10 +452,7 @@ impl RouterServer {
             | ("POST", "/images/edits") => {
                 self.proxy_image_generation(request, stream).await?;
             }
-            ("POST", "/v1/responses/compact")
-            | ("POST", "/responses/compact")
-            | ("POST", "/v1/v1/responses/compact")
-            | ("POST", "/codex/v1/responses/compact") => {
+            ("POST", "/v1/responses/compact") | ("POST", "/responses/compact") => {
                 self.proxy_responses(request, stream, ResponsesRequestKind::Compact)
                     .await?;
             }
@@ -751,7 +741,7 @@ impl RouterServer {
         let mut headers = headers;
         // insert 保证只有一个 content-type；在 .headers() 之后用 .header() 会追加重复值。
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if let Some(probe) = &probe {
+        if let Some(probe) = probe.as_ref().filter(|probe| probe.records_diagnostics()) {
             probe.set_upstream_request_headers(&format_upstream_headers(&headers));
         }
         let upstream_client = match self.upstream_client(&route).await {
@@ -865,6 +855,11 @@ impl RouterServer {
             }
         };
         if let Some(probe) = &probe {
+            if probe.records_diagnostics() {
+                probe.set_upstream_response_headers(&format_upstream_response_headers(
+                    response.headers(),
+                ));
+            }
             probe.mark_upstream_headers(
                 response.status().as_u16(),
                 response
@@ -935,8 +930,6 @@ impl RouterServer {
                 | "/images/edits"
                 | "/v1/responses/compact"
                 | "/responses/compact"
-                | "/v1/v1/responses/compact"
-                | "/codex/v1/responses/compact"
         ) {
             return;
         }
@@ -1696,25 +1689,45 @@ impl RouterServer {
             settings_revision: snapshot.settings_revision,
             ..Default::default()
         };
-        let mut portable_attempt =
-            match PortableAttempt::acquire(self, &request, compacting, &snapshot) {
-                Ok(attempt) => attempt,
-                Err(error) => {
-                    if let Some(probe) = &decision_probe {
-                        route_decision.reason =
+        let binding_keys = request_binding_keys(&request);
+        let (portable_attempt, previous_route, primary_binding_context) = {
+            let mut bindings = self
+                .bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let attempt = PortableAttempt::acquire_locked(
+                &mut bindings,
+                &self.bindings,
+                &request,
+                compacting,
+                &snapshot,
+            );
+            let bound_route = bindings.route_for_keys(&binding_keys);
+            let primary_context = binding_keys
+                .first()
+                .and_then(|key| bindings.routes.get(key))
+                .filter(|binding| !binding.upstream_model.is_empty())
+                .map(|binding| binding.context_config);
+            (attempt, bound_route, primary_context)
+        };
+        let mut portable_attempt = match portable_attempt {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                if let Some(probe) = &decision_probe {
+                    route_decision.reason =
                         crate::route_request_log::RouteDecisionReason::PortableHandoffUnavailable;
-                        probe.record_route_decision(route_decision);
-                    }
-                    return downstream
-                        .write_error(
-                            409,
-                            "portable_compaction_unavailable",
-                            error.to_string(),
-                            None,
-                        )
-                        .await;
+                    probe.record_route_decision(route_decision);
                 }
-            };
+                return downstream
+                    .write_error(
+                        409,
+                        "portable_compaction_unavailable",
+                        error.to_string(),
+                        None,
+                    )
+                    .await;
+            }
+        };
         let model_was_defaulted = requested_model.is_empty();
         route_decision.defaulted_model = model_was_defaulted;
         let model = if model_was_defaulted {
@@ -1766,9 +1779,10 @@ impl RouterServer {
                 }
             };
         body_mutated |= model_was_defaulted;
-        let portable_target_metadata = portable_attempt
-            .as_ref()
-            .and_then(|attempt| attempt.target_metadata(&snapshot));
+        let portable_target_metadata = match portable_attempt.as_ref() {
+            Some(attempt) => attempt.target_metadata(&snapshot).await,
+            None => None,
+        };
         if let Some(attempt) = portable_attempt.as_mut() {
             let cache = self
                 .portable_history_cache
@@ -1787,41 +1801,32 @@ impl RouterServer {
             }
         }
         let subagent_request = request_is_subagent(&request);
-        let binding_keys = request_binding_keys(&request);
         // Resolve against the current binding, but do not replace it until the
         // request passes local cross-route history validation.
-        let (resolved, previous_route) = {
-            let bindings = self
-                .bindings
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let bound_route = bindings.route_for_keys(&binding_keys);
-            let resolved = if let Some(attempt) = &portable_attempt {
-                route_decision.reason = if attempt.uses_target {
-                    crate::route_request_log::RouteDecisionReason::PortableTargetHandoff
-                } else {
-                    crate::route_request_log::RouteDecisionReason::PortableSourceHandoff
-                };
-                route_decision.candidate_count = 1;
-                Ok(RouteSelection {
-                    provider_id: attempt.route().provider_id.clone(),
-                    protocol: attempt.route().protocol,
-                    requested_model: model.clone(),
-                    route: Arc::clone(attempt.route()),
-                    upstream_model: attempt.upstream_model().to_string(),
-                    fallback_reason: None,
-                })
+        let resolved = if let Some(attempt) = &portable_attempt {
+            route_decision.reason = if attempt.uses_target {
+                crate::route_request_log::RouteDecisionReason::PortableTargetHandoff
             } else {
-                snapshot.resolve_request_observed(
-                    RouteRequest {
-                        requested_model: &model,
-                        route_hint: route_hint.as_deref(),
-                        bound_route: bound_route.as_deref(),
-                    },
-                    decision_probe.as_ref().map(|_| &mut route_decision),
-                )
+                crate::route_request_log::RouteDecisionReason::PortableSourceHandoff
             };
-            (resolved, bound_route)
+            route_decision.candidate_count = 1;
+            Ok(RouteSelection {
+                provider_id: attempt.route().provider_id.clone(),
+                protocol: attempt.route().protocol,
+                requested_model: model.clone(),
+                route: Arc::clone(attempt.route()),
+                upstream_model: attempt.upstream_model().to_string(),
+                fallback_reason: None,
+            })
+        } else {
+            snapshot.resolve_request_observed(
+                RouteRequest {
+                    requested_model: &model,
+                    route_hint: route_hint.as_deref(),
+                    bound_route: previous_route.as_deref(),
+                },
+                decision_probe.as_ref().map(|_| &mut route_decision),
+            )
         };
         if let Some(probe) = decision_probe {
             probe.record_route_decision(route_decision);
@@ -1855,16 +1860,8 @@ impl RouterServer {
         let route_changed = previous_route
             .as_deref()
             .is_some_and(|provider_id| provider_id != resolved.provider_id)
-            || self
-                .bindings
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .routes
-                .get(binding_keys.first().map(String::as_str).unwrap_or_default())
-                .is_some_and(|binding| {
-                    !binding.upstream_model.is_empty()
-                        && binding.context_config != Some(resolved.route.context_config)
-                });
+            || primary_binding_context
+                .is_some_and(|context| context != Some(resolved.route.context_config));
         if model != resolved.upstream_model {
             body.as_object_mut()
                 .expect("validated Responses body must remain an object")
@@ -1888,7 +1885,10 @@ impl RouterServer {
         // 没能改名的请求里 `collaboration` 仍是保留名，其内部 schema 必须逐字保留。
         let collaboration_reserved = bridge == ProtocolBridge::NativeResponses
             && body_has_reserved_collaboration_namespace(&body);
-        if !resolved.route.official_account && normalize_responses_tool_parameter_roots(&mut body) {
+        if bridge == ProtocolBridge::NativeResponses
+            && !resolved.route.official_account
+            && normalize_responses_tool_parameter_roots(&mut body)
+        {
             body_mutated = true;
             encoded_body = None;
         }
@@ -1962,22 +1962,22 @@ impl RouterServer {
             }
         }
         if compacting && !native_compaction {
-            let metadata =
-                crate::model_catalog::runtime_context_metadata(crate::codex_config::codex_home());
-            let model_metadata = portable_target_metadata
-                .as_ref()
-                .filter(|_| {
-                    portable_attempt
-                        .as_ref()
-                        .is_some_and(|attempt| attempt.uses_target)
-                })
-                .or_else(|| {
-                    gateway_compaction_model_metadata(
-                        &metadata,
-                        &resolved.provider_id,
-                        &resolved.upstream_model,
-                    )
-                });
+            let preferred_target = portable_target_metadata.as_ref().filter(|_| {
+                portable_attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.uses_target)
+            });
+            let loaded_metadata;
+            let model_metadata = if let Some(target_metadata) = preferred_target {
+                Some(target_metadata)
+            } else {
+                loaded_metadata = load_runtime_context_metadata().await;
+                gateway_compaction_model_metadata(
+                    &loaded_metadata,
+                    &resolved.provider_id,
+                    &resolved.upstream_model,
+                )
+            };
             if let Err(error) = gateway_compaction_output_budget(&body, model_metadata)
                 .and_then(|budget| prepare_gateway_compaction(&mut body, budget))
             {
@@ -2006,27 +2006,31 @@ impl RouterServer {
                 .await;
         }
         downstream.select_route(&resolved.route);
-        if bridge != ProtocolBridge::NativeResponses
-            && let Err(error) = downstream.prepare_adapted_response_context(&mut body)
-        {
-            if error.is::<MissingResponseHistory>() {
-                return write_missing_response_history(
-                    downstream,
-                    &error,
-                    &resolved.route,
-                    "restore_adapted_response_history",
-                )
-                .await;
+        let mut history_expanded = false;
+        if bridge != ProtocolBridge::NativeResponses {
+            match downstream.prepare_adapted_response_context(&mut body) {
+                Ok(expanded) => history_expanded = expanded,
+                Err(error) => {
+                    if error.is::<MissingResponseHistory>() {
+                        return write_missing_response_history(
+                            downstream,
+                            &error,
+                            &resolved.route,
+                            "restore_adapted_response_history",
+                        )
+                        .await;
+                    }
+                    downstream
+                        .write_error(
+                            413,
+                            "context_budget_exceeded",
+                            error.to_string(),
+                            Some(&resolved.route),
+                        )
+                        .await?;
+                    return Ok(());
+                }
             }
-            downstream
-                .write_error(
-                    413,
-                    "context_budget_exceeded",
-                    error.to_string(),
-                    Some(&resolved.route),
-                )
-                .await?;
-            return Ok(());
         }
         let restoring_adapted_history = bridge == ProtocolBridge::NativeResponses
             && has_codey_synthetic_previous_response_id(&body);
@@ -2053,6 +2057,7 @@ impl RouterServer {
                         .await;
                 }
             }
+            history_expanded = true;
             body_mutated = true;
             // Expansion changed the input too; do not reuse its original raw
             // JSON slice, which would contain only the latest delta.
@@ -2065,22 +2070,27 @@ impl RouterServer {
             {
                 encoded_body = None;
             }
-        }
-        match restore_codey_compaction_summaries(&mut body) {
-            Ok(true) => {
-                body_mutated = true;
-                encoded_body = None;
+            if !resolved.route.official_account {
+                normalize_responses_tool_parameter_roots(&mut body);
             }
-            Ok(false) => {}
-            Err(error) => {
-                return downstream
-                    .write_error(
-                        400,
-                        "context_not_portable",
-                        error.to_string(),
-                        Some(&resolved.route),
-                    )
-                    .await;
+        }
+        if history_expanded {
+            match restore_codey_compaction_summaries(&mut body) {
+                Ok(true) => {
+                    body_mutated = true;
+                    encoded_body = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return downstream
+                        .write_error(
+                            400,
+                            "context_not_portable",
+                            error.to_string(),
+                            Some(&resolved.route),
+                        )
+                        .await;
+                }
             }
         }
         if bridge == ProtocolBridge::NativeResponses
@@ -2101,22 +2111,13 @@ impl RouterServer {
         let history_portable = portable_compaction::resolved_history_portability(&body);
         let discard_opaque_reasoning = route_changed || restoring_adapted_history;
         if bridge == ProtocolBridge::NativeResponses {
-            if normalize_native_responses_context(&mut body, discard_opaque_reasoning) {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if !compacting
-                && !resolved.route.official_account
-                && rehydrate_native_tool_manifest(&mut body)
-            {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if !resolved.route.official_account && replay_third_party_agent_messages(&mut body) {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if resolved.route.official_account && sanitize_official_upstream_history(&mut body) {
+            if prepare_native_responses_body(
+                &mut body,
+                resolved.route.official_account,
+                compacting,
+                discard_opaque_reasoning,
+                None,
+            ) {
                 body_mutated = true;
                 encoded_body = None;
             }
@@ -2177,13 +2178,10 @@ impl RouterServer {
                 return Ok(());
             }
         };
-        let replay_reasoning_summary = should_replay_reasoning_text(
-            resolved.route.official_account,
-            bridge,
-            request_kind,
-            compacting,
-            upstream_url,
-        );
+        let replay_reasoning_summary =
+            resolved
+                .route
+                .should_replay_reasoning_text(bridge, request_kind, compacting);
         // Chat 转换只保留 reasoning_text，summary 会在转换时消失。DeepSeek
         // 要在首次发送时带上摘要，所以先写回明文。这里不丢弃 encoded_body：
         // 非原生线路只拿它判断是否把转换放到阻塞线程，正文以转换结果为准。
@@ -2340,13 +2338,14 @@ impl RouterServer {
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
         {
+            let mut native_history_restored = false;
             // Lifecycle plugins need response headers, so they skip this
             // attempt. Continuation history is staged on the HTTP fallback.
             // Grok 回包要改工具名和整数参数，不能走原样透传的上游 WebSocket。
             // 历史仍由下面的 HTTP 回退展开。
             if !compacting
                 && !lifecycle.is_active()
-                && !native_upstream_needs_xai_compat(upstream_url, &resolved.upstream_model)
+                && !resolved.route.needs_xai_compat(&resolved.upstream_model)
             {
                 let had_previous_response =
                     responses_previous_response_id(&upstream_body).is_some();
@@ -2362,16 +2361,20 @@ impl RouterServer {
                     UpstreamWebSocketAttempt::Completed => return Ok(()),
                     UpstreamWebSocketAttempt::UseHttp(reason) => reason,
                 };
+                let expanded_during_ws = had_previous_response
+                    && responses_previous_response_id(&upstream_body).is_none();
                 if matches!(
                     fallback_reason,
                     "websocket_persisted_context_rejected"
                         | "websocket_encrypted_reasoning_rejected"
-                ) || (had_previous_response
-                        && responses_previous_response_id(&upstream_body).is_none())
+                ) || expanded_during_ws
                 {
                     // 重连可能已展开历史；同轮恢复也必须按恢复后的 HTTP 正文重新编码。
                     body_mutated = true;
                     encoded_body = None;
+                }
+                if expanded_during_ws {
+                    native_history_restored = true;
                 }
                 if resolved.route.supports_websockets
                     && let Some(probe) = downstream.request_log_probe()
@@ -2385,6 +2388,7 @@ impl RouterServer {
                 &mut upstream_body,
             ) {
                 Ok(true) => {
+                    native_history_restored = true;
                     body_mutated = true;
                     encoded_body = None;
                 }
@@ -2448,52 +2452,52 @@ impl RouterServer {
                 }
                 None => {}
             }
-            // A failed/reconnected WebSocket can restore full history after the
-            // first normalization pass. Validate and normalize the exact body
-            // that will be sent through the HTTP fallback as well.
-            match restore_codey_compaction_summaries(&mut upstream_body) {
-                Ok(true) => { body_mutated = true; encoded_body = None; }
-                Ok(false) => {}
-                Err(error) => return downstream.write_error(400, "context_not_portable", error.to_string(), Some(&resolved.route)).await,
-            }
-            if route_changed && let Err(error) = validate_cross_route_context(&upstream_body) {
-                return downstream
-                    .write_error(
-                        400,
-                        "context_not_portable",
-                        error.to_string(),
-                        Some(&resolved.route),
-                    )
-                    .await;
-            }
-            if normalize_native_responses_context(&mut upstream_body, discard_opaque_reasoning) {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if !compacting
-                && !resolved.route.official_account
-                && rehydrate_native_tool_manifest(&mut upstream_body)
-            {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if !resolved.route.official_account
-                && replay_third_party_agent_messages(&mut upstream_body)
-            {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if resolved.route.official_account && sanitize_official_upstream_history(&mut upstream_body) {
-                body_mutated = true;
-                encoded_body = None;
-            }
-            // 恢复的历史沿用 Codex 侧的 `collaboration` 调用，与改名后的工具保持一致。
-            if collaboration_alias
-                .as_ref()
-                .is_some_and(|alias| alias.alias_history(&mut upstream_body))
-            {
-                body_mutated = true;
-                encoded_body = None;
+            // Only re-validate and re-normalize when WS reconnection or HTTP
+            // fallback actually expanded history onto `upstream_body`.
+            if native_history_restored {
+                match restore_codey_compaction_summaries(&mut upstream_body) {
+                    Ok(true) => {
+                        body_mutated = true;
+                        encoded_body = None;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        return downstream
+                            .write_error(
+                                400,
+                                "context_not_portable",
+                                error.to_string(),
+                                Some(&resolved.route),
+                            )
+                            .await;
+                    }
+                }
+                if route_changed && let Err(error) = validate_cross_route_context(&upstream_body) {
+                    return downstream
+                        .write_error(
+                            400,
+                            "context_not_portable",
+                            error.to_string(),
+                            Some(&resolved.route),
+                        )
+                        .await;
+                }
+                if !resolved.route.official_account
+                    && normalize_responses_tool_parameter_roots(&mut upstream_body)
+                {
+                    body_mutated = true;
+                    encoded_body = None;
+                }
+                if prepare_native_responses_body(
+                    &mut upstream_body,
+                    resolved.route.official_account,
+                    compacting,
+                    discard_opaque_reasoning,
+                    collaboration_alias.as_ref(),
+                ) {
+                    body_mutated = true;
+                    encoded_body = None;
+                }
             }
         }
         // 原生请求可能刚被 WebSocket 回退展开，摘要要在这份最终正文上还原。
@@ -2529,7 +2533,7 @@ impl RouterServer {
         let xai_response_fix = if !compacting
             && bridge == ProtocolBridge::NativeResponses
             && !resolved.route.official_account
-            && native_upstream_needs_xai_compat(upstream_url, &resolved.upstream_model)
+            && resolved.route.needs_xai_compat(&resolved.upstream_model)
         {
             match prepare_xai_native_request(&mut upstream_body) {
                 Ok(prepared) => {
@@ -2661,44 +2665,37 @@ impl RouterServer {
     }
 }
 
+fn format_header_map(
+    headers: &reqwest::header::HeaderMap,
+    redact_response_cookies: bool,
+) -> String {
+    let mut output = String::new();
+    for (index, (name, value)) in headers.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        let sensitive = value.is_sensitive()
+            || is_sensitive_upstream_header(name.as_str())
+            || (redact_response_cookies && is_sensitive_upstream_response_header(name.as_str()));
+        output.push_str(name.as_str());
+        output.push_str(": ");
+        output.push_str(if sensitive {
+            "[REDACTED]"
+        } else {
+            value.to_str().unwrap_or("<binary>")
+        });
+    }
+    output
+}
+
 pub(crate) fn format_upstream_headers(headers: &reqwest::header::HeaderMap) -> String {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            let sensitive = value.is_sensitive() || is_sensitive_upstream_header(name.as_str());
-            format!(
-                "{name}: {}",
-                if sensitive {
-                    "[REDACTED]"
-                } else {
-                    value.to_str().unwrap_or("<binary>")
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    format_header_map(headers, false)
 }
 
 /// 上游响应头的日志文本。沿用请求头的脱敏规则，并额外隐藏响应侧的
 /// 会话 Cookie。
 pub(crate) fn format_upstream_response_headers(headers: &reqwest::header::HeaderMap) -> String {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            let sensitive = value.is_sensitive()
-                || is_sensitive_upstream_header(name.as_str())
-                || is_sensitive_upstream_response_header(name.as_str());
-            format!(
-                "{name}: {}",
-                if sensitive {
-                    "[REDACTED]"
-                } else {
-                    value.to_str().unwrap_or("<binary>")
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    format_header_map(headers, true)
 }
 
 fn is_sensitive_upstream_response_header(name: &str) -> bool {

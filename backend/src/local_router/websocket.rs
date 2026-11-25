@@ -717,38 +717,41 @@ impl WebSocketResponsesDownstream {
                 "websocket_history_requires_http",
             ));
         }
+        let mut restored_history = false;
         if !cached_matches {
             // A response ID belongs to its original upstream socket. Reconnect
             // with full history only before sending this new request.
-            if previous_response_key.is_some()
-                && self.native_history.restore(history_key, body).is_err()
-            {
-                return Ok(UpstreamWebSocketAttempt::UseHttp(
-                    "websocket_history_unavailable",
-                ));
+            if previous_response_key.is_some() {
+                match self.native_history.restore(history_key, body) {
+                    Ok(restored) => restored_history = restored,
+                    Err(_) => {
+                        return Ok(UpstreamWebSocketAttempt::UseHttp(
+                            "websocket_history_unavailable",
+                        ));
+                    }
+                }
             }
             self.upstream.take();
         }
-        normalize_native_responses_context(body, discard_opaque_reasoning);
-        if !route.official_account {
-            replay_third_party_agent_messages(body);
-        }
-        if route.official_account {
-            sanitize_official_upstream_history(body);
-        }
         let collaboration_alias = current_collaboration_alias();
-        if let Some(alias) = &collaboration_alias {
-            alias.alias_history(body);
-        }
-        if route.upstream_url.as_ref().is_ok_and(|url| {
-            should_replay_reasoning_text(
+        if restored_history {
+            let _ = restore_codey_compaction_summaries(body);
+            if !route.official_account {
+                normalize_responses_tool_parameter_roots(body);
+            }
+            prepare_native_responses_body(
+                body,
                 route.official_account,
-                ProtocolBridge::NativeResponses,
-                ResponsesRequestKind::Create,
-                is_compaction_request(body, ResponsesRequestKind::Create),
-                url,
-            )
-        }) {
+                false,
+                discard_opaque_reasoning,
+                collaboration_alias.as_ref(),
+            );
+        }
+        if route.should_replay_reasoning_text(
+            ProtocolBridge::NativeResponses,
+            ResponsesRequestKind::Create,
+            is_compaction_request(body, ResponsesRequestKind::Create),
+        ) {
             restore_reasoning_text_from_summary(body);
         }
         let mut upstream = if let Some(cached) = self.upstream.take() {
@@ -1049,6 +1052,52 @@ impl WebSocketResponsesDownstream {
                         .liveness
                         .record_activity(tokio::time::Instant::now().into_std());
                     read_idle_deadline = tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
+                    if let Ok(fast) = serde_json::from_str::<WsDeltaFastFrame<'_>>(text.as_str())
+                        && let Some(event_type) = fast.event_type.as_deref()
+                        && is_ws_passthrough_delta_event(event_type)
+                        && fast.response.is_none()
+                        && fast.error.is_none()
+                        && fast.usage.is_none()
+                        && fast.service_tier.is_none()
+                        && fast.model.is_none()
+                        && fast.message.is_none()
+                        && fast.item.is_none()
+                        && !(self.steering.controls_sent && fast.sequence_number.is_some())
+                        && (collaboration_alias.is_none()
+                            || memchr::memmem::find(text.as_bytes(), b"\"function_call\"")
+                                .is_none())
+                    {
+                        can_recover_persisted_context = false;
+                        can_retry_rejected_reasoning = false;
+                        if let Some(probe) = probe
+                            && probe.tracks_live_output()
+                        {
+                            let delta_text: Option<Cow<'_, str>> = fast
+                                .delta
+                                .and_then(|raw| serde_json::from_str(raw.get()).ok());
+                            probe.observe_delta_event(event_type, delta_text.as_deref());
+                        }
+                        if let Some(sequence) = fast.sequence_number {
+                            self.steering.observe_sequence(sequence);
+                        }
+                        let has_user_content = responses_event_type_has_user_content(event_type)
+                            && fast.delta.is_some_and(raw_delta_has_content);
+                        let inject_stream_id = self
+                            .stream_id
+                            .as_deref()
+                            .filter(|_| fast.stream_id.is_none());
+                        if let Some(stream_id) = inject_stream_id {
+                            let encoded =
+                                append_stream_id_to_json_object(text.as_str(), stream_id)?;
+                            self.write_text(encoded).await?;
+                        } else {
+                            self.write_text(text).await?;
+                        }
+                        if has_user_content && let Some(probe) = probe {
+                            probe.mark_first_downstream_content();
+                        }
+                        continue;
+                    }
                     let (single_event, events, raw_json_text) =
                         match serde_json::from_str::<Value>(text.as_str()) {
                             Ok(event) => (Some(event), Vec::new(), Some(text)),
@@ -1331,6 +1380,70 @@ pub(crate) fn encode_responses_websocket_event(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct WsDeltaFastFrame<'a> {
+    #[serde(rename = "type", borrow)]
+    event_type: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    delta: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    stream_id: Option<&'a serde_json::value::RawValue>,
+    sequence_number: Option<u64>,
+    #[serde(borrow)]
+    response: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    error: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    usage: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    service_tier: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    model: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    message: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    item: Option<&'a serde_json::value::RawValue>,
+}
+
+fn is_ws_passthrough_delta_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+    )
+}
+
+fn raw_delta_has_content(raw: &serde_json::value::RawValue) -> bool {
+    let bytes = raw.get().trim().as_bytes();
+    match bytes.first().copied() {
+        None | Some(b'n') => false,
+        Some(b'"') => bytes.len() > 2,
+        Some(b'[' | b'{') => bytes
+            .get(1..bytes.len().saturating_sub(1))
+            .is_some_and(|inner| !inner.iter().all(u8::is_ascii_whitespace)),
+        Some(_) => true,
+    }
+}
+
+fn append_stream_id_to_json_object(text: &str, stream_id: &str) -> Result<String> {
+    let trimmed = text.trim_end();
+    let prefix = trimmed
+        .strip_suffix('}')
+        .context("Responses WebSocket 事件必须是 JSON 对象")?;
+    let encoded_id =
+        serde_json::to_string(stream_id).context("序列化 Responses WebSocket stream_id 失败")?;
+    let mut output = String::with_capacity(prefix.len() + encoded_id.len() + 14);
+    output.push_str(prefix);
+    output.push_str(",\"stream_id\":");
+    output.push_str(&encoded_id);
+    output.push('}');
+    Ok(output)
+}
+
 #[derive(serde::Serialize)]
 struct EventWithInsertedStreamId<'a> {
     #[serde(flatten)]
@@ -1521,7 +1634,7 @@ pub(crate) async fn connect_upstream_responses_websocket(
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let request = upstream_websocket_request(url, headers)?;
-    if let Some(probe) = probe {
+    if let Some(probe) = probe.filter(|probe| probe.records_diagnostics()) {
         probe.set_upstream_request_headers(&super::responses::format_upstream_headers(
             request.headers(),
         ));
@@ -1554,7 +1667,7 @@ pub(crate) async fn connect_upstream_responses_websocket(
         let _ = stream.set_nodelay(true);
         enable_downstream_keepalive(stream);
     }
-    if let Some(probe) = probe {
+    if let Some(probe) = probe.filter(|probe| probe.records_diagnostics()) {
         probe.set_upstream_response_headers(&super::responses::format_upstream_response_headers(
             response.headers(),
         ));
@@ -1768,6 +1881,51 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
         Ok(())
     }
 
+    async fn write_borrowed_delta(
+        &mut self,
+        event_type: &'static str,
+        response_id: &str,
+        item_id: &str,
+        output_index: usize,
+        content_index: Option<usize>,
+        delta: &str,
+    ) -> Result<()> {
+        begin_compaction_delivery();
+        // Adapted-protocol synthetic deltas never carry a sequence_number, terminal status, or
+        // native history output item; when steering controls are active, route through write_event
+        // so sequence_response_event still assigns sequence numbers if needed.
+        if self.steering.controls_sent {
+            let event = match content_index {
+                Some(content_index) => json!({
+                    "type": event_type,
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": content_index,
+                    "delta": delta,
+                }),
+                None => json!({
+                    "type": event_type,
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "delta": delta,
+                }),
+            };
+            return self.write_event(&event).await;
+        }
+        let encoded = encode_responses_websocket_delta_event(
+            event_type,
+            response_id,
+            item_id,
+            output_index,
+            content_index,
+            delta,
+            self.stream_id.as_deref(),
+        )?;
+        self.write_text(encoded).await
+    }
+
     async fn finish_event_stream(&mut self) -> Result<()> {
         Ok(())
     }
@@ -1823,7 +1981,6 @@ pub(crate) async fn proxy_native_response_to_websocket(
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
     let status = response.status().as_u16();
-    let retry_advice = ResponseRetryAdvice::from_headers(response.headers());
     let upstream_request_id = upstream_request_id_from_headers(response.headers());
     let content_type = response
         .headers()
@@ -1836,6 +1993,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
         prepare_upstream_response(response, "读取 Responses HTTP 上游响应失败", probe),
     )
     .await??;
+    let retry_advice = prepared.retry_advice.take();
     if prepared.is_sse {
         downstream.start_event_stream().await?;
         let mut buffer = Vec::new();

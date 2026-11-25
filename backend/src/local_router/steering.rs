@@ -11,10 +11,16 @@ struct PendingSteer {
     _permit: Option<OwnedSemaphorePermit>,
 }
 
+#[derive(Default)]
+struct CachedSteeringSettings {
+    entries: BTreeMap<String, (Arc<Value>, usize)>,
+    total_bytes: usize,
+}
+
 /// 补充输入只属于当前连接、当前响应，等待当前响应及客户端工具完成后续接。
 #[derive(Default)]
 pub(crate) struct SteeringState {
-    settings: Option<Value>,
+    settings: Option<CachedSteeringSettings>,
     settings_permit: Option<OwnedSemaphorePermit>,
     response_id: Option<String>,
     completed: Option<bool>,
@@ -150,8 +156,8 @@ impl SteeringState {
                 events = self.fail_pending("response_not_found", "目标响应已切换，补充消息未应用");
             }
         }
-        self.settings = None;
-        self.settings_permit = None;
+        let prev_settings = self.settings.take();
+        let prev_permit = self.settings_permit.take();
         self.response_id = None;
         self.completed = None;
         self.required.clear();
@@ -161,23 +167,86 @@ impl SteeringState {
             .get("stream_id")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        // 先计算借用字段的大小并申请预算，避免复制整段会话历史或序列化后二次反序列化。
+        // 复用未变更的 tools/instructions 等大字段 Arc 与已计字节数，
+        // 避免每轮重复深拷贝与整对象序列化。
         if let Some(object) = body.as_object() {
-            let settings: std::collections::BTreeMap<_, _> = object
-                .iter()
-                .filter(|(key, _)| {
+            let setting_count = object
+                .keys()
+                .filter(|key| !matches!(key.as_str(), "input" | "previous_response_id" | "type"))
+                .count();
+            let unchanged = prev_settings.as_ref().is_some_and(|prev| {
+                prev.entries.len() == setting_count
+                    && object
+                        .iter()
+                        .filter(|(key, _)| {
+                            !matches!(key.as_str(), "input" | "previous_response_id" | "type")
+                        })
+                        .all(|(key, value)| {
+                            prev.entries
+                                .get(key)
+                                .is_some_and(|(cached, _)| cached.as_ref() == value)
+                        })
+            });
+            if unchanged {
+                self.settings = prev_settings;
+                self.settings_permit = prev_permit;
+            } else {
+                let mut entries = BTreeMap::new();
+                let mut content_bytes = 0_usize;
+                let mut within_limit = true;
+                for (key, value) in object.iter().filter(|(key, _)| {
                     !matches!(key.as_str(), "input" | "previous_response_id" | "type")
-                })
-                .collect();
-            if let Ok(bytes) = bounded_json_bytes(&settings, MAX_SETTINGS_BYTES)
-                && let Ok(permit) = acquire_request_body_budget(budget, bytes)
-            {
-                let copied = settings
-                    .into_iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
-                self.settings = Some(Value::Object(copied));
-                self.settings_permit = permit;
+                }) {
+                    if let Some((cached, entry_bytes)) = prev_settings
+                        .as_ref()
+                        .and_then(|prev| prev.entries.get(key))
+                        .filter(|(cached, _)| cached.as_ref() == value)
+                    {
+                        content_bytes = content_bytes.saturating_add(*entry_bytes);
+                        entries.insert(key.clone(), (Arc::clone(cached), *entry_bytes));
+                    } else {
+                        let remaining =
+                            MAX_SETTINGS_BYTES.saturating_sub(2 + content_bytes + entries.len());
+                        let Ok(key_bytes) = bounded_json_bytes(key, remaining) else {
+                            within_limit = false;
+                            break;
+                        };
+                        let value_limit = remaining.saturating_sub(key_bytes.saturating_add(1));
+                        let Ok(value_bytes) = bounded_json_bytes(value, value_limit) else {
+                            within_limit = false;
+                            break;
+                        };
+                        let entry_bytes = key_bytes.saturating_add(1).saturating_add(value_bytes);
+                        content_bytes = content_bytes.saturating_add(entry_bytes);
+                        entries.insert(key.clone(), (Arc::new(value.clone()), entry_bytes));
+                    }
+                    let total = 2 + content_bytes + entries.len().saturating_sub(1);
+                    if total > MAX_SETTINGS_BYTES {
+                        within_limit = false;
+                        break;
+                    }
+                }
+                let total_bytes = 2 + content_bytes + entries.len().saturating_sub(1);
+                if within_limit {
+                    let prev_bytes = prev_settings.as_ref().map(|prev| prev.total_bytes);
+                    drop(prev_settings);
+                    if prev_bytes == Some(total_bytes) {
+                        self.settings = Some(CachedSteeringSettings {
+                            entries,
+                            total_bytes,
+                        });
+                        self.settings_permit = prev_permit;
+                    } else {
+                        drop(prev_permit);
+                        if let Ok(permit) = acquire_request_body_budget(budget, total_bytes) {
+                            self.settings = Some(CachedSteeringSettings {
+                                entries,
+                                total_bytes,
+                            });
+                            self.settings_permit = permit;
+                        }
+                    }
+                }
             }
         }
         Ok(events)
@@ -243,6 +312,10 @@ impl SteeringState {
         });
         self.pending_bytes += bytes;
         self.event("response.steer.accepted", acknowledgement)
+    }
+
+    pub(crate) fn observe_sequence(&mut self, sequence: u64) {
+        self.sequence = self.sequence.max(sequence);
     }
 
     pub(crate) fn observe(&mut self, event: &Value) {
@@ -364,7 +437,12 @@ impl SteeringState {
         {
             return None;
         }
-        let mut body = self.settings.as_ref()?.clone();
+        let settings = self.settings.as_ref()?;
+        let mut object = serde_json::Map::with_capacity(settings.entries.len() + 3);
+        for (key, (value, _)) in &settings.entries {
+            object.insert(key.clone(), (**value).clone());
+        }
+        let mut body = Value::Object(object);
         body["type"] = "response.create".into();
         body["previous_response_id"] = self.response_id.clone()?.into();
         body["input"] = json!([]);

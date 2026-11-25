@@ -61,7 +61,7 @@ async fn streaming_http_and_websocket_share_retry_classification_across_turns() 
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
         let model = model_alias(&provider, &model);
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = test_http_client_builder().no_proxy().build().unwrap();
         let mut websocket = connect_router_websocket(&endpoint).await;
         for _ in 0..2 {
             let response = client
@@ -121,7 +121,7 @@ async fn non_stream_responses_and_compaction_keep_http_errors_and_retry_after() 
     config.profiles[0].supports_remote_compaction = true;
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = test_http_client_builder().no_proxy().build().unwrap();
     for (path, stream, input) in [
         ("responses", false, json!("hello")),
         ("responses/compact", false, json!("hello")),
@@ -169,7 +169,7 @@ async fn native_chat_and_anthropic_stream_failures_keep_provider_classification(
             config.profiles[0].normalize();
             let router = LocalRouter::start(&config).await.unwrap();
             let endpoint = router.endpoint();
-            let response = reqwest::Client::builder()
+            let response = test_http_client_builder()
                 .no_proxy()
                 .build()
                 .unwrap()

@@ -209,7 +209,7 @@ async fn upstream_body_idle_timeout_is_bounded() {
         socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
         let _ = wait.await;
     });
-    let mut response = reqwest::Client::builder()
+    let mut response = test_http_client_builder()
         .no_proxy()
         .build()
         .unwrap()
@@ -3788,7 +3788,7 @@ async fn zstd_compressed_responses_request_is_decoded_and_forwarded_as_json() {
     .unwrap();
     let compressed = zstd::stream::encode_all(Cursor::new(request_body), 3).unwrap();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header(CONTENT_TYPE, "application/json")
@@ -3863,7 +3863,7 @@ async fn native_route_retries_once_with_a_reasoning_text_placeholder() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -3952,7 +3952,7 @@ async fn reasoning_content_missing_replays_a_placeholder_for_the_previous_turn()
     let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -4042,7 +4042,7 @@ async fn chat_route_retries_reasoning_content_missing_with_a_placeholder() {
     config.profiles[0].normalize();
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -4131,7 +4131,7 @@ async fn chat_route_retries_reasoning_content_missing_with_the_saved_summary() {
     config.profiles[0].normalize();
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -4206,7 +4206,7 @@ async fn deepseek_chat_route_sends_the_reasoning_summary_on_the_first_attempt() 
     config.profiles[0].normalize();
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -4980,8 +4980,7 @@ fn codex_login_route_outranks_stored_accounts_for_default_quota() {
         accepts_incoming_authorization: false,
     };
     assert!(default_route_rank(Some(&login)) < default_route_rank(Some(&idle)));
-    // 升级前没有账号记录时，官方线路直接复用 Codex 登录。
-    assert_eq!(default_route_rank(None), default_route_rank(Some(&login)));
+    assert!(default_route_rank(Some(&login)) < default_route_rank(None));
 }
 
 #[test]
@@ -6161,7 +6160,7 @@ async fn route_metadata_conflicts_still_reject_raw_historical_and_default_models
         .insert("retired-route/provider-model".into(), model.clone());
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
@@ -6247,7 +6246,7 @@ async fn explicit_route_switch_ignores_replayed_metadata_for_http_and_websocket(
         } else {
             None
         };
-        let client = reqwest::Client::builder()
+        let client = test_http_client_builder()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
@@ -7650,8 +7649,7 @@ fn namespace_tools_expand_to_stable_unique_function_names_and_choices() {
             "type":"function",
             "namespace":"mcp__codey_fastctx.files",
             "name":"inspect_local_file_with_an_extremely_long_leaf_name"
-        },
-        "function_call":{"namespace":"mcp__codey_fastctx","name":"grep"}
+        }
     });
 
     let converted = responses_to_chat_completions_request(&body).unwrap();
@@ -7676,7 +7674,6 @@ fn namespace_tools_expand_to_stable_unique_function_names_and_choices() {
         converted.body["tool_choice"]["function"]["name"],
         inspect_name
     );
-    assert_eq!(converted.body["function_call"]["name"], grep_name);
 }
 
 #[test]
@@ -7738,8 +7735,7 @@ fn namespace_additional_tools_rewrite_historical_function_calls() {
                 "type":"function",
                 "namespace":"fs",
                 "function":{"name":"read_file","arguments":"{}"}
-            }]},
-            {"type":"message","role":"assistant","function_call":{"namespace":["fs"],"name":"read_file"}}
+            }]}
         ]
     }))
     .unwrap();
@@ -7753,10 +7749,6 @@ fn namespace_additional_tools_rewrite_historical_function_calls() {
     );
     assert_eq!(
         converted.body["messages"][2]["tool_calls"][0]["function"]["name"],
-        upstream_name
-    );
-    assert_eq!(
-        converted.body["messages"][3]["function_call"]["name"],
         upstream_name
     );
 }
@@ -9390,7 +9382,14 @@ async fn streaming_finish_preserves_buffered_function_call_and_continuation_hist
             assert_eq!(items[0]["item"]["call_id"], call["call_id"]);
         }
         assert_eq!(
-            downstream.adapted_history.last.as_ref().unwrap().1.last(),
+            downstream
+                .adapted_history
+                .last
+                .as_ref()
+                .unwrap()
+                .1
+                .last()
+                .map(Arc::as_ref),
             Some(call)
         );
 
@@ -9774,7 +9773,7 @@ async fn omitted_high_effort_output_limit_reaches_every_upstream_protocol() {
         if let Some(limit) = explicit_limit {
             request["max_output_tokens"] = json!(limit);
         }
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&request)
@@ -10057,7 +10056,7 @@ async fn upstream_image_input_failure_messages_cover_http_stream_and_websocket()
     let (config, provider_id, model) = router_config(format!("http://{address}/v1"));
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::builder()
+    let response = test_http_client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
@@ -10191,7 +10190,7 @@ async fn native_responses_alias_reserved_collaboration_tools_for_plaintext_deliv
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -10280,7 +10279,7 @@ async fn native_responses_stream_error_preserves_status_and_safe_details() {
     .unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -10373,7 +10372,7 @@ async fn responses_compact_restores_route_identity_and_proxies_the_window_unchan
     let endpoint = router.endpoint();
     assert!(endpoint.supports_remote_compaction);
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses/compact", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header(CHATGPT_ACCOUNT_ID_HEADER, "acct-must-not-leak")
@@ -10441,7 +10440,7 @@ async fn responses_v2_compaction_trigger_passes_through_the_native_route() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -10486,7 +10485,7 @@ async fn adapted_agent_payloads_are_rejected_before_sending() {
         config.profiles[0].normalize();
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({
@@ -10530,7 +10529,7 @@ async fn responses_rejects_opaque_compaction_on_adapted_routes_before_sending() 
             json!([{"role":"user","content":"continue"},{"type":"compaction","encrypted_content":"opaque"}]),
             "context_not_portable",
         )] {
-            let response = reqwest::Client::new()
+            let response = test_http_client()
                 .post(format!("{}/{path}", endpoint.base_url))
                 .bearer_auth(&endpoint.token)
                 .json(&json!({"model":model_alias(&provider_id, &model),"input":input}))
@@ -10577,7 +10576,7 @@ async fn context_limit_http_errors_are_structured_on_every_protocol() {
         });
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
@@ -10614,7 +10613,7 @@ async fn compaction_timeout_releases_session_and_model_switch_keeps_request_snap
     let url = format!("{}/responses/compact", endpoint.base_url);
     let token = endpoint.token.clone();
     let request_body = json!({"model":model_alias(&provider_id, &model),"input":"full context"});
-    let request = reqwest::Client::new()
+    let request = test_http_client()
         .post(&url)
         .bearer_auth(&token)
         .header("thread-id", "compaction-test")
@@ -10629,7 +10628,7 @@ async fn compaction_timeout_releases_session_and_model_switch_keeps_request_snap
     // configured route changes. The first request keeps its captured route.
     config.profiles[0].base_url = "http://127.0.0.1:9/v1/responses".into();
     router.update_config(&config);
-    let duplicate = reqwest::Client::new()
+    let duplicate = test_http_client()
         .post(&url)
         .bearer_auth(&token)
         .header("thread-id", "compaction-test")
@@ -10656,7 +10655,7 @@ async fn compaction_timeout_releases_session_and_model_switch_keeps_request_snap
         timeout.json::<Value>().await.unwrap()["error"]["code"],
         "compaction_timeout"
     );
-    let retry = reqwest::Client::new()
+    let retry = test_http_client()
         .post(&url)
         .bearer_auth(&token)
         .header("thread-id", "compaction-test")
@@ -10736,7 +10735,7 @@ async fn model_switch_sized_upload_does_not_spend_the_header_timeout() {
     // 阻塞发送。使用更大的正文，让连接在上游恢复读取前仍有数据等待写出。
     let padding = "x".repeat(16 * 1024 * 1024);
     let mut pending = tokio::spawn(async move {
-        reqwest::Client::new()
+        test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(endpoint.token)
             .json(&json!({
@@ -10801,7 +10800,7 @@ async fn streaming_header_timeout_still_bounds_the_wait_after_upload() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
     let pending = tokio::spawn(async move {
-        reqwest::Client::new()
+        test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(endpoint.token)
             .json(&json!({
@@ -10863,7 +10862,7 @@ async fn replayed_history_still_waiting_after_the_nominal_header_timeout() {
     // 模拟切模型后重放的历史：正文已经进了上游读缓冲，但网关还没给出首字。
     let padding = "x".repeat(4 * 1024 * 1024);
     let mut pending = tokio::spawn(async move {
-        reqwest::Client::new()
+        test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(endpoint.token)
             .json(&json!({
@@ -10929,7 +10928,7 @@ async fn upstream_error_body_read_stops_at_the_total_deadline() {
             }
         }
     });
-    let response = reqwest::Client::builder()
+    let response = test_http_client_builder()
         .no_proxy()
         .build()
         .unwrap()
@@ -10985,7 +10984,7 @@ async fn non_2xx_error_body_deadline_returns_a_structured_timeout() {
     });
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let request = reqwest::Client::new()
+    let request = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}));
@@ -11042,7 +11041,7 @@ async fn compaction_upstream_http_error_releases_the_session_lock() {
     let endpoint = router.endpoint();
     let url = format!("{}/responses/compact", endpoint.base_url);
     let request_body = json!({"model":model_alias(&provider_id, &model),"input":"full context"});
-    let first = reqwest::Client::new()
+    let first = test_http_client()
         .post(&url)
         .bearer_auth(&endpoint.token)
         .header("thread-id", "compaction-error-body")
@@ -11054,7 +11053,7 @@ async fn compaction_upstream_http_error_releases_the_session_lock() {
     assert_eq!(first.status().as_u16(), 500);
     let detail = first.text().await.unwrap();
     assert!(detail.contains("HTTP 500"), "{detail}");
-    let retry = reqwest::Client::new()
+    let retry = test_http_client()
         .post(&url)
         .bearer_auth(&endpoint.token)
         .header("thread-id", "compaction-error-body")
@@ -11116,7 +11115,7 @@ async fn compaction_error_body_drip_ends_at_the_total_deadline_and_releases_the_
     let endpoint = router.endpoint();
     let url = format!("{}/responses/compact", endpoint.base_url);
     let request_body = json!({"model":model_alias(&provider_id, &model),"input":"full context"});
-    let request = reqwest::Client::new()
+    let request = test_http_client()
         .post(&url)
         .bearer_auth(&endpoint.token)
         .header("thread-id", "compaction-error-drip")
@@ -11141,7 +11140,7 @@ async fn compaction_error_body_drip_ends_at_the_total_deadline_and_releases_the_
         "错误正文读取提前结束:{elapsed:?}"
     );
     let _ = stop_drip.send(());
-    let retry = reqwest::Client::new()
+    let retry = test_http_client()
         .post(&url)
         .bearer_auth(&endpoint.token)
         .header("thread-id", "compaction-error-drip")
@@ -11184,7 +11183,7 @@ async fn compaction_waits_past_the_removed_request_deadline() {
     });
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let request = reqwest::Client::new()
+    let request = test_http_client()
         .post(format!("{}/responses/compact", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":model_alias(&provider_id, &model),"input":"full context"}));
@@ -11232,7 +11231,7 @@ async fn compaction_upstream_disconnect_reports_the_read_failure() {
     });
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -11272,7 +11271,7 @@ async fn compaction_stream_can_wait_for_headers_within_its_total_budget() {
     });
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let request = reqwest::Client::new().post(format!("{}/responses", endpoint.base_url))
+    let request = test_http_client().post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":model_alias(&provider_id, &model),"stream":true,"input":[{"type":"compaction_trigger"}]}));
     let mut pending = tokio::spawn(async move { request.send().await.unwrap() });
@@ -11326,7 +11325,7 @@ async fn compaction_large_sse_and_context_errors_keep_their_meaning() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
     for expected in [200, 400, 400] {
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({"model":model_alias(&provider_id, &model),"input":[{"type":"compaction_trigger"}],"stream":true}))
@@ -11372,7 +11371,7 @@ async fn invalid_compaction_result_does_not_prevent_a_later_valid_request() {
     let endpoint = router.endpoint();
     let body = json!({"model":model_alias(&provider_id, &model),"input":"full context"});
     for status in [502, 502, 502, 502, 200] {
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses/compact", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .header("thread-id", "same-history")
@@ -11433,7 +11432,7 @@ async fn responses_route_normalizes_tool_schemas_and_passes_web_search_natively(
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -11531,7 +11530,7 @@ async fn chat_completions_route_uses_its_path_key_and_returns_responses_sse() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -11662,7 +11661,7 @@ async fn chat_stream_tool_type_tolerates_blank_deltas_and_rejects_unknown_types(
         config.profiles[0].normalize();
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({
@@ -11772,7 +11771,7 @@ async fn adapted_stream_failures_keep_redacted_diagnostics_in_request_logs() {
         .await
         .unwrap();
         let endpoint = router.endpoint();
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({
@@ -11882,7 +11881,7 @@ async fn request_log_keeps_the_upstream_model_apart_from_the_codex_selector() {
     // Codex 选择器带线路前缀，发往上游的是线路配置里的模型名。
     let selector = model_alias(&provider_id, &model);
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -11956,7 +11955,7 @@ async fn request_log_projects_the_model_a_native_responses_upstream_reports() {
     let endpoint = router.endpoint();
     let selector = model_alias(&provider_id, &model);
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -12024,7 +12023,7 @@ async fn chat_route_maps_web_search_for_provider_scoped_model_without_model_name
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -12089,7 +12088,7 @@ async fn chat_route_drops_ambient_auto_web_search_before_contacting_upstream() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -12142,7 +12141,7 @@ async fn responses_route_passes_web_search_through_without_chat_conversion() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -12199,7 +12198,7 @@ async fn native_responses_route_rejects_unrecoverable_synthetic_history_and_pres
     let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::new();
+    let client = test_http_client();
     let alias = model_alias(&provider_id, &model);
 
     for previous_response_id in ["resp_codey_wrapped", "resp_upstream"] {
@@ -12343,7 +12342,7 @@ async fn native_route_switch_drops_previous_provider_reasoning_state() {
     });
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::new();
+    let client = test_http_client();
 
     let first_input = json!([
         {"role":"user","content":"first"},
@@ -12444,7 +12443,7 @@ async fn native_route_switch_rejects_provider_bound_history_references_locally()
         });
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::new();
+        let client = test_http_client();
 
         let first = client
             .post(format!("{}/responses", endpoint.base_url))
@@ -12534,7 +12533,7 @@ async fn non_stream_chat_adapter_requests_upstream_stream_and_returns_json() {
     let endpoint = router.endpoint();
 
     let mut client_task = tokio::spawn(async move {
-        reqwest::Client::new()
+        test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({
@@ -12605,7 +12604,7 @@ async fn chat_adapter_streams_mislabeled_sse_before_upstream_completes() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let mut response = reqwest::Client::new()
+    let mut response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -12741,7 +12740,7 @@ async fn anthropic_route_uses_messages_key_headers_and_returns_responses_sse() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header("chatgpt-account-id", "must-not-leak")
@@ -12840,7 +12839,7 @@ async fn non_stream_anthropic_adapter_requests_upstream_stream_and_returns_json(
     let endpoint = router.endpoint();
 
     let mut client_task = tokio::spawn(async move {
-        reqwest::Client::new()
+        test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({
@@ -12959,7 +12958,7 @@ async fn anthropic_route_bridges_apply_patch_custom_tool_and_stream_events() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -13053,7 +13052,7 @@ async fn anthropic_adapter_streams_mislabeled_sse_before_upstream_completes() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let mut response = reqwest::Client::new()
+    let mut response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -13131,7 +13130,7 @@ async fn historical_alias_http_requests_survive_hot_route_removal() {
     config = config.normalize();
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::new();
+    let client = test_http_client();
     for remove in [false, true] {
         if remove {
             config
@@ -13199,7 +13198,7 @@ async fn router_rewrites_alias_and_keeps_upstream_credentials_private() {
     let endpoint = router.endpoint();
     let alias = model_alias(&provider_id, &model);
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header("user-agent", "codex_cli_rs/0.114.0")
@@ -13259,7 +13258,7 @@ async fn third_party_native_route_replays_plaintext_agent_task_as_user_message()
 
     // 原始模型名加线路提示头不触发模型改写和正文元数据清理，请求因此走
     // 原生直通的原始字节路径，发送前仍必须完成任务载荷归一化。
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header(
@@ -13493,7 +13492,7 @@ async fn chat_completions_route_rewrites_plaintext_agent_payload_before_conversi
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -13610,7 +13609,7 @@ async fn anthropic_route_replays_agent_task_as_user_message_before_send() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -13781,7 +13780,7 @@ async fn route_header_overrides_replace_and_remove_forwarded_headers() {
     let endpoint = router.endpoint();
     let alias = model_alias(&provider_id, &model);
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header("user-agent", "codex_cli_rs/0.114.0")
@@ -13822,7 +13821,7 @@ async fn routing_hint_reaches_upstream_with_the_restored_model_name() {
     let endpoint = router.endpoint();
     let alias = model_alias(&provider_id, &model);
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header(
@@ -13869,7 +13868,7 @@ async fn route_upstream_proxy_carries_requests_through_the_proxy() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
@@ -13925,7 +13924,7 @@ async fn upstream_response_headers_reach_the_downstream_client() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
@@ -14006,7 +14005,7 @@ async fn auto_review_misc_requests_do_not_replace_main_thread_bindings() {
         config.misc_model = "route-b/housekeeping".into();
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::builder()
+        let client = test_http_client_builder()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
@@ -14087,7 +14086,7 @@ async fn raw_model_metadata_selects_an_ambiguous_route_and_binds_the_thread() {
         .insert(provider_b.clone(), vec![model.clone()]);
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::new();
+    let client = test_http_client();
     let turn_metadata = json!({
         ROUTE_METADATA_KEY: provider_b,
         "preserved": "yes"
@@ -14200,7 +14199,7 @@ async fn route_updates_affect_only_later_requests_and_keep_inflight_streams_pinn
     let alias = model_alias(&provider_id, &model);
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::new();
+    let client = test_http_client();
 
     let mut first_response = client
         .post(format!("{}/responses", endpoint.base_url))
@@ -14315,7 +14314,7 @@ async fn request_log_resolves_model_identity_before_http_websocket_and_image_rej
     .await
     .unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
@@ -14488,7 +14487,7 @@ async fn router_image_aliases_rewrite_the_upstream_body_and_preserve_raw_models(
     .await
     .unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
@@ -14658,7 +14657,7 @@ async fn router_image_aliases_keep_the_selected_route_despite_replayed_metadata(
     .await
     .unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
@@ -14766,7 +14765,7 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     .unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/images/generations", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":"gpt-image-2","prompt":"draw an otter"}))
@@ -14781,7 +14780,7 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     assert_eq!(authorization.as_deref(), Some("Bearer sk-upstream"));
     assert_eq!(body["model"], "gpt-image-2");
     assert_eq!(body["prompt"], "draw an otter");
-    let invalid = reqwest::Client::new()
+    let invalid = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .body("not-json")
@@ -14793,7 +14792,7 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     while router.request_log_health().await.stats.entries_written < 2 && Instant::now() < deadline {
         tokio::task::yield_now().await;
     }
-    let stats = reqwest::Client::new()
+    let stats = test_http_client()
         .post(format!(
             "{}/codey/api/query_route_request_log_stats",
             endpoint.base_url.trim_end_matches("/v1")
@@ -14851,7 +14850,7 @@ async fn router_rejects_unknown_raw_models_instead_of_guessing_a_route() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":"unknown-model","input":"hello"}))
@@ -14884,7 +14883,7 @@ async fn request_log_preserves_subagent_source_before_route_resolution() {
         .await
         .unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::new();
+        let client = test_http_client();
         for (model, subagent, parent) in [
             ("missing-memory-model", true, None),
             ("missing-worker-model", true, Some("parent-thread")),
@@ -14982,7 +14981,7 @@ async fn router_rejects_requests_without_the_launch_token() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
         .send()
@@ -14994,7 +14993,7 @@ async fn router_rejects_requests_without_the_launch_token() {
     assert_eq!(body["error"]["code"], "invalid_router_token");
 
     let gateway_root = endpoint.base_url.trim_end_matches("/v1");
-    let legacy_capability_response = reqwest::Client::new()
+    let legacy_capability_response = test_http_client()
         .post(format!("{gateway_root}/{}/v1/responses", endpoint.token))
         .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
         .send()
@@ -15049,7 +15048,7 @@ async fn request_log_excludes_non_model_paths_but_keeps_rejected_model_requests(
     .unwrap();
     let endpoint = router.endpoint();
     let root = endpoint.base_url.trim_end_matches("/v1");
-    let client = reqwest::Client::new();
+    let client = test_http_client();
 
     for path in [
         "/favicon.ico",
@@ -15080,8 +15079,6 @@ async fn request_log_excludes_non_model_paths_but_keeps_rejected_model_requests(
         "/images/generations",
         "/v1/responses/compact",
         "/responses/compact",
-        "/v1/v1/responses/compact",
-        "/codex/v1/responses/compact",
     ];
     for path in model_paths {
         let response = client.post(format!("{root}{path}")).send().await.unwrap();
@@ -15124,7 +15121,7 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
     let gateway_root = endpoint.base_url.trim_end_matches("/v1");
-    let client = reqwest::Client::new();
+    let client = test_http_client();
 
     let page = client
         .get(format!("{gateway_root}{REQUEST_LOG_PAGE_PATH}"))
@@ -15354,7 +15351,7 @@ async fn anthropic_stream_authentication_error_is_terminal_and_preserves_details
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -15433,7 +15430,7 @@ async fn chat_stream_merges_legacy_function_call_deltas_into_indexed_tool_calls(
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -15501,7 +15498,7 @@ async fn chat_stream_merges_reversed_legacy_deltas_and_drops_empty_tool_slots() 
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -15573,7 +15570,7 @@ async fn chat_stream_without_any_tool_name_still_fails_the_route() {
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({
@@ -15627,7 +15624,7 @@ async fn collect_responses_events_from_chat_stream(chunks: &[Value]) -> Vec<Valu
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
-    let response = reqwest::Client::new()
+    let response = test_http_client()
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({

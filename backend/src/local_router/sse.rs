@@ -127,6 +127,7 @@ struct ResponsesEventKind<'a> {
 
 /// Validate native SSE completion while forwarding the original bytes. Only
 /// one event is retained; unknown JSON fields are skipped without building a tree.
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct NativeSseTerminal {
     buffer: Vec<u8>,
@@ -135,6 +136,7 @@ pub(crate) struct NativeSseTerminal {
     budget: RetainedMemoryBudget,
 }
 
+#[cfg(test)]
 impl NativeSseTerminal {
     fn ingest(&mut self, frame: &[u8]) -> Result<()> {
         if let Some(data) = sse_frame_data(frame)? {
@@ -166,7 +168,7 @@ impl NativeSseTerminal {
         // Split borrows: the frame is borrowed from the buffer, while ingest
         // only needs the terminal flag. Move the bounded buffer temporarily.
         let buffer = std::mem::take(&mut self.buffer);
-        let result = (|| {
+        let result: Result<bool> = (|| {
             while let Some(frame) = take_next_sse_frame(&buffer, &mut self.cursor) {
                 self.ingest(frame)?;
                 if self.terminal {
@@ -197,6 +199,8 @@ impl NativeSseTerminal {
 pub(crate) struct ResponsesSseRewriter<'a> {
     response_fix: Option<&'a NativeResponseFix>,
     normalize_failures: bool,
+    validate_terminal: bool,
+    terminal: bool,
     retry_advice: Option<&'a ResponseRetryAdvice>,
     buffer: Vec<u8>,
     cursor: SseCursor,
@@ -226,6 +230,13 @@ fn is_passthrough_responses_sse_event(kind: &str) -> bool {
     )
 }
 
+fn is_terminal_responses_sse_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "response.completed" | "response.failed" | "response.incomplete" | "error"
+    )
+}
+
 impl<'a> ResponsesSseRewriter<'a> {
     pub(crate) fn new(
         response_fix: Option<&'a NativeResponseFix>,
@@ -235,12 +246,93 @@ impl<'a> ResponsesSseRewriter<'a> {
         Self {
             response_fix,
             normalize_failures,
+            validate_terminal: false,
+            terminal: false,
             retry_advice,
             buffer: Vec::new(),
             cursor: SseCursor::default(),
             forwarded: 0,
             budget: RetainedMemoryBudget::default(),
         }
+    }
+
+    pub(crate) fn with_terminal_validation(mut self) -> Self {
+        self.validate_terminal = true;
+        self
+    }
+
+    pub(crate) fn terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub(crate) fn ensure_terminal(&self) -> Result<()> {
+        if self.validate_terminal && !self.terminal {
+            anyhow::bail!("Responses SSE 在终态事件前断开");
+        }
+        Ok(())
+    }
+
+    /// Single-pass SSE framing, terminal tracking and optional rewriting.
+    /// When no buffered partial frame prefix exists and no frame in `chunk`
+    /// requires rewriting, forwards `chunk` (or its complete prefix) zero-copy.
+    pub(crate) fn push_bytes(&mut self, chunk: Bytes) -> Result<Option<Bytes>> {
+        if self.buffer.is_empty() {
+            if chunk.len() > MAX_UPSTREAM_RESPONSE_BYTES {
+                anyhow::bail!("Responses SSE 单帧超过上限");
+            }
+            let mut cursor = SseCursor {
+                consumed: 0,
+                scanned: 0,
+                started: self.cursor.started,
+            };
+            let mut forwarded = 0_usize;
+            let mut rewritten: Option<Vec<u8>> = None;
+            while let Some(frame) = take_next_sse_frame(&chunk, &mut cursor) {
+                let original = &chunk[forwarded..cursor.consumed];
+                let processed = self.process_frame(frame, original)?;
+                match (&mut rewritten, processed) {
+                    (None, Cow::Borrowed(_)) => {}
+                    (None, Cow::Owned(bytes)) => {
+                        let mut out = Vec::with_capacity(chunk.len());
+                        out.extend_from_slice(&chunk[..forwarded]);
+                        out.extend_from_slice(&bytes);
+                        rewritten = Some(out);
+                    }
+                    (Some(out), Cow::Borrowed(bytes)) => out.extend_from_slice(bytes),
+                    (Some(out), Cow::Owned(bytes)) => out.extend_from_slice(&bytes),
+                }
+                forwarded = cursor.consumed;
+            }
+            self.cursor.started = cursor.started;
+            if forwarded == 0 {
+                let size = chunk.len();
+                self.budget.resize(size.max(self.buffer.capacity()))?;
+                self.buffer.extend_from_slice(&chunk);
+                self.cursor = cursor;
+                self.forwarded = 0;
+                return Ok(None);
+            }
+            if forwarded < chunk.len() {
+                let tail = &chunk[forwarded..];
+                self.budget.resize(tail.len().max(self.buffer.capacity()))?;
+                self.buffer.extend_from_slice(tail);
+                self.cursor.consumed = 0;
+                self.cursor.scanned = tail.len().saturating_sub(3);
+                self.forwarded = 0;
+            } else {
+                self.cursor.consumed = 0;
+                self.cursor.scanned = 0;
+                self.forwarded = 0;
+            }
+            return Ok(Some(match rewritten {
+                Some(out) => Bytes::from(out),
+                None if forwarded == chunk.len() => chunk,
+                None => chunk.slice(..forwarded),
+            }));
+        }
+
+        let output = self.push(&chunk)?;
+        Ok((!output.is_empty()).then(|| Bytes::from(output)))
     }
 
     pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>> {
@@ -251,13 +343,18 @@ impl<'a> ResponsesSseRewriter<'a> {
         self.budget.resize(size.max(self.buffer.capacity()))?;
         self.buffer.extend_from_slice(chunk);
         let mut output = Vec::new();
-        while let Some(frame) = take_next_sse_frame(&self.buffer, &mut self.cursor) {
-            // 正常事件直接复制到本次输出，避免为每帧创建临时 Vec。
-            output.extend_from_slice(
-                &self.rewrite_frame(frame, &self.buffer[self.forwarded..self.cursor.consumed]),
-            );
-            self.forwarded = self.cursor.consumed;
-        }
+        let buffer = std::mem::take(&mut self.buffer);
+        let result: Result<()> = (|| {
+            while let Some(frame) = take_next_sse_frame(&buffer, &mut self.cursor) {
+                let processed =
+                    self.process_frame(frame, &buffer[self.forwarded..self.cursor.consumed])?;
+                output.extend_from_slice(&processed);
+                self.forwarded = self.cursor.consumed;
+            }
+            Ok(())
+        })();
+        self.buffer = buffer;
+        result?;
         if self.forwarded > 0 {
             let consumed = self.cursor.consumed;
             compact_sse_buffer(&mut self.buffer, &mut self.cursor);
@@ -266,30 +363,62 @@ impl<'a> ResponsesSseRewriter<'a> {
         Ok(output)
     }
 
-    pub(crate) fn finish(&mut self) -> Vec<u8> {
+    pub(crate) fn finish_tail(&mut self) -> Result<Vec<u8>> {
         let buffer = std::mem::take(&mut self.buffer);
-        let output = self
-            .rewrite_frame(&buffer[self.cursor.consumed..], &buffer[self.forwarded..])
-            .into_owned();
+        let consumed = self.cursor.consumed;
+        let forwarded = self.forwarded;
         self.cursor = SseCursor::default();
         self.forwarded = 0;
-        output
+        let frame = &buffer[consumed..];
+        let original = &buffer[forwarded..];
+        if frame.iter().all(u8::is_ascii_whitespace) {
+            return Ok(original.to_vec());
+        }
+        Ok(self.process_frame(frame, original)?.into_owned())
     }
 
-    fn rewrite_frame<'b>(&self, frame: &[u8], original: &'b [u8]) -> Cow<'b, [u8]> {
-        let passthrough = || Cow::Borrowed(original);
-        let Ok(Some(data)) = sse_frame_data(frame) else {
-            return passthrough();
+    #[cfg(test)]
+    pub(crate) fn finish(&mut self) -> Vec<u8> {
+        self.finish_tail().unwrap_or_default()
+    }
+
+    fn process_frame<'b>(&mut self, frame: &[u8], original: &'b [u8]) -> Result<Cow<'b, [u8]>> {
+        let passthrough = || Ok(Cow::Borrowed(original));
+        let data = match sse_frame_data(frame) {
+            Ok(Some(data)) => data,
+            Ok(None) => return passthrough(),
+            Err(error) => {
+                if self.validate_terminal && !self.terminal {
+                    return Err(error);
+                }
+                return passthrough();
+            }
         };
         if data.trim() == "[DONE]" {
+            if self.validate_terminal && !self.terminal {
+                anyhow::bail!("Responses SSE 在终态事件前结束");
+            }
             return passthrough();
+        }
+        let check_terminal = self.validate_terminal && !self.terminal;
+        if !check_terminal && !self.normalize_failures && self.response_fix.is_none() {
+            return passthrough();
+        }
+        let event_kind = match serde_json::from_str::<ResponsesEventKind<'_>>(&data) {
+            Ok(kind) => kind,
+            Err(error) => {
+                if check_terminal {
+                    return Err(error).context("Responses SSE data 无效");
+                }
+                return passthrough();
+            }
+        };
+        if check_terminal {
+            self.terminal |= is_terminal_responses_sse_event(event_kind.kind.as_ref());
         }
         if !self.normalize_failures && self.response_fix.is_none() {
             return passthrough();
         }
-        let Ok(event_kind) = serde_json::from_str::<ResponsesEventKind<'_>>(&data) else {
-            return passthrough();
-        };
         if self.response_fix.is_none() {
             if !matches!(event_kind.kind.as_ref(), "error" | "response.failed") {
                 return passthrough();
@@ -351,7 +480,7 @@ impl<'a> ResponsesSseRewriter<'a> {
             }
         }
         output.extend_from_slice(newline);
-        Cow::Owned(output)
+        Ok(Cow::Owned(output))
     }
 }
 

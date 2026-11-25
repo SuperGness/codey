@@ -35,11 +35,13 @@ pub(crate) async fn probe_responses_websocket(
     // None 表示对端在发出任何请求前就已断开（优雅关闭或 RST）。这种连接在
     // Codex 重启、更新期间很常见，按静默连接处理，不记录为请求失败。
     let detected = tokio::time::timeout(RESPONSES_WEBSOCKET_PROBE_TIMEOUT, async {
-        let mut peek = vec![0_u8; 4096];
+        let mut stack_peek = [0_u8; 4096];
+        let mut heap_peek: Option<Vec<u8>> = None;
         let mut seen = 0_usize;
         let mut incomplete_waits = 0_u32;
         loop {
-            let read = match stream.peek(&mut peek).await {
+            let peek_buf: &mut [u8] = heap_peek.as_deref_mut().unwrap_or(&mut stack_peek);
+            let read = match stream.peek(peek_buf).await {
                 Ok(0) => return Ok(None),
                 Ok(read) => read,
                 Err(error)
@@ -61,7 +63,8 @@ pub(crate) async fn probe_responses_websocket(
                 seen = read;
                 incomplete_waits = 0;
             }
-            let bytes = &peek[..read];
+            let peek_len = peek_buf.len();
+            let bytes = &peek_buf[..read];
             let Some(request_line_end) = bytes.windows(2).position(|window| window == b"\r\n")
             else {
                 incomplete_waits = incomplete_waits.saturating_add(1);
@@ -95,16 +98,17 @@ pub(crate) async fn probe_responses_websocket(
                 }
                 return Ok(Some(connection_upgrade && websocket_upgrade));
             }
-            if read == peek.len() {
-                if peek.len() >= MAX_HEADER_BYTES.saturating_add(4) {
+            if read == peek_len {
+                if peek_len >= MAX_HEADER_BYTES.saturating_add(4) {
                     return Ok(Some(false));
                 }
-                peek.resize(
-                    peek.len()
-                        .saturating_mul(2)
-                        .min(MAX_HEADER_BYTES.saturating_add(4)),
-                    0,
-                );
+                let next_len = peek_len
+                    .saturating_mul(2)
+                    .min(MAX_HEADER_BYTES.saturating_add(4));
+                match &mut heap_peek {
+                    Some(buf) => buf.resize(next_len, 0),
+                    None => heap_peek = Some(vec![0_u8; next_len]),
+                }
             } else {
                 // `peek` leaves the current bytes readable, so wait for another
                 // packet instead of spinning on the same prefix.

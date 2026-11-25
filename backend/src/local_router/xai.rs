@@ -61,6 +61,7 @@ pub(crate) fn upstream_is_xai(upstream_url: &str) -> bool {
 
 /// 官方 xAI 地址，以及任何线路上的 Grok 模型。第三方中转不会用 `x.ai` 做域名，
 /// 但上游模型名仍然是 `grok-…`。
+#[cfg(test)]
 pub(crate) fn native_upstream_needs_xai_compat(upstream_url: &str, upstream_model: &str) -> bool {
     upstream_is_xai(upstream_url) || model_is_grok(upstream_model)
 }
@@ -105,32 +106,43 @@ impl XaiResponseFix {
 }
 
 fn promote_additional_tools(body: &mut Value) -> bool {
-    let Some(input) = body.get("input").and_then(Value::as_array) else {
+    let Some(object) = body.as_object_mut() else {
         return false;
     };
-    if !input
-        .iter()
-        .any(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"))
-    {
+    let has_additional = object
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"))
+        });
+    if !has_additional {
         return false;
     }
-    let input = input.clone();
-    let mut merged = Vec::new();
-    let mut seen = HashSet::new();
-    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-        for tool in tools {
-            seen.insert(tool_dedup_key(tool));
-            merged.push(tool.clone());
+    let Some(Value::Array(input)) = object.remove("input") else {
+        return false;
+    };
+    let existing_tools = object.remove("tools").and_then(|value| match value {
+        Value::Array(tools) => Some(tools),
+        other => {
+            object.insert("tools".to_string(), other);
+            None
         }
-    }
+    });
+    let mut merged = existing_tools.unwrap_or_default();
+    let had_tools = !merged.is_empty();
+    let mut seen: HashSet<String> = merged.iter().map(tool_dedup_key).collect();
     let mut filtered = Vec::with_capacity(input.len());
     let mut promoted = false;
-    for item in input {
+    for mut item in input {
         if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
-            if let Some(tools) = item.get("tools").and_then(Value::as_array) {
+            if let Some(Value::Array(tools)) =
+                item.as_object_mut().and_then(|obj| obj.remove("tools"))
+            {
                 for tool in tools {
-                    if seen.insert(tool_dedup_key(tool)) {
-                        merged.push(tool.clone());
+                    if seen.insert(tool_dedup_key(&tool)) {
+                        merged.push(tool);
                         promoted = true;
                     }
                 }
@@ -139,12 +151,9 @@ fn promote_additional_tools(body: &mut Value) -> bool {
         }
         filtered.push(item);
     }
-    let Some(body) = body.as_object_mut() else {
-        return false;
-    };
-    body.insert("input".to_string(), Value::Array(filtered));
-    if promoted {
-        body.insert("tools".to_string(), Value::Array(merged));
+    object.insert("input".to_string(), Value::Array(filtered));
+    if promoted || had_tools {
+        object.insert("tools".to_string(), Value::Array(merged));
     }
     true
 }
@@ -192,8 +201,13 @@ fn flatten_namespaces(body: &mut Value) -> Result<(bool, HashMap<String, XaiTool
     }
     let mut owners = HashMap::new();
     collect_namespace_owners(tools, &[], &top_level, &mut owners)?;
-    let tools = tools.clone();
-    let mut flattened = Vec::new();
+    let Some(object) = body.as_object_mut() else {
+        return Ok((false, HashMap::new()));
+    };
+    let Some(Value::Array(tools)) = object.remove("tools") else {
+        return Ok((false, HashMap::new()));
+    };
+    let mut flattened = Vec::with_capacity(tools.len());
     let mut seen = HashSet::new();
     for tool in tools {
         if tool.get("type").and_then(Value::as_str) == Some("namespace") {
@@ -202,17 +216,15 @@ fn flatten_namespaces(body: &mut Value) -> Result<(bool, HashMap<String, XaiTool
             flattened.push(tool);
         }
     }
-    if let Some(body) = body.as_object_mut() {
-        body.insert("tools".to_string(), Value::Array(flattened));
-        if let Some(input) = body.get_mut("input") {
-            rewrite_namespace_calls(input, &owners);
-        }
-        if let Some(choice) = body.get_mut("tool_choice") {
-            if choice.get("type").and_then(Value::as_str) == Some("namespace") {
-                *choice = json!("auto");
-            } else {
-                rewrite_namespace_call(choice, &owners);
-            }
+    object.insert("tools".to_string(), Value::Array(flattened));
+    if let Some(input) = object.get_mut("input") {
+        rewrite_namespace_calls(input, &owners);
+    }
+    if let Some(choice) = object.get_mut("tool_choice") {
+        if choice.get("type").and_then(Value::as_str) == Some("namespace") {
+            *choice = json!("auto");
+        } else {
+            rewrite_namespace_call(choice, &owners);
         }
     }
     Ok((true, owners))

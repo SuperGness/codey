@@ -288,49 +288,111 @@ pub(crate) fn decode_zstd_request_body(
     body_budget: &Arc<Semaphore>,
     mut permit: Option<OwnedSemaphorePermit>,
 ) -> Result<(Vec<u8>, Option<OwnedSemaphorePermit>)> {
+    use zstd::stream::raw::Operation as _;
+
+    thread_local! {
+        static ZSTD_DECODER: std::cell::RefCell<Option<zstd::stream::raw::Decoder<'static>>> =
+            const { std::cell::RefCell::new(None) };
+    }
     // Keep the permit inside the blocking task until its buffers are dropped,
     // even if the caller cancels its JoinHandle.
     let encoded_capacity = encoded.capacity();
     grow_request_body_budget(&mut permit, body_budget, encoded_capacity)?;
-    let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(encoded))
-        .context("初始化 Responses zstd 请求体解码器失败")?;
-    // The output limit does not require a larger zstd history window.
-    decoder
-        .window_log_max(25)
-        .context("限制 Responses zstd 请求体解压窗口失败")?;
-    let mut decoded = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let read_length = chunk.len().min(MAX_REQUEST_BYTES + 1 - decoded.len());
-        let read = decoder
-            .read(&mut chunk[..read_length])
-            .context("解压 Responses zstd 请求体失败")?;
-        if read == 0 {
-            break;
-        }
-        let required = decoded.len() + read;
-        if required > MAX_REQUEST_BYTES {
+    let initial_capacity = match zstd::zstd_safe::get_frame_content_size(&encoded) {
+        Ok(Some(size)) if size as usize > MAX_REQUEST_BYTES => {
             return Err(RequestBodyTooLarge {
-                bytes: required,
+                bytes: size as usize,
                 decoded: true,
             }
             .into());
         }
-        if required > decoded.capacity() {
-            let capacity = required
-                .max(decoded.capacity().saturating_mul(2))
-                .min(MAX_REQUEST_BYTES);
-            // Four times the larger buffer covers compressed input, old output
-            // and new output during reallocation without reserving the limit.
-            grow_request_body_budget(&mut permit, body_budget, encoded_capacity.max(capacity))?;
-            decoded
-                .try_reserve_exact(capacity - decoded.len())
-                .context("分配 Responses 请求体解压缓冲失败")?;
-        }
-        decoded.extend_from_slice(&chunk[..read]);
+        Ok(Some(size)) => (size as usize).min(MAX_REQUEST_BYTES),
+        _ => encoded.len().saturating_mul(2).min(MAX_REQUEST_BYTES),
+    };
+    let mut decoded = Vec::new();
+    if initial_capacity > 0 {
+        grow_request_body_budget(
+            &mut permit,
+            body_budget,
+            encoded_capacity.max(initial_capacity),
+        )?;
+        decoded
+            .try_reserve_exact(initial_capacity)
+            .context("分配 Responses 请求体解压缓冲失败")?;
     }
-    drop(decoder);
-    decoded.shrink_to_fit();
+    ZSTD_DECODER.with(|cell| -> Result<()> {
+        let mut slot = cell.borrow_mut();
+        let decoder = match slot.as_mut() {
+            Some(decoder) => {
+                decoder
+                    .reinit()
+                    .context("重置 Responses zstd 请求体解码器失败")?;
+                decoder
+            }
+            None => {
+                let mut created = zstd::stream::raw::Decoder::new()
+                    .context("初始化 Responses zstd 请求体解码器失败")?;
+                // The output limit does not require a larger zstd history window.
+                created
+                    .set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(25))
+                    .context("限制 Responses zstd 请求体解压窗口失败")?;
+                slot.insert(created)
+            }
+        };
+        if encoded.is_empty() {
+            return Ok(());
+        }
+        let mut input_offset = 0_usize;
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let mut in_buf = zstd::stream::raw::InBuffer::around(&encoded[input_offset..]);
+            let read_limit = chunk.len().min(MAX_REQUEST_BYTES + 1 - decoded.len());
+            let mut out_buf = zstd::stream::raw::OutBuffer::around(&mut chunk[..read_limit]);
+            let remaining = decoder
+                .run(&mut in_buf, &mut out_buf)
+                .context("解压 Responses zstd 请求体失败")?;
+            let consumed = in_buf.pos();
+            let written = out_buf.pos();
+            input_offset += consumed;
+            if written > 0 {
+                let required = decoded.len() + written;
+                if required > MAX_REQUEST_BYTES {
+                    return Err(RequestBodyTooLarge {
+                        bytes: required,
+                        decoded: true,
+                    }
+                    .into());
+                }
+                if required > decoded.capacity() {
+                    let capacity = required
+                        .max(decoded.capacity().saturating_mul(2))
+                        .min(MAX_REQUEST_BYTES);
+                    grow_request_body_budget(
+                        &mut permit,
+                        body_budget,
+                        encoded_capacity.max(capacity),
+                    )?;
+                    decoded
+                        .try_reserve_exact(capacity - decoded.len())
+                        .context("分配 Responses 请求体解压缓冲失败")?;
+                }
+                decoded.extend_from_slice(&chunk[..written]);
+            }
+            if input_offset >= encoded.len() {
+                if remaining == 0 {
+                    break;
+                }
+                if written == 0 {
+                    anyhow::bail!("解压 Responses zstd 请求体失败：压缩帧不完整");
+                }
+            }
+            if consumed == 0 && written == 0 {
+                anyhow::bail!("解压 Responses zstd 请求体失败：解码器未推进");
+            }
+        }
+        Ok(())
+    })?;
+    drop(encoded);
     shrink_request_body_budget(&mut permit, decoded.capacity())?;
     Ok((decoded, permit))
 }

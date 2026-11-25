@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[cfg(test)]
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -256,6 +257,27 @@ pub(crate) use websocket_context::*;
 pub(crate) use websocket_ingress::*;
 pub(crate) use websocket_tls::shared_client_config;
 pub(crate) use xai::*;
+
+pub(crate) async fn load_runtime_context_metadata()
+-> BTreeMap<String, serde_json::Map<String, Value>> {
+    let home = crate::codex_config::codex_home().to_path_buf();
+    tokio::task::spawn_blocking(move || crate::model_catalog::runtime_context_metadata(&home))
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn test_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().tls_built_in_root_certs(false)
+}
+
+#[cfg(test)]
+pub(crate) fn test_http_client() -> reqwest::Client {
+    test_http_client_builder()
+        .no_proxy()
+        .build()
+        .expect("build loopback test HTTP client")
+}
 
 #[cfg(test)]
 #[path = "../local_router_bench.rs"]

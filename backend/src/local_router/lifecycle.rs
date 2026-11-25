@@ -328,10 +328,22 @@ pub(crate) fn is_chatgpt_codex_turn(url: &reqwest::Url) -> bool {
 /// 压缩失败时返回 None，按明文发送。
 pub(crate) async fn compress_chatgpt_codex_turn(body: Bytes) -> Option<Bytes> {
     const INLINE_LIMIT: usize = 256 * 1024;
+    thread_local! {
+        static ZSTD_COMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> =
+            const { std::cell::RefCell::new(None) };
+    }
     fn encode(body: &[u8]) -> Option<Bytes> {
-        zstd::stream::encode_all(Cursor::new(body), 3)
-            .ok()
-            .map(Bytes::from)
+        ZSTD_COMPRESSOR.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let compressor = match slot.as_mut() {
+                Some(compressor) => compressor,
+                None => {
+                    let created = zstd::bulk::Compressor::new(3).ok()?;
+                    slot.insert(created)
+                }
+            };
+            compressor.compress(body).ok().map(Bytes::from)
+        })
     }
     if body.is_empty() {
         return None;
@@ -372,32 +384,35 @@ where
     lifecycle.set_upstream_target(&url)?;
     let mut retained_body = Some(body);
     loop {
-        let decision = await_upstream(
-            downstream,
-            lifecycle.dispatch(
-                LifecycleStage::BeforeSend,
-                attempts.attempt_index(),
-                lifecycle_headers(headers),
-                None,
-            ),
-        )
-        .await??;
-        match decision {
-            LifecycleDecision::Continue(patches) => {
-                apply_codey_plugin_header_patches(headers, patches)?
-            }
-            LifecycleDecision::Retry(_) => {
-                return Err(LifecycleError {
-                    status: 409,
-                    code: "plugin_retry_invalid_stage".into(),
-                    message: "请求发送前不能要求重发".into(),
+        let lifecycle_active = lifecycle.is_active();
+        if lifecycle_active {
+            let decision = await_upstream(
+                downstream,
+                lifecycle.dispatch(
+                    LifecycleStage::BeforeSend,
+                    attempts.attempt_index(),
+                    lifecycle_headers(headers),
+                    None,
+                ),
+            )
+            .await??;
+            match decision {
+                LifecycleDecision::Continue(patches) => {
+                    apply_codey_plugin_header_patches(headers, patches)?
                 }
-                .into());
+                LifecycleDecision::Retry(_) => {
+                    return Err(LifecycleError {
+                        status: 409,
+                        code: "plugin_retry_invalid_stage".into(),
+                        message: "请求发送前不能要求重发".into(),
+                    }
+                    .into());
+                }
             }
+            lifecycle.apply_api_key(headers)?;
+            await_upstream(downstream, lifecycle.mint_turn_state(client)).await??;
+            lifecycle.apply_turn_state(headers)?;
         }
-        lifecycle.apply_api_key(headers)?;
-        await_upstream(downstream, lifecycle.mint_turn_state(client)).await??;
-        lifecycle.apply_turn_state(headers)?;
         let payload = retained_body
             .as_ref()
             .expect("plugin retry keeps the uploaded body")
@@ -417,12 +432,15 @@ where
             None => (payload, None),
         };
         let send_headers = compressed_headers.as_ref().unwrap_or(headers);
-        if let Some(probe) = downstream.request_log_probe() {
+        if let Some(probe) = downstream
+            .request_log_probe()
+            .filter(|probe| probe.records_diagnostics())
+        {
             probe.set_upstream_request_headers(&format_upstream_headers(send_headers));
         }
         // 以这条请求启动时的插件快照为准。上传过程中全局插件被关掉时，
         // 快照仍可能在响应头之后要求重发，正文必须还在。
-        let keep_uploaded_body = lifecycle.is_active();
+        let keep_uploaded_body = lifecycle_active;
         attempts.begin_send()?;
         let send_probe = downstream.request_log_probe().cloned();
         let transport = attempts.transport;
@@ -488,6 +506,9 @@ where
         let Ok(Ok(response)) = &result else {
             return Ok(result);
         };
+        if !lifecycle.is_active() {
+            return Ok(result);
+        }
         let decision = await_upstream(
             downstream,
             lifecycle.dispatch(
@@ -702,6 +723,26 @@ impl<D: ResponsesDownstream + ?Sized> ResponsesDownstream for LifecycleDownstrea
         observe_lifecycle_response_failure(event);
         self.inner.write_event(event).await
     }
+    async fn write_borrowed_delta(
+        &mut self,
+        event_type: &'static str,
+        response_id: &str,
+        item_id: &str,
+        output_index: usize,
+        content_index: Option<usize>,
+        delta: &str,
+    ) -> Result<()> {
+        self.inner
+            .write_borrowed_delta(
+                event_type,
+                response_id,
+                item_id,
+                output_index,
+                content_index,
+                delta,
+            )
+            .await
+    }
     async fn finish_event_stream(&mut self) -> Result<()> {
         self.inner.finish_event_stream().await
     }
@@ -870,7 +911,7 @@ mod tests {
         let budget = Arc::new(Semaphore::new(1));
         let permit = budget.clone().try_acquire_owned().unwrap();
         let mut permit = Some(permit);
-        let client = reqwest::Client::new();
+        let client = test_http_client();
         let send = send_for_response_headers(
             client.post(format!("http://{address}/")),
             Bytes::from_static(b"{\"input\":\"hello\"}"),

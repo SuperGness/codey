@@ -56,7 +56,7 @@ pub(crate) async fn mint(
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .header("originator", "codex-tui")
             .header("session-id", session_id)
-            .header(reqwest::header::USER_AGENT, "codex_cli_rs/0.114.0")
+            .header(reqwest::header::USER_AGENT, "codex_cli_rs")
             .json(&body)
             .send()
             .await

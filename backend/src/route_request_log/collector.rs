@@ -864,6 +864,24 @@ impl RouteRequestLogProbe {
         });
     }
 
+    pub(crate) fn tracks_live_output(&self) -> bool {
+        self.shared.session_request.is_some() && !self.shared.finished.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn observe_delta_event(&self, event_type: &str, delta: Option<&str>) {
+        if !self.tracks_live_output() {
+            return;
+        }
+        self.shield(|| {
+            let quarters = if is_output_delta_event(event_type) {
+                delta.map(estimated_token_quarters).unwrap_or(0)
+            } else {
+                0
+            };
+            self.observe_live_output(quarters, None, Instant::now());
+        });
+    }
+
     pub(crate) fn observe_event(&self, event: &Value) {
         self.observe_event_at(event, Instant::now());
     }
@@ -871,24 +889,23 @@ impl RouteRequestLogProbe {
     pub(crate) fn observe_event_at(&self, event: &Value, observed_at: Instant) {
         self.shield(|| {
             let event_type = event.get("type").and_then(Value::as_str);
-            if self.shared.session_request.is_some()
-                && !self.shared.finished.load(Ordering::Acquire)
-            {
+            let usage = usage_value(event);
+            if self.tracks_live_output() {
                 let quarters = event_type
                     .filter(|kind| is_output_delta_event(kind))
                     .and_then(|_| event.get("delta").and_then(Value::as_str))
                     .map(estimated_token_quarters)
                     .unwrap_or(0);
-                let reported_output = usage_value(event).and_then(|usage| {
-                    first_u64(
-                        usage,
-                        &["/output_tokens", "/completion_tokens", "/outputTokens"],
-                    )
+                let reported_output = usage.and_then(|usage| {
+                    usage
+                        .get("output_tokens")
+                        .or_else(|| usage.get("completion_tokens"))
+                        .or_else(|| usage.get("outputTokens"))
+                        .and_then(Value::as_u64)
                 });
                 self.observe_live_output(quarters, reported_output, observed_at);
             }
-            let contains_usage = usage_value(event).is_some();
-            if !contains_usage
+            if usage.is_none()
                 && response_service_tier(event).is_none()
                 && upstream_response_model(event).is_none()
                 && !matches!(
@@ -1516,7 +1533,8 @@ impl Drop for RouteRequestLogRuntime {
 
 fn response_service_tier(value: &Value) -> Option<&str> {
     value
-        .pointer("/response/service_tier")
+        .get("response")
+        .and_then(|response| response.get("service_tier"))
         .or_else(|| value.get("service_tier"))
         .and_then(Value::as_str)
 }
@@ -1525,8 +1543,13 @@ fn response_service_tier(value: &Value) -> Option<&str> {
 /// Chat Completions 放在根级，Anthropic Messages 放在 message 对象里。
 pub(crate) fn upstream_response_model(value: &Value) -> Option<&str> {
     value
-        .pointer("/response/model")
-        .or_else(|| value.pointer("/message/model"))
+        .get("response")
+        .and_then(|response| response.get("model"))
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("model"))
+        })
         .or_else(|| value.get("model"))
         .and_then(Value::as_str)
 }
@@ -1693,9 +1716,14 @@ fn merge_usage(target: &mut RequestTokenUsage, value: &Value) {
 
 fn usage_value(value: &Value) -> Option<&Value> {
     value
-        .pointer("/response/usage")
+        .get("response")
+        .and_then(|response| response.get("usage"))
         .or_else(|| value.get("usage"))
-        .or_else(|| value.pointer("/message/usage"))
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        })
 }
 
 fn first_u64(value: &Value, pointers: &[&str]) -> Option<u64> {

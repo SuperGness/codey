@@ -80,8 +80,9 @@ impl PreparedProtocolRequest {
                 anthropic_context_1m: false,
             },
         };
-        let roots_changed =
-            !route.official_account && normalize_responses_tool_parameter_roots(&mut prepared.body);
+        let roots_changed = bridge != ProtocolBridge::NativeResponses
+            && !route.official_account
+            && normalize_responses_tool_parameter_roots(&mut prepared.body);
         // Moonshot/Kimi 不接受 $ref 的同层关键字，改为 allOf 保持 schema 语义。
         let schema_changed = bridge == ProtocolBridge::ResponsesToChatCompletions
             && upstream_rejects_ref_sibling_keywords(upstream_url)

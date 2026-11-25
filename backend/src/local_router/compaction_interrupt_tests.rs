@@ -386,7 +386,7 @@ async fn interrupt_cancels_an_incomplete_upstream_upload() {
     socket2::SockRef::from(&upstream)
         .set_recv_buffer_size(128 * 1024)
         .unwrap();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
@@ -427,7 +427,7 @@ async fn interrupt_leaves_another_active_thread_with_a_shared_session_running() 
     let (router, upstream, model) = fixture().await;
     let _client = compact_request(&router, &model).await;
     let mut stopped = held_upstream(&upstream, false).await;
-    let client = reqwest::Client::new();
+    let client = test_http_client();
     let other = tokio::spawn(
         client
             .post(format!("{}/responses/compact", router.endpoint.base_url))

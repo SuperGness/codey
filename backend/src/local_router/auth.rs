@@ -357,144 +357,39 @@ pub(crate) async fn read_cached_official_auth(
     auth_path: &Path,
     auth_caches: &Mutex<crate::account_usage::OfficialAuthCaches>,
 ) -> Option<std::sync::Arc<crate::account_usage::OfficialAuth>> {
-    let now = Instant::now();
-    if let Some(cached) = auth_caches
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .for_path(auth_path)
-        .get(auth_path, now)
-    {
-        return cached.ok();
-    }
-
-    let read_path = auth_path.to_path_buf();
-    let result =
-        tokio::task::spawn_blocking(move || crate::account_usage::read_official_auth(&read_path))
-            .await
-            .ok()?;
-    let now = Instant::now();
-    let mut caches = auth_caches
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cache = caches.for_path(auth_path);
-    if let Some(cached) = cache.get(auth_path, now) {
-        return cached.ok();
-    }
-    cache.store(auth_path, result, now).ok()
+    crate::account_usage::read_cached_file_credential(
+        auth_path,
+        auth_caches,
+        "读取 Codex 官方凭据任务异常退出",
+        crate::account_usage::read_official_auth,
+    )
+    .await
+    .ok()
 }
 
 // ---------------------------------------------------------------------------
 // SIWC（官方直连）凭据解析
 // ---------------------------------------------------------------------------
 
-/// SIWC 凭据文件的读取缓存；与 `OfficialAuthCaches` 相同的
-/// 指纹+短 TTL 策略，但缓存的是直连凭据视图。
-#[derive(Debug)]
-pub(crate) struct SiwcAuthCache {
-    cached: Option<std::result::Result<Arc<crate::official_accounts::SiwcFileCredential>, String>>,
-    fingerprint: Option<crate::account_usage::OfficialAuthFingerprint>,
-    expires_at: Option<Instant>,
-    last_used: u64,
-}
-
-/// 多账号 SIWC 文件缓存；键是文件路径，一个账号的凭据不会答到另一个账号。
-#[derive(Debug, Default)]
-pub(crate) struct SiwcAuthCaches {
-    caches: HashMap<String, SiwcAuthCache>,
-    usage_clock: u64,
-}
-
-impl SiwcAuthCaches {
-    fn for_path(&mut self, path: &Path) -> &mut SiwcAuthCache {
-        let key = path.to_string_lossy().into_owned();
-        if !self.caches.contains_key(&key)
-            && self.caches.len() >= 24
-            && let Some(oldest) = self
-                .caches
-                .iter()
-                .min_by_key(|(_, cache)| cache.last_used)
-                .map(|(key, _)| key.clone())
-        {
-            self.caches.remove(&oldest);
-        }
-        self.usage_clock = self.usage_clock.saturating_add(1);
-        let last_used = self.usage_clock;
-        let cache = self.caches.entry(key).or_insert_with(|| SiwcAuthCache {
-            cached: None,
-            fingerprint: None,
-            expires_at: None,
-            last_used,
-        });
-        cache.last_used = last_used;
-        cache
-    }
-}
-
-impl SiwcAuthCache {
-    fn get(
-        &mut self,
-        path: &Path,
-        now: Instant,
-    ) -> Option<std::result::Result<Arc<crate::official_accounts::SiwcFileCredential>, String>>
-    {
-        const REVALIDATE: Duration = Duration::from_secs(1);
-        if self.expires_at.is_some_and(|expires_at| now < expires_at) {
-            return self.cached.clone();
-        }
-        if self.cached.is_none() || self.fingerprint.is_none() {
-            return None;
-        }
-        if crate::account_usage::official_auth_fingerprint(path) != self.fingerprint {
-            return None;
-        }
-        self.expires_at = Some(now + REVALIDATE);
-        self.cached.clone()
-    }
-
-    fn store(
-        &mut self,
-        path: &Path,
-        result: Result<crate::official_accounts::SiwcFileCredential>,
-        now: Instant,
-    ) -> Result<Arc<crate::official_accounts::SiwcFileCredential>> {
-        const REVALIDATE: Duration = Duration::from_secs(1);
-        let result = result.map(Arc::new).map_err(|error| error.to_string());
-        self.fingerprint = crate::account_usage::official_auth_fingerprint(path);
-        self.cached = Some(result.clone());
-        self.expires_at = Some(now + REVALIDATE);
-        result.map_err(anyhow::Error::msg)
-    }
-}
+/// 多账号 SIWC 文件缓存；复用 `FileCredentialCaches` 的指纹+短 TTL 策略，
+/// 键是文件路径，一个账号的凭据不会答到另一个账号。
+pub(crate) type SiwcAuthCaches =
+    crate::account_usage::FileCredentialCaches<crate::official_accounts::SiwcFileCredential>;
 
 async fn read_cached_siwc_auth(
     path: &Path,
     caches: &Mutex<SiwcAuthCaches>,
 ) -> Result<Arc<crate::official_accounts::SiwcFileCredential>> {
-    let now = Instant::now();
-    if let Some(result) = caches
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .for_path(path)
-        .get(path, now)
-    {
-        return result.map_err(anyhow::Error::msg);
-    }
-    let read_path = path.to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        crate::official_accounts::read_siwc_credential_file(&read_path)
-            .and_then(|credential| credential.context("官方直连凭据文件缺失"))
-    })
+    crate::account_usage::read_cached_file_credential(
+        path,
+        caches,
+        "读取官方直连凭据任务异常退出",
+        |read_path| {
+            crate::official_accounts::read_siwc_credential_file(read_path)
+                .and_then(|credential| credential.context("官方直连凭据文件缺失"))
+        },
+    )
     .await
-    .context("读取官方直连凭据任务异常退出")?;
-    let now = Instant::now();
-    let mut caches = caches
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cache = caches.for_path(path);
-    if let Some(cached) = cache.get(path, now) {
-        return cached.map_err(anyhow::Error::msg);
-    }
-    cache.store(path, result, now)
 }
 
 /// 解析 SIWC 线路的上游凭据：读物化文件，临期时走串行刷新，只返回

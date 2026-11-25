@@ -1597,8 +1597,8 @@ mod tests {
                 .as_ref()
                 .is_some_and(|handle| !handle.task.is_finished())
         );
-        stop_wechat_claw_service(&state).await;
         drop(listener);
+        stop_wechat_claw_service(&state).await;
     }
 
     #[test]
