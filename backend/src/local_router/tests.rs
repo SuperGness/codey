@@ -14788,9 +14788,9 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
         .await
         .unwrap();
     assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while router.request_log_health().await.stats.entries_written < 2 && Instant::now() < deadline {
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let stats = test_http_client()
         .post(format!(

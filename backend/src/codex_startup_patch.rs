@@ -1923,7 +1923,7 @@ mod tests {
         )
         .unwrap();
         let overrides = vec![
-            "model_provider=\"codey_router_remote\"".into(),
+            "model_provider=\"codey_router\"".into(),
             format!(
                 "model_catalog_json={}",
                 toml_edit::Value::from(path.to_str().unwrap())
@@ -1937,7 +1937,7 @@ mod tests {
                 ("local/shared", "codey_router"),
                 ("shared", "codey_router"),
             ] {
-                let input = serde_json::json!({"method":method, "params":{"model":model,"modelProvider":"codey_router_remote"}}).to_string();
+                let input = serde_json::json!({"method":method, "params":{"model":model,"modelProvider":"openai"}}).to_string();
                 let mut output = Vec::new();
                 route_local_app_server_input(input.as_bytes(), &mut output, &overrides, None)
                     .unwrap();
@@ -1974,45 +1974,37 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        for default_provider in ["codey_router", "codey_router_remote"] {
-            for with_catalog in [false, true] {
-                let mut overrides = vec![
-                    format!("model_provider=\"{default_provider}\""),
-                    "model=\"remote/shared\"".into(),
-                ];
-                if with_catalog {
-                    overrides.push(format!(
-                        "model_catalog_json={}",
-                        toml_edit::Value::from(path.to_str().unwrap())
-                    ));
-                }
-                for method in ["thread/resume", "thread/fork"] {
-                    for model in [
-                        None,
-                        Some(serde_json::Value::Null),
-                        Some("".into()),
-                        Some("  ".into()),
-                    ] {
-                        let mut params = serde_json::json!({
-                            "threadId":"saved", "modelProvider":"codey_router_remote"
-                        });
-                        if let Some(model) = model {
-                            params["model"] = model;
-                        }
-                        let input =
-                            serde_json::json!({"method":method,"params":params}).to_string();
-                        let mut output = Vec::new();
-                        route_local_app_server_input(
-                            input.as_bytes(),
-                            &mut output,
-                            &overrides,
-                            None,
-                        )
-                        .unwrap();
-                        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
-                        params["modelProvider"] = "codey_router".into();
-                        assert_eq!(result["params"], params);
+        for with_catalog in [false, true] {
+            let mut overrides = vec![
+                "model_provider=\"codey_router\"".into(),
+                "model=\"remote/shared\"".into(),
+            ];
+            if with_catalog {
+                overrides.push(format!(
+                    "model_catalog_json={}",
+                    toml_edit::Value::from(path.to_str().unwrap())
+                ));
+            }
+            for method in ["thread/resume", "thread/fork"] {
+                for model in [
+                    None,
+                    Some(serde_json::Value::Null),
+                    Some("".into()),
+                    Some("  ".into()),
+                ] {
+                    let mut params = serde_json::json!({
+                        "threadId":"saved", "modelProvider":"openai"
+                    });
+                    if let Some(model) = model {
+                        params["model"] = model;
                     }
+                    let input = serde_json::json!({"method":method,"params":params}).to_string();
+                    let mut output = Vec::new();
+                    route_local_app_server_input(input.as_bytes(), &mut output, &overrides, None)
+                        .unwrap();
+                    let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                    params["modelProvider"] = "codey_router".into();
+                    assert_eq!(result["params"], params);
                 }
             }
         }

@@ -262,11 +262,7 @@ fn scan_asar_slice(
     Ok(matched)
 }
 
-fn scan_asar(
-    archive: &Path,
-    unpacked: &Path,
-    matcher: &PatchAnchorMatcher,
-) -> Result<AssetScan> {
+fn scan_asar(archive: &Path, unpacked: &Path, matcher: &PatchAnchorMatcher) -> Result<AssetScan> {
     let mut file = File::open(archive)
         .with_context(|| format!("无法打开 Codex 归档：{}", archive.display()))?;
     let archive_len = file.metadata().context("无法读取 Codex 归档大小")?.len();
@@ -612,7 +608,10 @@ mod tests {
             })
             .collect();
         owned.push(("webview/assets/async/1.aaaaaaaaaa.js".into(), large));
-        owned.push(("webview/assets/2.bbbbbbbbbb.js".into(), b"serviceTierAccess:".to_vec()));
+        owned.push((
+            "webview/assets/2.bbbbbbbbbb.js".into(),
+            b"serviceTierAccess:".to_vec(),
+        ));
         let files: Vec<(&str, &[u8])> = owned
             .iter()
             .map(|(name, body)| (name.as_str(), body.as_slice()))

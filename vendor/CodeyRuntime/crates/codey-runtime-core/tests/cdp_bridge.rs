@@ -1318,8 +1318,14 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
             let expression = reply["params"]["expression"]
                 .as_str()
                 .expect("expression should be string");
-            assert!(expression.contains("__codexSessionDeleteResolve"), "{expression}");
-            assert!(!expression.contains("slow"), "serial call should still be blocked");
+            assert!(
+                expression.contains("__codexSessionDeleteResolve"),
+                "{expression}"
+            );
+            assert!(
+                !expression.contains("slow"),
+                "serial call should still be blocked"
+            );
             fast_seen.push(expression.to_string());
         }
         for id in [

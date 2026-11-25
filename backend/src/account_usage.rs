@@ -1607,7 +1607,7 @@ mod tests {
             len: 11,
             modified: UNIX_EPOCH + Duration::from_secs(2),
         };
-        cache.observe_auth_fingerprint(Some(first.clone()));
+        cache.observe_auth_fingerprint(Some(first));
         cache.record_failure("expired token".to_string(), started_at);
         assert!(
             cache

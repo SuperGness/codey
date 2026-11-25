@@ -2700,13 +2700,11 @@ assert.equal(nextPage.window.attempts, 1);
                 Duration::from_millis(30),
                 Duration::from_millis(30),
             );
-            let failure = tokio::time::timeout(
-                Duration::from_secs(1),
-                verify_request_gate(&url, budget),
-            )
-            .await
-            .expect("the whole CDP call must finish before the injection deadline")
-            .unwrap_err();
+            let failure =
+                tokio::time::timeout(Duration::from_secs(1), verify_request_gate(&url, budget))
+                    .await
+                    .expect("the whole CDP call must finish before the injection deadline")
+                    .unwrap_err();
             server.abort();
             assert!(failure.reinstall);
             let detail = failure.error.to_string();
@@ -3290,9 +3288,12 @@ const run = async (patch, waitMs = 40, onPending = () => {}) => {
         });
 
         assert_eq!(
-            is_target_healthy_with_timeout(&format!("ws://{address}"), Some(Duration::from_millis(50)))
-                .await
-                .unwrap(),
+            is_target_healthy_with_timeout(
+                &format!("ws://{address}"),
+                Some(Duration::from_millis(50))
+            )
+            .await
+            .unwrap(),
             TargetHealth::Unresponsive,
         );
 

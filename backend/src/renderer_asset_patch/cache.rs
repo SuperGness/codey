@@ -131,7 +131,11 @@ impl PatchCache {
         loaded
     }
 
-    fn spawn_store(&self, url: &str, patch: Option<StoredPatch>) -> Option<tokio::task::JoinHandle<()>> {
+    fn spawn_store(
+        &self,
+        url: &str,
+        patch: Option<StoredPatch>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let name = self.entry_name(url)?;
         self.mark_unchanged(&name, patch.is_none());
         let cache = self.clone();
