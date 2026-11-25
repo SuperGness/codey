@@ -10,7 +10,7 @@ export type RouteCompactionStatus = {
 
 export function getRouteCompactionStatus(
   profile: Profile,
-  runtimeStatus?: RuntimeStatus | null,
+  runtimeStatus?: Pick<RuntimeStatus, "remoteCompaction"> | null,
   officialAccountAvailable?: boolean,
 ): RouteCompactionStatus {
   const isOfficial = profile.authMode === "officialAccount" || profile.officialAccount;

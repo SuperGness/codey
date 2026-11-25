@@ -6,20 +6,19 @@
  */
 @layer theme, base, components, utilities;
 
-@import "tailwindcss";
-@import "tw-animate-css";
+@import "tailwindcss" source(none);
+@import "./tailwind-animate.css";
 
 @import "@heroui/styles/base/base.css" layer(base);
 @import "@heroui/styles/base/scrollbar.css" layer(base);
 
-/* 共享基元（必须最先导入，供后续组件覆盖） */
+/* 共享基元（必须最先导入，供后续组件覆盖；Modal/Drawer/Toast 内部依赖 close-button） */
 @import "@heroui/styles/components/close-button.css" layer(components);
 @import "@heroui/styles/components/description.css" layer(components);
 @import "@heroui/styles/components/label.css" layer(components);
 
 /* 导航 */
 @import "@heroui/styles/components/disclosure.css" layer(components);
-@import "@heroui/styles/components/pagination.css" layer(components);
 @import "@heroui/styles/components/tabs.css" layer(components);
 @import "@heroui/styles/components/scroll-shadow.css" layer(components);
 
@@ -36,12 +35,8 @@
 
 /* 数据展示 */
 @import "@heroui/styles/components/chip.css" layer(components);
-@import "@heroui/styles/components/table.css" layer(components);
-@import "@heroui/styles/components/tag.css" layer(components);
-@import "@heroui/styles/components/tag-group.css" layer(components);
 
 /* 反馈 */
-@import "@heroui/styles/components/alert.css" layer(components);
 @import "@heroui/styles/components/spinner.css" layer(components);
 @import "@heroui/styles/components/toast.css" layer(components);
 
@@ -50,12 +45,9 @@
 @import "@heroui/styles/components/input.css" layer(components);
 @import "@heroui/styles/components/input-group.css" layer(components);
 @import "@heroui/styles/components/number-field.css" layer(components);
-@import "@heroui/styles/components/date-input-group.css" layer(components);
-@import "@heroui/styles/components/range-calendar.css" layer(components);
 @import "@heroui/styles/components/textarea.css" layer(components);
 
 /* 布局 */
-@import "@heroui/styles/components/card.css" layer(components);
 @import "@heroui/styles/components/header.css" layer(components);
 
 /* 弹层 */
@@ -67,7 +59,6 @@
 /* 选择器 */
 @import "@heroui/styles/components/combo-box.css" layer(components);
 @import "@heroui/styles/components/select.css" layer(components);
-@import "@heroui/styles/components/date-range-picker.css" layer(components);
 
 @import "@heroui/styles/themes/default" layer(theme);
 @import "@heroui/styles/utilities";
@@ -76,20 +67,21 @@
 /* 主题由宿主同步后显式设置，避免系统深色覆盖 Codex 手动选择的浅色。 */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* Tailwind 只需扫描实际导入的 HeroUI 组件源码。 */
+/* Tailwind 只需扫描控制台源码（排除独立请求日志入口与开发 Mock）及实际导入的 HeroUI 组件源码。 */
+@source ".";
+@source not "./RequestLogDialog.tsx";
+@source not "./RequestLogRouteDiagnostics.tsx";
+@source not "./request-logs-entry.tsx";
+@source not "./tailwind-request-logs.css";
+@source not "./dev";
 @source "../node_modules/@heroui/react/dist/utils";
 @source "../node_modules/@heroui/react/dist/hooks";
-@source "../node_modules/@heroui/react/dist/components/alert";
 @source "../node_modules/@heroui/react/dist/components/button";
-@source "../node_modules/@heroui/react/dist/components/card";
 @source "../node_modules/@heroui/react/dist/components/checkbox";
 @source "../node_modules/@heroui/react/dist/components/chip";
 @source "../node_modules/@heroui/react/dist/components/close-button";
 @source "../node_modules/@heroui/react/dist/components/combo-box";
 @source "../node_modules/@heroui/react/dist/components/description";
-@source "../node_modules/@heroui/react/dist/components/date-input-group";
-@source "../node_modules/@heroui/react/dist/components/date-range-picker";
-@source "../node_modules/@heroui/react/dist/components/range-calendar";
 @source "../node_modules/@heroui/react/dist/components/disclosure";
 @source "../node_modules/@heroui/react/dist/components/drawer";
 @source "../node_modules/@heroui/react/dist/components/header";
@@ -101,15 +93,11 @@
 @source "../node_modules/@heroui/react/dist/components/list-box-section";
 @source "../node_modules/@heroui/react/dist/components/modal";
 @source "../node_modules/@heroui/react/dist/components/number-field";
-@source "../node_modules/@heroui/react/dist/components/pagination";
 @source "../node_modules/@heroui/react/dist/components/popover";
 @source "../node_modules/@heroui/react/dist/components/select";
 @source "../node_modules/@heroui/react/dist/components/spinner";
 @source "../node_modules/@heroui/react/dist/components/switch";
-@source "../node_modules/@heroui/react/dist/components/table";
 @source "../node_modules/@heroui/react/dist/components/tabs";
-@source "../node_modules/@heroui/react/dist/components/tag";
-@source "../node_modules/@heroui/react/dist/components/tag-group";
 @source "../node_modules/@heroui/react/dist/components/scroll-shadow";
 @source "../node_modules/@heroui/react/dist/components/textarea";
 @source "../node_modules/@heroui/react/dist/components/toast";

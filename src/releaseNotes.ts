@@ -26,7 +26,7 @@ export function parseReleaseNotes(notes?: string): ReleaseNoteGroup[] {
   return groups.filter((item) => item.title || item.lines.length > 0);
 }
 
-export const RELEASE_NOTE_CATEGORIES = ["新增功能", "体验优化", "问题修复"] as const;
+const RELEASE_NOTE_CATEGORIES = ["新增功能", "体验优化", "问题修复"] as const;
 export type ReleaseNoteCategory = { title: string; lines: string[] };
 export type ReleaseNoteSection = { version: string; categories: ReleaseNoteCategory[] };
 

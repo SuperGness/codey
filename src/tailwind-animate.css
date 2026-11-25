@@ -1,0 +1,68 @@
+/*
+ * 精简版入场/退场动画工具类，仅覆盖 @heroui/styles（modal/popover/tooltip/select/combo-box）
+ * 实际 @apply 的动画类，替代全量 tw-animate-css 及其未使用的 @property / keyframes。
+ */
+@theme inline {
+  --animate-in: codey-enter var(--tw-duration, 150ms) var(--tw-ease, ease);
+  --animate-out: codey-exit var(--tw-duration, 100ms) var(--tw-ease, ease);
+
+  @keyframes codey-enter {
+    from {
+      opacity: var(--tw-enter-opacity, 1);
+      transform: translate3d(
+          var(--tw-enter-translate-x, 0),
+          var(--tw-enter-translate-y, 0),
+          0
+        )
+        scale3d(
+          var(--tw-enter-scale, 1),
+          var(--tw-enter-scale, 1),
+          var(--tw-enter-scale, 1)
+        );
+    }
+  }
+
+  @keyframes codey-exit {
+    to {
+      opacity: var(--tw-exit-opacity, 1);
+      transform: translate3d(
+          var(--tw-exit-translate-x, 0),
+          var(--tw-exit-translate-y, 0),
+          0
+        )
+        scale3d(
+          var(--tw-exit-scale, 1),
+          var(--tw-exit-scale, 1),
+          var(--tw-exit-scale, 1)
+        );
+    }
+  }
+}
+
+@utility fade-in-* {
+  --tw-enter-opacity: calc(--value(number) / 100);
+}
+@utility fade-out {
+  --tw-exit-opacity: 0;
+}
+@utility fade-out-* {
+  --tw-exit-opacity: calc(--value(number) / 100);
+}
+@utility zoom-in-* {
+  --tw-enter-scale: calc(--value(number) * 1%);
+}
+@utility zoom-out-* {
+  --tw-exit-scale: calc(--value(number) * 1%);
+}
+@utility slide-in-from-top-* {
+  --tw-enter-translate-y: calc(--value(integer) * var(--spacing) * -1);
+}
+@utility slide-in-from-bottom-* {
+  --tw-enter-translate-y: calc(--value(integer) * var(--spacing));
+}
+@utility slide-in-from-left-* {
+  --tw-enter-translate-x: calc(--value(integer) * var(--spacing) * -1);
+}
+@utility slide-in-from-right-* {
+  --tw-enter-translate-x: calc(--value(integer) * var(--spacing));
+}

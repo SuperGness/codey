@@ -103,7 +103,7 @@ export type SubagentPolicyCardProps = {
   onSubagentOptimizationChange: (checked: boolean) => void;
 };
 
-export function SubagentPolicyCardComponent({
+function SubagentPolicyCardComponent({
   config,
   isBusy,
   subagentModelOptions,

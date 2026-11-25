@@ -7,17 +7,16 @@
 .usage-date-filter { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px 18px; min-width: 0; }
 .usage-date-field { display: grid; gap: 7px; min-width: 0; }
 .usage-filter-label { color: var(--codey-muted, #6e6e73); font-size: 12px; }
-.usage-date-error { max-width: 278px; color: var(--codey-red, #b42318); font-size: 11px; line-height: 1.5; }
-.usage-date-picker { min-width: 0; }
-.usage-date-input-group { width: fit-content; max-width: 100%; height: auto; min-height: 0; padding: 0; border: 0; background: transparent; box-shadow: none; }
-.usage-analysis .usage-date-trigger { display: flex; align-items: center; justify-content: flex-start; gap: 9px; width: 278px; max-width: 100%; height: 36px; min-height: 36px; padding: 0 11px; border: 1px solid var(--codey-border-strong, #d9d9dd); border-radius: 7px; background: var(--codey-surface, #fff); color: var(--codey-text, #1d1d1f); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; box-shadow: none; }
-.usage-date-trigger > span { flex: 1; text-align: left; white-space: nowrap; }
-.usage-date-trigger > svg { flex: none; color: var(--codey-muted, #6e6e73); }
+.usage-date-error { max-width: 312px; color: var(--codey-red, #b42318); font-size: 11px; line-height: 1.5; }
+.usage-date-inputs { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 10px; border: 1px solid var(--codey-border-strong, #d9d9dd); border-radius: 7px; background: var(--codey-surface, #fff); color: var(--codey-text, #1d1d1f); transition: border-color 140ms ease; }
+.usage-date-inputs:focus-within { border-color: var(--codey-blue, #007aff); }
+.usage-date-inputs.is-invalid { border-color: var(--codey-red, #b42318); }
+.usage-date-icon { flex: none; color: var(--codey-muted, #6e6e73); }
+.usage-date-separator { flex: none; color: var(--codey-muted, #6e6e73); font-size: 12px; }
+.usage-date-input { min-width: 0; height: 34px; padding: 0 2px; border: 0; background: transparent; color: inherit; font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; outline: none; }
 .usage-date-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 36px; }
 .usage-analysis .usage-date-presets button { min-width: 0; height: 29px; min-height: 29px; padding: 0 9px; border-radius: 6px; color: var(--codey-muted, #6e6e73); font-size: 12px; font-weight: 500; white-space: nowrap; }
 .usage-analysis .usage-date-presets button[aria-pressed="true"] { background: var(--codey-blue-soft, #e8f1ff); color: var(--codey-blue, #007aff); }
-.usage-date-popover { max-width: calc(100vw - 40px); }
-.usage-calendar-hint { margin: 4px 10px 8px; color: var(--codey-muted, #6e6e73); font-size: 11px; line-height: 1.5; text-align: center; }
 .usage-analysis .usage-refresh { flex: none; min-height: 36px; height: 36px; padding: 0 11px; border: 1px solid var(--codey-border-strong, #d9d9dd); border-radius: 7px; background: var(--codey-surface, #fff); font-size: 12px; box-shadow: none; }
 .usage-segmented { display: flex; gap: 2px; min-width: 0; padding: 3px; border: 1px solid var(--codey-border, #e5e6ea); border-radius: 7px; background: var(--codey-surface-sunken, #f2f2f5); }
 .usage-analysis .usage-segmented button { min-width: 0; min-height: 26px; height: 26px; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; color: var(--codey-muted, #6e6e73); font-size: 12px; font-weight: 500; white-space: nowrap; box-shadow: none; }
@@ -167,7 +166,7 @@
 .usage-heatmap-weekdays { display: grid; grid-template-rows: repeat(7, 14px); gap: 5px; font-size: 11px; color: var(--codey-muted, #6e6e73); line-height: 14px; }
 .usage-heatmap-days { display: grid; grid-template-rows: repeat(7, 14px); grid-auto-flow: column; gap: 5px; }
 .usage-heatmap-day { position: relative; min-width: 0; }
-.usage-analysis .usage-heatmap-cell { display: flex; width: 14px; height: 14px; min-width: 14px; min-height: 14px; padding: 0; border: 1px solid color-mix(in srgb, var(--codey-text, #1d1d1f) 9%, transparent); border-radius: 3px; }
+.usage-analysis .usage-heatmap-cell { display: flex; align-items: center; justify-content: center; width: 14px; height: 14px; min-width: 14px; min-height: 14px; padding: 0; border: 1px solid color-mix(in srgb, var(--codey-text, #1d1d1f) 9%, transparent); border-radius: 3px; cursor: pointer; }
 .usage-analysis .usage-heatmap-cell:hover, .usage-analysis .usage-heatmap-cell:focus-visible, .usage-analysis .usage-heatmap-cell[aria-pressed="true"] { outline: 2px solid var(--codey-blue, #007aff); outline-offset: 2px; }
 .usage-heatmap-month { position: absolute; left: 0; white-space: nowrap; color: var(--codey-muted, #6e6e73); font-size: 11px; }
 .usage-heatmap-compact .usage-heatmap-days { grid-template-columns: repeat(auto-fit, minmax(36px, 1fr)); grid-template-rows: none; grid-auto-flow: row; gap: 12px 8px; }
@@ -198,7 +197,7 @@
   .usage-toolbar { align-items: flex-start; position: relative; gap: 12px; }
   .usage-date-filter { flex: 1; flex-direction: column; align-items: stretch; gap: 10px; }
   .usage-date-field { padding-right: 78px; }
-  .usage-analysis .usage-date-trigger { width: 100%; }
+  .usage-date-inputs { width: 100%; flex-wrap: wrap; }
   .usage-analysis .usage-refresh { position: absolute; right: 0; top: 25px; }
   .usage-date-presets { gap: 3px; }
   .usage-overview { grid-template-columns: minmax(0, 1fr); gap: 22px; padding-top: 22px; }

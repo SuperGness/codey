@@ -77,7 +77,7 @@ import { getRouteCompactionStatus } from "./remoteCompactionStatus";
 
 type ModelSectionProps = {
   config: Config;
-  runtimeStatus?: RuntimeStatus;
+  remoteCompaction?: RuntimeStatus["remoteCompaction"];
   currentProvider: ProviderStatus["provider"] | null;
   officialAccountAvailable: boolean;
   popupContainer: HTMLElement | null;
@@ -233,7 +233,7 @@ const ROUTE_TABS: { id: RouteTab; label: string; icon: typeof IconRoute }[] = [
 
 function ModelSectionComponent({
   config,
-  runtimeStatus,
+  remoteCompaction,
   currentProvider,
   officialAccountAvailable,
   popupContainer,
@@ -296,6 +296,10 @@ function ModelSectionComponent({
   const [routeImportApplied, setRouteImportApplied] = useState(false);
   const routeImportGeneration = useRef(0);
   const routeConfigReadOnly = !config.localRouterEnabled;
+  const compactionRuntimeStatus = useMemo(
+    () => ({ remoteCompaction }),
+    [remoteCompaction],
+  );
 
   const resetRouteImport = useCallback(() => {
     routeImportGeneration.current += 1;
@@ -933,7 +937,7 @@ function ModelSectionComponent({
               <OfficialAccountsPanel
                 officialAccountAvailable={officialAccountAvailable}
                 isBusy={isBusy}
-                active={active}
+                active={active && !routeTabHidden("accounts")}
                 maskSensitive={maskSensitive}
                 popupContainer={popupContainer}
                 onAccountsLoaded={setOfficialAccounts}
@@ -993,7 +997,7 @@ function ModelSectionComponent({
                 const group = modelGroupByProviderId.get(providerId);
                 const isOfficial = profile.authMode === "officialAccount";
                 const disabled = profile.enabled === false;
-                const compaction = getRouteCompactionStatus(profile, runtimeStatus, officialAccountAvailable);
+                const compaction = getRouteCompactionStatus(profile, compactionRuntimeStatus, officialAccountAvailable);
                 const acceptsRouteDrop = draggedProfile && draggedProfile.id !== profile.id
                   && (draggedProfile.enabled === false) === disabled;
                 const officialLoginLabel = officialLoginLabelFor(
@@ -2180,7 +2184,7 @@ export const ModelSection = memo(ModelSectionComponent, (prev, next) => {
   if (prev.active !== next.active) return false;
   return (
     prev.config === next.config &&
-    prev.runtimeStatus === next.runtimeStatus &&
+    prev.remoteCompaction === next.remoteCompaction &&
     prev.currentProvider === next.currentProvider &&
     prev.officialAccountAvailable === next.officialAccountAvailable &&
     prev.popupContainer === next.popupContainer &&

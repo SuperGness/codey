@@ -42,10 +42,13 @@ export function useRuntimeStatus({
   const runtimeStatusFlightRef = useRef<RuntimeStatusFlight | null>(null);
   const statusPollSchedulerRef = useRef<StatusPollScheduler | null>(null);
   const settingsOpenRefreshRequestedRef = useRef(false);
+  const pendingOpenRefreshRef = useRef(false);
   const mountedRef = useRef(true);
   const requestGenerationRef = useRef(0);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const statusRef = useRef(status);
+  statusRef.current = status;
 
   const markRestartInProgress = useCallback(() => {
     // Discard requests issued before the operation, including their queued refreshes.
@@ -58,6 +61,9 @@ export function useRuntimeStatus({
 
   const requestRuntimeStatus = useCallback(
     (shouldRefreshInjectionStatus: boolean): Promise<RuntimeStatus> => {
+      if (!mountedRef.current || !activeRef.current) {
+        return Promise.resolve(statusRef.current);
+      }
       const requestCanCommit = (requestGeneration: number) =>
         mountedRef.current &&
         activeRef.current &&
@@ -187,15 +193,22 @@ export function useRuntimeStatus({
   }, [statusPollScheduler]);
 
   useEffect(() => {
-    if (active) return;
-    // Ignore requests started for a panel that is no longer visible and make
-    // the next activation start a fresh single-flight request.
-    requestGenerationRef.current += 1;
-    runtimeStatusFlightRef.current = null;
-    statusPollScheduler.clear();
-  }, [active, statusPollScheduler]);
+    if (!active) {
+      // Ignore requests started for a panel that is no longer visible and make
+      // the next activation start a fresh single-flight request.
+      requestGenerationRef.current += 1;
+      runtimeStatusFlightRef.current = null;
+      statusPollScheduler.clear();
+      return;
+    }
+    if (pendingOpenRefreshRef.current) {
+      pendingOpenRefreshRef.current = false;
+      void refreshInjectionStatus().catch(reportStatusRefreshFailure);
+    }
+  }, [active, refreshInjectionStatus, statusPollScheduler]);
 
   const refreshStatusForLoad = useCallback(() => {
+    if (!activeRef.current) return Promise.resolve(statusRef.current);
     const shouldRefreshInjectionStatus =
       !embedded || !settingsOpenRefreshRequestedRef.current;
     return shouldRefreshInjectionStatus
@@ -223,6 +236,11 @@ export function useRuntimeStatus({
   useEffect(() => {
     const handleSettingsOpened = () => {
       settingsOpenRefreshRequestedRef.current = true;
+      if (!activeRef.current) {
+        pendingOpenRefreshRef.current = true;
+        return;
+      }
+      pendingOpenRefreshRef.current = false;
       void refreshInjectionStatus().catch(reportStatusRefreshFailure);
     };
     window.addEventListener(SETTINGS_OPENED_EVENT, handleSettingsOpened);

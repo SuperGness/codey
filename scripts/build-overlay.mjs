@@ -5,17 +5,39 @@ import { build, transformWithEsbuild } from "vite";
 import { loadInjectAppIconDataUrl, writeBuildOutputs } from "./build-output.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const result = await build({
+const configFile = join(root, "vite.overlay.config.ts");
+
+function collectOutputs(outputs, result) {
+  for (const chunk of [result].flat()) {
+    for (const asset of chunk.output) {
+      outputs.set(asset.fileName, asset.type === "chunk" ? asset.code : asset.source);
+    }
+  }
+}
+
+const outputs = new Map();
+const overlayResult = await build({
   root,
-  configFile: join(root, "vite.overlay.config.ts"),
+  configFile,
   build: { write: false },
 });
-const outputs = new Map(
-  [result].flat().flatMap(({ output }) => output.map((asset) => [
-    asset.fileName,
-    asset.type === "chunk" ? asset.code : asset.source,
-  ])),
-);
+collectOutputs(outputs, overlayResult);
+
+const requestLogsResult = await build({
+  root,
+  configFile,
+  build: {
+    write: false,
+    lib: {
+      entry: "src/request-logs-entry.tsx",
+      name: "CodeyRequestLogs",
+      formats: ["iife"],
+      fileName: () => "codey-request-logs.js",
+      cssFileName: "codey-request-logs",
+    },
+  },
+});
+collectOutputs(outputs, requestLogsResult);
 
 // public/ 下的注入脚本以源码形态维护，但会被逐字节嵌入 Codey 二进制并在
 // Codex 渲染进程内求值。这里统一压缩到 dist-overlay/inject/，cdp.rs 只嵌入

@@ -30,7 +30,6 @@ export const CODEY_API_COMMANDS = [
   "poll_official_account_siwc",
   "cancel_official_account_siwc",
   "remove_official_account_siwc",
-  "save_official_account_route_settings",
   "clear_route_request_logs",
   "restart_codey",
   "clear_diagnostic_storage",
@@ -48,7 +47,6 @@ export const CODEY_API_COMMANDS = [
   "plugin_marketplace_status",
   "repair_plugin_marketplace",
   "prepare_computer_use",
-  "repair_main_process_injection",
   "repair_codex_config",
   "list_codey_plugins",
   "get_codey_plugin_host_info",
@@ -92,7 +90,7 @@ declare global {
 }
 
 /** A request the Codey bridge answered with an explicit failure. */
-export class CodeyApiError extends Error {
+class CodeyApiError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CodeyApiError";

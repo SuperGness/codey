@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as internationalizedDate from "@internationalized/date";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 import {
   autoStubModule,
@@ -206,7 +205,6 @@ const panelGraph = createModuleGraph(new URL("../src/UsageAnalysisPanel.tsx", im
   autoStub: true,
   stubs: {
     react: panelReact,
-    "@internationalized/date": internationalizedDate,
     "./api": { invoke: async () => panelStats },
     "./appUtils": { withTimeout: (promise) => promise },
     "./components/ui": uiStubs,
@@ -217,38 +215,92 @@ const panelGraph = createModuleGraph(new URL("../src/UsageAnalysisPanel.tsx", im
 
 const dateFilterGraph = createModuleGraph(new URL("../src/UsageDateFilter.tsx", import.meta.url), {
   autoStub: true,
-  stubs: { "@internationalized/date": internationalizedDate, "./components/ui": uiStubs },
+  stubs: { "./components/ui": uiStubs },
 });
 
 test("快捷日期包含当天、支持跨月，全部历史不附带日期限制", () => {
   const { usagePresetDates, usageDatesQuery } = dateFilterGraph.exports;
-  const current = new internationalizedDate.CalendarDate(2024, 3, 2);
+  const current = "2024-03-02";
   for (const [preset, start] of [["today", "2024-03-02"], ["7d", "2024-02-25"], ["30d", "2024-02-02"], ["month", "2024-03-01"]]) {
     const range = usagePresetDates(preset, current);
-    assert.equal(range.start.toString(), start);
-    assert.equal(range.end.toString(), "2024-03-02");
+    assert.equal(range.start, start);
+    assert.equal(range.end, "2024-03-02");
   }
   assert.equal(usageDatesQuery(usagePresetDates("all", current)), "all");
 });
 
 test("日历查询包含结束日，按本地时区处理跨年和夏令时", () => {
   const { usageDatesQuery } = dateFilterGraph.exports;
-  const date = (year, month, day) => new internationalizedDate.CalendarDate(year, month, day);
-  assert.deepEqual(usageDatesQuery({ start: date(2024, 12, 31), end: date(2025, 1, 1) }, "Asia/Shanghai"), {
+  assert.deepEqual(usageDatesQuery({ start: "2024-12-31", end: "2025-01-01" }, "Asia/Shanghai"), {
     fromUnixMs: Date.parse("2024-12-30T16:00:00Z"), toUnixMs: Date.parse("2025-01-01T16:00:00Z"),
   });
-  for (const [day, hours] of [[date(2024, 3, 10), 23], [date(2024, 11, 3), 25]]) {
+  for (const [day, hours] of [["2024-03-10", 23], ["2024-11-03", 25]]) {
     const query = usageDatesQuery({ start: day, end: day }, "America/New_York");
     assert.equal(query.toUnixMs - query.fromUnixMs, hours * 60 * 60 * 1000);
   }
 });
 
 test("日历范围拒绝超过后端 366 天上限，全部历史仍可查询", () => {
-  const { usageDatesWithinLimit } = dateFilterGraph.exports;
-  const start = new internationalizedDate.CalendarDate(2024, 1, 1);
-  assert.equal(usageDatesWithinLimit({ start, end: start.add({ days: 364 }) }), true);
-  assert.equal(usageDatesWithinLimit({ start, end: start.add({ days: 366 }) }), false);
+  const { usageDatesWithinLimit, addIsoDays } = dateFilterGraph.exports;
+  const start = "2024-01-01";
+  assert.equal(usageDatesWithinLimit({ start, end: addIsoDays(start, 364) }), true);
+  assert.equal(usageDatesWithinLimit({ start, end: addIsoDays(start, 366) }), false);
   assert.equal(usageDatesWithinLimit(null), true);
+});
+
+test("原生日期范围控件支持开始/结束日选择、自动约束与超限提示", () => {
+  const changes = [];
+  dateFilterGraph.reset();
+  const tree = dateFilterGraph.exports.UsageDateFilter({
+    value: { start: "2024-03-01", end: "2024-03-07" },
+    onChange: (next) => changes.push(next),
+  });
+  const inputs = collectElements(tree, (element) => elementType(element) === "input" && elementProps(element).type === "date");
+  assert.equal(inputs.length, 2);
+  assert.equal(elementProps(inputs[0]).value, "2024-03-01");
+  assert.equal(elementProps(inputs[1]).value, "2024-03-07");
+
+  // 开始日晚于结束日时自动收窄结束日。
+  elementProps(inputs[0]).onChange({ currentTarget: { value: "2024-03-10" } });
+  assert.deepEqual(changes.at(-1), { start: "2024-03-10", end: "2024-03-10" });
+
+  // 超过 366 天上限时拦截回调并展示错误提示。
+  const countBefore = changes.length;
+  elementProps(inputs[0]).onChange({ currentTarget: { value: "2020-01-01" } });
+  assert.equal(changes.length, countBefore);
+  dateFilterGraph.restart();
+  const invalidTree = dateFilterGraph.exports.UsageDateFilter({
+    value: { start: "2024-03-01", end: "2024-03-07" },
+    onChange: (next) => changes.push(next),
+  });
+  assert.match(textContent(invalidTree), /单次最多选择 366 天/);
+});
+
+test("热力图使用原生按钮并支持悬停预览与点击保留", () => {
+  const heatmapGraph = createModuleGraph(new URL("../src/UsageHeatmap.tsx", import.meta.url), {
+    autoStub: true,
+    stubs: { "./components/ui": uiStubs },
+  });
+  const day = 86_400_000;
+  const stats = {
+    fromUnixMs: 0,
+    toUnixMs: 2 * day,
+    dailyTrend: [{ timestampUnixMs: 0, total: 2, totalTokensSum: 120, totalTokensKnownCount: 2 }],
+  };
+  const render = () => {
+    heatmapGraph.restart();
+    return heatmapGraph.exports.UsageHeatmap({ stats });
+  };
+  let tree = render();
+  const cells = (node) => collectElements(node, (element) => elementType(element) === "button" && /\busage-heatmap-cell\b/.test(elementProps(element).className ?? ""));
+  assert.equal(cells(tree).length, 2);
+  assert.equal(collectElements(tree, (element) => elementType(element) === uiStubs.Tooltip).length, 0);
+  elementProps(cells(tree)[0]).onPointerEnter({ pointerType: "mouse" });
+  tree = render();
+  assert.match(textContent(tree), /120 Token/);
+  elementProps(cells(tree)[0]).onClick();
+  tree = render();
+  assert.equal(elementProps(cells(tree)[0])["aria-pressed"], true);
 });
 
 test("用量趋势渲染把未上报的分桶画成虚线标记并标注用量未上报", async () => {

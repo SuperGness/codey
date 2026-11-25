@@ -353,16 +353,69 @@ export interface SelectProps {
   popoverClassName?: string;
   prefix?: React.ReactNode;
   renderOptionItem?: (option: SelectOption & { selected?: boolean }) => React.ReactNode;
-  searchPlaceholder?: string;
   value?: string | number;
 }
 function optionText(option: SelectOption) {
   return typeof option.label === "string" || typeof option.label === "number" ? String(option.label) : String(option.value);
 }
-export function Select({
-  optionList = [], onChange, onOpenChange, filter = false, popoverClassName, renderOptionItem, prefix, value, disabled, className, placeholder, searchPlaceholder = "搜索…", id, ...labels
-}: SelectProps) {
+function FilterableSelect({
+  className,
+  disabled,
+  id,
+  labels,
+  list,
+  onOpenChange,
+  onSelectionChange,
+  placeholder,
+  popoverClassName,
+  prefix,
+  selectedKey,
+}: {
+  className?: string;
+  disabled?: boolean;
+  id?: string;
+  labels: Pick<SelectProps, "aria-label" | "aria-labelledby" | "aria-required">;
+  list: React.ReactNode;
+  onOpenChange?: (open: boolean) => void;
+  onSelectionChange: (key: Key | null) => void;
+  placeholder?: string;
+  popoverClassName?: string;
+  prefix?: React.ReactNode;
+  selectedKey: Key | null;
+}) {
   const { contains } = useFilter({ sensitivity: "base" });
+  return (
+    <ComboBox
+      {...labels}
+      fullWidth
+      className={cn("min-w-0", className)}
+      defaultFilter={(textValue, inputValue) => contains(textValue, inputValue.trim())}
+      isDisabled={disabled}
+      selectedKey={selectedKey}
+      onSelectionChange={onSelectionChange}
+      onOpenChange={onOpenChange}
+      menuTrigger="focus"
+    >
+      <ComboBox.InputGroup>
+        {prefix ? <InputGroup.Prefix className="px-2">{prefix}</InputGroup.Prefix> : null}
+        <HeroInput
+          id={id}
+          placeholder={placeholder}
+          autoComplete="off"
+          spellCheck={false}
+          className="min-h-8 md:min-h-8"
+        />
+        <ComboBox.Trigger />
+      </ComboBox.InputGroup>
+      <ComboBox.Popover className={cn("w-(--trigger-width) min-w-44", popoverClassName)}>
+        {list}
+      </ComboBox.Popover>
+    </ComboBox>
+  );
+}
+export function Select({
+  optionList = [], onChange, onOpenChange, filter = false, popoverClassName, renderOptionItem, prefix, value, disabled, className, placeholder, id, ...labels
+}: SelectProps) {
   const selectedKey: Key | null = value != null && value !== "" ? String(value) : null;
   const handleSelectionChange = (key: Key | null) => {
     if (key == null) {
@@ -391,32 +444,19 @@ export function Select({
   );
   if (filter) {
     return (
-      <ComboBox
-        {...labels}
-        fullWidth
-        className={cn("min-w-0", className)}
-        defaultFilter={(textValue, inputValue) => contains(textValue, inputValue.trim())}
-        isDisabled={disabled}
-        selectedKey={selectedKey}
-        onSelectionChange={handleSelectionChange}
+      <FilterableSelect
+        className={className}
+        disabled={disabled}
+        id={id}
+        labels={labels}
+        list={list}
         onOpenChange={onOpenChange}
-        menuTrigger="focus"
-      >
-        <ComboBox.InputGroup>
-          {prefix ? <InputGroup.Prefix className="px-2">{prefix}</InputGroup.Prefix> : null}
-          <HeroInput
-            id={id}
-            placeholder={placeholder}
-            autoComplete="off"
-            spellCheck={false}
-            className="min-h-8 md:min-h-8"
-          />
-          <ComboBox.Trigger />
-        </ComboBox.InputGroup>
-        <ComboBox.Popover className={cn("w-(--trigger-width) min-w-44", popoverClassName)}>
-          {list}
-        </ComboBox.Popover>
-      </ComboBox>
+        onSelectionChange={handleSelectionChange}
+        placeholder={placeholder}
+        popoverClassName={popoverClassName}
+        prefix={prefix}
+        selectedKey={selectedKey}
+      />
     );
   }
   return (
@@ -526,8 +566,11 @@ export function DialogContent({ children, className, container, onEscapeKeyDown,
   useToastContainer(toastHostEl, dialog?.open ?? false);
   const id = React.useId();
   const getContainer = React.useCallback(() => container ?? null, [container]);
+  const labels = React.useMemo(
+    () => ({ titleId: `codey-dialog-title-${id}`, descriptionId: `codey-dialog-description-${id}` }),
+    [id],
+  );
   if (!dialog) throw new Error("DialogContent must be rendered inside Dialog");
-  const labels = { titleId: `codey-dialog-title-${id}`, descriptionId: `codey-dialog-description-${id}` };
   // Esc 与遮罩点击都经由 onOpenChange(false) 到达；调用方可通过 preventDefault 在忙碌时阻止关闭。
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) return;
@@ -543,7 +586,7 @@ export function DialogContent({ children, className, container, onEscapeKeyDown,
   const hasCustomWidth = Boolean(className && /\b(sm:)?(w-|max-w-)/.test(className));
   const modal = (
     <Modal.Backdrop isOpen={dialog.open} onOpenChange={handleOpenChange} isDismissable className="p-0">
-      <Modal.Container placement="center" scroll="outside" className="p-4 data-[entering=true]:zoom-in-95">
+      <Modal.Container placement="center" scroll="outside" className="codey-dialog-container p-4">
         <Modal.Dialog
           className={cn("w-full max-w-[calc(100vw-32px)] text-sm relative overflow-hidden", !hasCustomWidth && "sm:w-[480px]", className)}
           aria-labelledby={labels.titleId}
@@ -610,8 +653,11 @@ export function DrawerContent({
   useToastContainer(toastHostEl, drawer?.open ?? false);
   const id = React.useId();
   const getContainer = React.useCallback(() => container ?? null, [container]);
+  const labels = React.useMemo(
+    () => ({ titleId: `codey-drawer-title-${id}`, descriptionId: `codey-drawer-description-${id}` }),
+    [id],
+  );
   if (!drawer) throw new Error("DrawerContent must be rendered inside Drawer");
-  const labels = { titleId: `codey-drawer-title-${id}`, descriptionId: `codey-drawer-description-${id}` };
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) return;
     const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };

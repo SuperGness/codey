@@ -974,39 +974,6 @@ if (import.meta.env.DEV) {
         previewDeriveOfficialProfiles();
         return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true, config: previewConfig, modelState: previewModelState, restartRequired: false };
       }
-      if (command === "save_official_account_route_settings") {
-        const account = previewOfficialAccounts.find((item) => item.id === args.accountId);
-        if (!account) return { status: "failed", message: "找不到官方账号" };
-        const errors = validateOfficialRouteSettings({
-          routeName: String(args.routeName ?? ""),
-          routeShortName: String(args.routeShortName ?? ""),
-          baseUrl: String(args.baseUrl ?? ""),
-          upstreamProxy: String(args.upstreamProxy ?? ""),
-          maxConcurrency: String(args.maxConcurrency ?? account.maxConcurrency ?? 0),
-        }, previewConfig.profiles, previewOfficialAccounts, account.id);
-        const error = Object.values(errors).find(Boolean);
-        if (error) return { status: "failed", message: error };
-        const routeOverride = (value: unknown) => {
-          const text = String(value ?? "").trim();
-          return text ? text : undefined;
-        };
-        account.routeName = String(args.routeName ?? "").trim();
-        account.routeShortName = routeOverride(args.routeShortName);
-        account.upstreamProxy = routeOverride(args.upstreamProxy);
-        account.baseUrl = routeOverride(args.baseUrl);
-        if (args.maxConcurrency !== undefined) account.maxConcurrency = Number(args.maxConcurrency);
-        previewDeriveOfficialProfiles();
-        return {
-          status: "ok",
-          accounts: previewOfficialAccounts,
-          defaultAccountId: previewDefaultOfficialAccountId(),
-          officialAccountAvailable: true,
-          accountId: account.id,
-          config: previewConfig,
-          modelState: previewModelState,
-          restartRequired: false,
-        };
-      }
       if (command === "query_official_account_usage") {
         const fetchedAt = Math.floor(Date.now() / 1000);
         const accountId = String(args.accountId || "default");

@@ -5,7 +5,6 @@ import { Button } from "./components/ui";
 import { invoke } from "./api";
 import { withTimeout } from "./appUtils";
 import { formatUsageNumber, observeUsageRequest, usageCoverage, usageQuery, usageSlices, type LogAnalytics, type UsageLoadState } from "./usageAnalysis";
-import styles from "./styles.usage-analysis.css?inline";
 import { UsageHeatmap } from "./UsageHeatmap";
 import { UsageTimeline } from "./UsageTimeline";
 import { UsageDateFilter, usageDatesLabel, usageDatesQuery, usagePresetDates, type UsageDates } from "./UsageDateFilter";
@@ -41,7 +40,6 @@ export function UsageAnalysisPanel() {
   const percent = (tokens: number | null) => tokens != null && totalTokens != null && totalTokens > 0 ? tokens / totalTokens * 100 : null;
 
   return <section className="usage-analysis" aria-labelledby="usage-analysis-title">
-    <style>{styles}</style>
     <div className="usage-toolbar">
       <UsageDateFilter value={range} onChange={(value) => {
         if (usageDatesLabel(value) !== usageDatesLabel(range)) { setState({ loading: true, data: null, error: "" }); setRange(value); }

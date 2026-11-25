@@ -26,7 +26,6 @@ import {
 } from "@tabler/icons-react";
 
 import type { Config, OfficialAccount, Profile } from "./App.types";
-import requestLogStyles from "./styles.request-log.css?inline";
 import { invoke } from "./api";
 import { listOfficialAccounts } from "./officialAccountsRequests";
 import { loadRequestLogModels, type ModelPage } from "./requestLogModels";
@@ -197,6 +196,46 @@ const protocolOptions = [
 ];
 
 const pageSizeOptions = [20, 50, 100];
+const pageSizeSelectOptions = pageSizeOptions.map((size) => ({ label: `${size} 条 / 页`, value: size }));
+
+const timeRangeOptions = [
+  { label: "最近 24 小时", value: "24h" },
+  { label: "最近 7 天", value: "7d" },
+  { label: "最近 30 天", value: "30d" },
+  { label: "自定义时间", value: "custom" },
+];
+
+const searchModeOptions = [
+  { label: "关键词搜索", value: "contains" },
+  { label: "精确请求 ID", value: "requestId" },
+  { label: "精确会话 ID", value: "sessionId" },
+];
+
+const requestKindOptions = [
+  { label: "全部请求类型", value: "all" },
+  { label: "模型请求", value: "responses" },
+  { label: "上下文压缩", value: "responses_compact" },
+  { label: "新版上下文压缩", value: "responses_compact_v2" },
+  { label: "图像生成", value: "images_generations" },
+  { label: "模型列表", value: "models" },
+  { label: "拒绝的请求", value: "http_rejected" },
+];
+
+const baseGroupByOptions = [
+  { label: "按请求模型统计", value: "model" },
+  { label: "按供应商统计", value: "provider" },
+  { label: "按状态统计", value: "status" },
+  { label: "按协议统计", value: "protocol" },
+  { label: "按请求类型统计", value: "request_kind" },
+  { label: "按会话统计", value: "session" },
+];
+
+const officialGroupByOptions = [
+  baseGroupByOptions[0],
+  baseGroupByOptions[1],
+  { label: "按官方账号统计", value: "official_account" },
+  ...baseGroupByOptions.slice(2),
+];
 
 type ChipColor = "accent" | "default" | "success" | "warning" | "danger";
 
@@ -649,17 +688,52 @@ function CopyIdButton({
   );
 }
 
-function requestLogProviderLabel(item: RouteRequestLogItem, profiles: RequestLogCatalog["profiles"]) {
-  const profile = profiles.find((profile) =>
-    Boolean(item.provider) && (profile.sourceProviderId === item.provider || profile.id === item.provider)
-    && (!item.officialAccountId || profile.officialAccountId === item.officialAccountId),
-  ) ?? (item.officialAccountId
-    ? profiles.find((profile) => profile.officialAccountId === item.officialAccountId)
-    : undefined);
-  if (profile) {
+type RequestLogProviderIndex = {
+  byProvider: Map<string, string>;
+  byProviderAndAccount: Map<string, string>;
+  byAccount: Map<string, string>;
+};
+
+function buildRequestLogProviderIndex(profiles: RequestLogCatalog["profiles"]): RequestLogProviderIndex {
+  const byProvider = new Map<string, string>();
+  const byProviderAndAccount = new Map<string, string>();
+  const byAccount = new Map<string, string>();
+  for (const profile of profiles) {
     const label = formatRouteName(profile.name, profile.shortName || "");
-    if (label) return label;
+    const providerKeys = profile.sourceProviderId && profile.sourceProviderId !== profile.id
+      ? [profile.sourceProviderId, profile.id]
+      : [profile.sourceProviderId || profile.id];
+    for (const key of providerKeys) {
+      if (!key) continue;
+      if (!byProvider.has(key)) byProvider.set(key, label);
+      if (profile.officialAccountId) {
+        const pairKey = `${key}\0${profile.officialAccountId}`;
+        if (!byProviderAndAccount.has(pairKey)) byProviderAndAccount.set(pairKey, label);
+      }
+    }
+    if (profile.officialAccountId && !byAccount.has(profile.officialAccountId)) {
+      byAccount.set(profile.officialAccountId, label);
+    }
   }
+  return { byProvider, byProviderAndAccount, byAccount };
+}
+
+function requestLogProviderLabel(
+  item: RouteRequestLogItem,
+  profiles: RequestLogCatalog["profiles"],
+  index?: RequestLogProviderIndex,
+) {
+  const lookup = index ?? buildRequestLogProviderIndex(profiles);
+  let label: string | undefined;
+  if (item.provider && item.officialAccountId) {
+    label = lookup.byProviderAndAccount.get(`${item.provider}\0${item.officialAccountId}`);
+  } else if (item.provider) {
+    label = lookup.byProvider.get(item.provider);
+  }
+  if (label === undefined && item.officialAccountId) {
+    label = lookup.byAccount.get(item.officialAccountId);
+  }
+  if (label) return label;
   return item.providerName || item.provider || "—";
 }
 
@@ -1446,6 +1520,11 @@ export function RequestLogDialog({
   // React Aria 集合以 item.id 作为行 React key；RequestLogRow 是包装组件拿不到 id，
   // 这里显式包装一份带稳定 id 的 items，避免筛选/翻页时 index key 复用导致
   // "Cannot change the id of an item" 崩溃。
+  const providerIndex = useMemo(
+    () => buildRequestLogProviderIndex(catalog.profiles),
+    [catalog.profiles],
+  );
+  const groupByOptions = officialAccounts.length > 0 ? officialGroupByOptions : baseGroupByOptions;
   const streamItems = useMemo(
     () => (result?.items ?? []).map((item) => ({ id: `${item.timestampUnixMs}:${item.requestId}`, item })),
     [result?.items],
@@ -1478,7 +1557,6 @@ export function RequestLogDialog({
 
   return (
     <div className="request-log-workspace flex h-full min-h-0 flex-1 flex-col">
-      <style>{requestLogStyles}</style>
       <div className="request-log-page">
         <header className="request-log-header">
           <div className="request-log-heading">
@@ -1537,12 +1615,7 @@ export function RequestLogDialog({
               aria-label="请求日志时间范围"
               className="w-36 shrink-0"
               value={timeRange}
-              optionList={[
-                { label: "最近 24 小时", value: "24h" },
-                { label: "最近 7 天", value: "7d" },
-                { label: "最近 30 天", value: "30d" },
-                { label: "自定义时间", value: "custom" },
-              ]}
+              optionList={timeRangeOptions}
               onChange={(value) => {
                 setTimeRange(String(value));
                 resetPagination();
@@ -1699,17 +1772,7 @@ export function RequestLogDialog({
                   <Select
                     aria-label="统计分组"
                     className="w-44"
-                    optionList={[
-                      { label: "按请求模型统计", value: "model" },
-                      { label: "按供应商统计", value: "provider" },
-                      ...(officialAccounts.length > 0
-                        ? [{ label: "按官方账号统计", value: "official_account" }]
-                        : []),
-                      { label: "按状态统计", value: "status" },
-                      { label: "按协议统计", value: "protocol" },
-                      { label: "按请求类型统计", value: "request_kind" },
-                      { label: "按会话统计", value: "session" },
-                    ]}
+                    optionList={groupByOptions}
                     value={groupBy}
                     onChange={(value) => setGroupBy(String(value))}
                   />
@@ -1862,11 +1925,7 @@ export function RequestLogDialog({
                     aria-label="搜索方式"
                     className="w-36 shrink-0"
                     value={searchMode}
-                    optionList={[
-                      { label: "关键词搜索", value: "contains" },
-                      { label: "精确请求 ID", value: "requestId" },
-                      { label: "精确会话 ID", value: "sessionId" },
-                    ]}
+                    optionList={searchModeOptions}
                     onChange={(value) => {
                       setSearchMode(String(value));
                       resetPagination();
@@ -1972,15 +2031,7 @@ export function RequestLogDialog({
                 <Select
                   aria-label="按请求类型筛选请求日志"
                   className="w-36 shrink-0"
-                  optionList={[
-                    { label: "全部请求类型", value: "all" },
-                    { label: "模型请求", value: "responses" },
-                    { label: "上下文压缩", value: "responses_compact" },
-                    { label: "新版上下文压缩", value: "responses_compact_v2" },
-                    { label: "图像生成", value: "images_generations" },
-                    { label: "模型列表", value: "models" },
-                    { label: "拒绝的请求", value: "http_rejected" },
-                  ]}
+                  optionList={requestKindOptions}
                   value={requestKind}
                   onChange={(value) => {
                     setRequestKind(String(value));
@@ -2053,7 +2104,7 @@ export function RequestLogDialog({
                     {({ item }) => (
                       <RequestLogRow
                         item={item}
-                        providerLabel={requestLogProviderLabel(item, catalog.profiles)}
+                        providerLabel={requestLogProviderLabel(item, catalog.profiles, providerIndex)}
                         officialAccountLabel={officialAccountLabel}
                         modelLabels={modelLabels}
                         selected={
@@ -2083,7 +2134,7 @@ export function RequestLogDialog({
                       className="w-28 shrink-0"
                       disabled={loading}
                       value={pageSize}
-                      optionList={pageSizeOptions.map((size) => ({ label: `${size} 条 / 页`, value: size }))}
+                      optionList={pageSizeSelectOptions}
                       onChange={(value) => {
                         const newPageSize = Number(value);
                         if (!Number.isFinite(newPageSize) || newPageSize === pageSize) return;
@@ -2335,7 +2386,7 @@ export function RequestLogDialog({
                   <dl className="request-log-fields">
                     <div>
                       <dt>供应商</dt>
-                      <dd>{requestLogProviderLabel(selectedItem, catalog.profiles)}</dd>
+                      <dd>{requestLogProviderLabel(selectedItem, catalog.profiles, providerIndex)}</dd>
                     </div>
                     {selectedItem.officialAccountId ? (
                       <div>
