@@ -430,7 +430,7 @@ fn apply_isolated_runtime_router_config(
     if local_router.is_some() && user_owned_router_provider_occupies_id(&persistent) {
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
-            local_router::ROUTER_PROVIDER_ID
+            local_router::OWNED_ROUTER_PROVIDER_IDS.join("、")
         );
     }
     // Codex resolves this path from the app-server working directory, which is
@@ -1612,9 +1612,11 @@ pub(crate) fn prepare_runtime_router_disk_provider_at(
 }
 
 pub(crate) fn user_owned_router_provider_occupies_id(document: &DocumentMut) -> bool {
-    document_provider_item(document, local_router::ROUTER_PROVIDER_ID).is_some_and(|item| {
-        item.as_table_like()
-            .is_none_or(|provider| !codey_router_provider_table_is_codey_owned(provider))
+    local_router::OWNED_ROUTER_PROVIDER_IDS.iter().any(|id| {
+        document_provider_item(document, id).is_some_and(|item| {
+            item.as_table_like()
+                .is_none_or(|provider| !codey_router_provider_table_is_codey_owned(provider))
+        })
     })
 }
 
@@ -2416,6 +2418,7 @@ fn build_isolated_runtime_overrides(
     )?;
 
     // 原生压缩与网关摘要共用本地网关，上游凭据不进入 Codex 配置。
+    let router_overrides_start = overrides.len();
     for provider_id in local_router::ROUTER_PROVIDER_IDS
         .into_iter()
         .filter(|_| provider_id.is_some())
@@ -2459,6 +2462,20 @@ fn build_isolated_runtime_overrides(
             &Value::from(local_router::COMPACTION_CLIENT_STREAM_IDLE_TIMEOUT.as_millis() as i64),
         );
     }
+    // 已发布的会话仍可能绑定到旧的压缩 Provider。仅在本次路由运行中
+    // 为它配置同一个回环网关；新会话仍只选 codey_router。
+    let prefix = format!("model_providers.{}.", local_router::ROUTER_PROVIDER_ID);
+    let legacy_overrides: Vec<_> = overrides[router_overrides_start..]
+        .iter()
+        .filter_map(|entry| entry.strip_prefix(&prefix))
+        .map(|entry| {
+            format!(
+                "model_providers.{}.{entry}",
+                local_router::REMOTE_COMPACTION_PROVIDER_ID
+            )
+        })
+        .collect();
+    overrides.extend(legacy_overrides);
 
     if fastctx_namespace.is_some() {
         for (path, key) in [

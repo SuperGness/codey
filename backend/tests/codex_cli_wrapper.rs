@@ -132,6 +132,13 @@ async fn router_wrapper_rewrites_stdin_without_inspector_and_preserves_exec_exit
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
     let temp = tempfile::tempdir().unwrap();
+    rusqlite::Connection::open(temp.path().join("state_5.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE threads (id TEXT, model_provider TEXT);
+             INSERT INTO threads VALUES ('old-thread', 'codey_router_remote');",
+        )
+        .unwrap();
     let target = temp.path().join("fake-codex");
     std::fs::write(&target, "#!/bin/sh\necho $$ >&2\ncat\nexit 17\n").unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -168,7 +175,7 @@ async fn router_wrapper_rewrites_stdin_without_inspector_and_preserves_exec_exit
         );
         let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         if routed {
-            assert_eq!(actual["params"]["modelProvider"], "codey_router");
+            assert_eq!(actual["params"]["modelProvider"], "codey_router_remote");
             assert_eq!(actual["params"]["model"], message["params"]["model"]);
             assert_eq!(
                 actual["params"]["config"],

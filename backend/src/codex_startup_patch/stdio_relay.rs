@@ -313,8 +313,7 @@ pub(super) fn rewrite_prediction_resume_response(line: &[u8]) -> Option<Vec<u8>>
         return None;
     }
     let result = message.get_mut("result")?.as_object_mut()?;
-    let official = result.get("modelProvider")?.as_str()?
-        == crate::local_router::ROUTER_PROVIDER_ID
+    let official = crate::local_router::is_router_provider(result.get("modelProvider")?.as_str()?)
         && crate::model_id::parse_alias(result.get("model")?.as_str()?)
             .is_some_and(|alias| crate::config::is_official_profile_id(alias.provider_key));
     if !official {
@@ -468,7 +467,6 @@ pub(super) fn forward_app_server_input(
                             resolved_misc_model.as_deref(),
                         );
                         if local_router_enabled {
-                            let method = method_name.to_owned();
                             if message.get("params").is_none_or(serde_json::Value::is_null) {
                                 message["params"] = serde_json::json!({});
                             }
@@ -476,75 +474,6 @@ pub(super) fn forward_app_server_input(
                                 .get_mut("params")
                                 .and_then(serde_json::Value::as_object_mut)
                             {
-                                if method == "thread/resume"
-                                    && params
-                                        .get("model")
-                                        .and_then(serde_json::Value::as_str)
-                                        .is_some_and(|model| !model.trim().is_empty())
-                                    && let Some(thread_id) =
-                                        params.get("threadId").and_then(serde_json::Value::as_str)
-                                {
-                                    live_threads.insert(thread_id.to_owned());
-                                }
-                                if method == "thread/resume"
-                                    && params.get("model").is_none_or(|model| {
-                                        model.is_null()
-                                            || model
-                                                .as_str()
-                                                .is_some_and(|model| model.trim().is_empty())
-                                    })
-                                    && let Some(home) = codex_home
-                                    && let Some(thread_id) =
-                                        params.get("threadId").and_then(serde_json::Value::as_str)
-                                    && !live_threads.contains(thread_id)
-                                {
-                                    match restored_resume_settings(
-                                        home,
-                                        thread_id,
-                                        runtime_overrides,
-                                    ) {
-                                        Ok(Some((model, effort))) => {
-                                            params.insert("model".into(), model.into());
-                                            if let Some(effort) = effort {
-                                                if effort.is_null() {
-                                                    if let Some(config) = params
-                                                        .get_mut("config")
-                                                        .and_then(serde_json::Value::as_object_mut)
-                                                    {
-                                                        config.remove("model_reasoning_effort");
-                                                    }
-                                                } else if params
-                                                    .get("config")
-                                                    .is_none_or(serde_json::Value::is_null)
-                                                {
-                                                    params.insert(
-                                                        "config".into(),
-                                                        serde_json::json!({"model_reasoning_effort":effort}),
-                                                    );
-                                                } else if let Some(config) = params
-                                                    .get_mut("config")
-                                                    .and_then(serde_json::Value::as_object_mut)
-                                                {
-                                                    config.insert(
-                                                        "model_reasoning_effort".into(),
-                                                        effort,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Ok(None) => {}
-                                        // 单向转发器无法发送 RPC 错误响应；保留请求和后续消息，错误仅写 stderr。
-                                        Err(error) => {
-                                            eprintln!("Codey 恢复会话模型失败：{error:#}")
-                                        }
-                                    }
-                                }
-                                let provider = super::router_provider_for_params(
-                                    &method,
-                                    params,
-                                    runtime_overrides,
-                                );
-                                params.insert("modelProvider".into(), provider.into());
                                 params.remove("model_provider");
                                 if let Some(config) = params
                                     .get_mut("config")
@@ -556,6 +485,19 @@ pub(super) fn forward_app_server_input(
                                             && key != "model_providers"
                                             && !key.starts_with("model_providers.")
                                     });
+                                }
+                                if method_name == "thread/resume" {
+                                    rewrite_resume_params(
+                                        params,
+                                        runtime_overrides,
+                                        codex_home,
+                                        &mut live_threads,
+                                    );
+                                } else {
+                                    params.insert(
+                                        "modelProvider".into(),
+                                        crate::local_router::ROUTER_PROVIDER_ID.into(),
+                                    );
                                 }
                                 changed = true;
                             }
@@ -651,23 +593,124 @@ pub(crate) fn app_server_input_relay_required(
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
-pub(super) fn restored_resume_settings(
-    home: &Path,
-    thread_id: &str,
+fn rewrite_resume_params(
+    params: &mut serde_json::Map<String, serde_json::Value>,
     overrides: &[String],
-) -> Result<Option<(String, Option<serde_json::Value>)>> {
-    let saved = crate::session_model::read(home, thread_id)?;
-    let model = resolve_resume_model(&saved, overrides)?;
-    Ok(model.map(|model| (model, saved.get("reasoningEffort").cloned())))
+    home: Option<&Path>,
+    live_threads: &mut HashSet<String>,
+) {
+    use serde_json::Value;
+
+    params.remove("modelProvider");
+    let thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    // 使用 path 或 history 恢复时，threadId 不一定指向实际载入的会话。
+    let by_id = !thread_id.is_empty()
+        && ["path", "history"]
+            .iter()
+            .all(|key| params.get(*key).is_none_or(Value::is_null));
+    let session = home.filter(|_| by_id).and_then(|home| {
+        crate::session_model::SessionModelReader::open(home, &thread_id)
+            .map_err(|error| eprintln!("Codey 读取会话索引失败：{error:#}"))
+            .ok()
+    });
+    let provider = session.as_ref().and_then(|session| session.provider());
+    let routed = provider.is_some_and(crate::local_router::is_router_provider);
+    let launcher_model = (!routed)
+        .then(|| super::runtime_override_string(overrides, "model"))
+        .flatten()
+        .filter(|model| crate::model_id::parse_alias(model).is_some());
+    let is_launcher_model = |value: &Value| {
+        value.as_str().is_some_and(|model| {
+            launcher_model
+                .as_deref()
+                .is_some_and(|default| crate::model_id::equal(default, model))
+        })
+    };
+    if params.get("model").is_some_and(|model| {
+        !model.is_null()
+            && (provider.is_none()
+                || is_launcher_model(model)
+                || model.as_str().is_some_and(|model| model.trim().is_empty()))
+    }) {
+        params.remove("model");
+    }
+    if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut)
+        && (provider.is_none() || config.get("model").is_some_and(is_launcher_model))
+    {
+        config.remove("model");
+    }
+
+    let config = params.get("config").and_then(Value::as_object);
+    let explicit_model = params.get("model").is_some_and(|value| !value.is_null())
+        || config.is_some_and(|config| config.contains_key("model"));
+    let explicit_effort =
+        config.is_some_and(|config| config.contains_key("model_reasoning_effort"));
+    let cold = !live_threads.contains(&thread_id);
+    let restored = match (&session, provider) {
+        (Some(session), Some(provider))
+            if !explicit_model && cold && (routed || explicit_effort) =>
+        {
+            read_resume_settings(session, provider, overrides)
+                .map_err(|error| eprintln!("Codey 恢复会话模型失败：{error:#}"))
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+    let has_model_override = explicit_model || restored.is_some();
+    if let Some((model, effort)) = restored {
+        params.insert("model".into(), model.into());
+        if let Some(effort) = effort {
+            if effort.is_null() {
+                if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut) {
+                    config.remove("model_reasoning_effort");
+                }
+            } else if params.get("config").is_none_or(Value::is_null) {
+                params.insert(
+                    "config".into(),
+                    serde_json::json!({"model_reasoning_effort": effort}),
+                );
+            } else if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut) {
+                config.insert("model_reasoning_effort".into(), effort);
+            }
+        }
+    }
+    // 旧版 Codex 在指定模型或推理强度时会跳过历史设置，必须同时提供原提供方。
+    // 无法确认模型时让 Codex 自行恢复，避免推理强度覆盖连带切换模型和提供方。
+    if let Some(provider) = provider
+        && has_model_override
+    {
+        params.insert("modelProvider".into(), provider.into());
+        if explicit_model {
+            live_threads.insert(thread_id);
+        }
+    } else if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut) {
+        config.remove("model_reasoning_effort");
+    }
 }
 
-#[cfg(test)]
-pub(super) fn restored_resume_model(
-    home: &Path,
-    thread_id: &str,
+#[cfg(any(windows, target_os = "macos", test))]
+fn read_resume_settings(
+    session: &crate::session_model::SessionModelReader<'_>,
+    provider: &str,
     overrides: &[String],
-) -> Result<Option<String>> {
-    Ok(restored_resume_settings(home, thread_id, overrides)?.map(|(model, _)| model))
+) -> Result<Option<(String, Option<serde_json::Value>)>> {
+    let saved = session.read_model()?;
+    if crate::local_router::is_router_provider(provider) {
+        let model = resolve_resume_model(&saved, overrides)?;
+        return Ok(model.map(|model| (model, saved.get("reasoningEffort").cloned())));
+    }
+    // 原生对话只在请求明确指定推理强度时补齐同一提供方的历史模型。
+    if saved["modelProvider"].as_str() != Some(provider) {
+        return Ok(None);
+    }
+    Ok(saved["model"]
+        .as_str()
+        .map(|model| (model.to_owned(), None)))
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -725,7 +768,10 @@ fn cached_catalog_slugs(catalog_path: &str) -> Result<Vec<String>> {
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
-fn resolve_resume_model(saved: &serde_json::Value, overrides: &[String]) -> Result<Option<String>> {
+pub(super) fn resolve_resume_model(
+    saved: &serde_json::Value,
+    overrides: &[String],
+) -> Result<Option<String>> {
     let Some(model) = saved.get("model").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };

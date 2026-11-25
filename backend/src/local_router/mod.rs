@@ -52,11 +52,16 @@ use crate::route_request_log::{
 use crate::system_proxy_client::SystemProxyClient;
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
-/// 启动时实际写入 Codex 配置的 Provider。压缩能力统一声明，由网关按线路分流。
+/// 旧版远程压缩 Provider。恢复绑定到它的历史会话时使用同一网关，不作为新会话默认值。
+pub(crate) const REMOTE_COMPACTION_PROVIDER_ID: &str = "codey_router_remote";
+/// 写入托管配置并用于新会话的 Provider。压缩能力由网关按线路分流。
 pub(crate) const ROUTER_PROVIDER_IDS: [&str; 1] = [ROUTER_PROVIDER_ID];
+/// Codey 曾使用过的 Provider ID，只用于识别历史会话、运行时兼容和冲突检查。
+pub(crate) const OWNED_ROUTER_PROVIDER_IDS: [&str; 2] =
+    [ROUTER_PROVIDER_ID, REMOTE_COMPACTION_PROVIDER_ID];
 
 pub(crate) fn is_router_provider(id: &str) -> bool {
-    id == ROUTER_PROVIDER_ID
+    OWNED_ROUTER_PROVIDER_IDS.contains(&id)
 }
 pub(crate) const ROUTER_AUTH_HEADER: &str = "x-codey-router-token";
 const TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";

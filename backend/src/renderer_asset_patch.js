@@ -578,9 +578,8 @@
         "app server request route preflight",
       );
       // AppServerRequestClient runs the preflight before createRequest assigns
-      // an id. Register the concrete request afterwards so a successful legacy
-      // OpenAI resume is remembered as a codey_router migration when its reply
-      // still exposes the rollout's persisted `openai` provider.
+      // an id. Register the concrete request afterwards so the reply can
+      // confirm the thread's actual runtime provider and selected route.
       patched = replaceUniqueRendererGate(
         patched,
         /(let\{request:([$A-Z_a-z][$\w]*),promise:[$A-Z_a-z][$\w]*\}=this\.createRequest\([^;]{1,256}\);)/g,

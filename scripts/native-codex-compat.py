@@ -392,8 +392,8 @@ def run_scenario(binary, directory, name, timeout):
               "target_context_window": catalog["models"][1]["context_window"]}
     client = None
 
-    def start_client():
-        return Client([binary, "app-server", "--stdio"], work, env, timeout)
+    def start_client(*overrides):
+        return Client([binary, "app-server", "--stdio", *overrides], work, env, timeout)
 
     def stop_client():
         nonlocal client
@@ -403,10 +403,16 @@ def run_scenario(binary, directory, name, timeout):
 
     def resume(thread_id):
         nonlocal client
-        client = start_client()
+        client = start_client("-c", 'model_provider="fixture-default"')
         client.initialize()
-        client.rpc("thread/resume", {"threadId": thread_id, "model": NEW, "modelProvider": "fixture",
-                                     "cwd": str(work), "approvalPolicy": "never", "sandbox": "read-only"})
+        resumed = client.rpc("thread/resume", {
+            "threadId": thread_id, "model": NEW, "modelProvider": "fixture",
+            "config": {"model_reasoning_effort": "low"},
+            "cwd": str(work), "approvalPolicy": "never", "sandbox": "read-only",
+        })
+        check(resumed["modelProvider"] == "fixture", "resume changed the saved provider")
+        check(resumed["model"] == NEW, "resume lost the requested model")
+        check(resumed["reasoningEffort"] == "low", "resume lost the requested reasoning effort")
 
     expected = [(old_model, 200, False)]
     mock = MockResponses(input_tokens=result["synthetic_input_tokens"],
@@ -422,6 +428,8 @@ def run_scenario(binary, directory, name, timeout):
             f'base_url = "{mock.url}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n'
             'supports_websockets = false\nstream_max_retries = 0\nrequest_max_retries = 0\n'
             'stream_idle_timeout_ms = 5000\n'
+            '[model_providers.fixture-default]\nname = "fixture-default"\n'
+            f'base_url = "{mock.url}/wrong-provider/v1"\nwire_api = "responses"\n'
             '[analytics]\nenabled = false\n[feedback]\nenabled = false\n', encoding="utf-8")
         client = start_client()
         client.initialize()

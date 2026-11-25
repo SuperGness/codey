@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { flushTimers } from "./helpers/flush.mjs";
+import { flushMicrotasks, flushTimers } from "./helpers/flush.mjs";
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const source = readFileSync(
@@ -492,17 +492,21 @@ test("does not keep scheduling polling timers while the page is hidden", async (
   }
 });
 
-test("restores a composer promptly when its hidden attribute is removed", async () => {
+test("restores a composer promptly when its hidden attribute is removed", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
   try {
-    await flushTimers(30);
+    t.mock.timers.tick(30);
+    await flushMicrotasks();
     env.scope.setAttribute("hidden", "");
     env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
-    await flushTimers(160);
+    t.mock.timers.tick(160);
     assert.equal(env.bar().hidden, true);
     env.scope.removeAttribute("hidden");
     env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
-    await flushTimers(160);
+    t.mock.timers.tick(120);
+    t.mock.timers.tick(40);
+    await flushMicrotasks();
     assert.equal(env.bar().hidden, false);
     assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   } finally {
@@ -546,7 +550,8 @@ test("ignores streaming child churn and visibility flips inside conversation tur
 });
 
 for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-sidebar-thread-active"]) {
-  test(`refreshes fallback session context on ${attribute} changes`, async () => {
+  test(`refreshes fallback session context on ${attribute} changes`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const env = createEnvironment({ anchor: false, statsBySession: {
       "conversation-1": STATS, "conversation-2": { ...STATS, totalTokens: 42 },
     } });
@@ -557,7 +562,8 @@ for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-s
         marker.setAttribute(attribute, "true");
       } else marker.setAttribute(attribute, "conversation-1");
       env.scope.appendChild(marker);
-      await flushTimers(30);
+      t.mock.timers.tick(30);
+      await flushMicrotasks();
       assert.equal(env.snapshot().sessionId, "conversation-1");
       if (attribute === "data-app-action-sidebar-thread-active") {
         marker.setAttribute(attribute, "false");
@@ -567,7 +573,10 @@ for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-s
         env.scope.appendChild(active);
       } else marker.setAttribute(attribute, "conversation-2");
       env.emitMutation([{ type: "attributes", target: marker, attributeName: attribute }]);
-      await flushTimers(160);
+      // Let the rescan finish and the immediate stats poll settle.
+      t.mock.timers.tick(120);
+      t.mock.timers.tick(40);
+      await flushMicrotasks();
       assert.equal(env.snapshot().sessionId, "conversation-2");
       assert.equal(env.snapshot().stats.totalTokens, 42);
     } finally {

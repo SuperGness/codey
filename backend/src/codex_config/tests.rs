@@ -370,7 +370,7 @@ fn runtime_disk_provider_replaces_chatgpt_resume_shim() {
 
 #[test]
 fn runtime_disk_provider_leaves_a_user_owned_codey_router_untouched() {
-    for id in local_router::ROUTER_PROVIDER_IDS {
+    for id in local_router::OWNED_ROUTER_PROVIDER_IDS {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("codex-home");
         fs::create_dir_all(&home).unwrap();
@@ -3313,6 +3313,18 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
     assert!(rendered.contains("model_providers.codey_router.name=\"Codey Local Router\""));
     assert!(rendered.contains("model_providers.codey_router.requires_openai_auth=true"));
     assert!(rendered.contains("model_providers.codey_router.supports_websockets=true"));
+    let router_fields: Vec<_> = applied
+        .runtime_config_overrides
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("model_providers.codey_router."))
+        .collect();
+    let legacy_fields: Vec<_> = applied
+        .runtime_config_overrides
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("model_providers.codey_router_remote."))
+        .collect();
+    assert_eq!(legacy_fields, router_fields);
+    assert!(!rendered.contains("model_provider=\"codey_router_remote\""));
     assert!(rendered.contains("x-codey-router-token"));
     assert!(!rendered.contains("model_providers.codey_router.experimental_bearer_token="));
     assert!(!rendered.contains("openai_base_url="));
@@ -3361,48 +3373,55 @@ fn builtin_catalog_roles_keep_the_selected_routes_compaction_mode() {
 
 #[test]
 fn local_router_refuses_a_persistent_provider_id_collision() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    let marker = temp.path().join("codey-state/codex-lease.json");
-    let backup_root = temp.path().join("codey-state/codex-backups");
-    fs::create_dir_all(&home).unwrap();
-    let original_config = br#"[model_providers.codey_router]
+    for id in local_router::OWNED_ROUTER_PROVIDER_IDS {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let marker = temp.path().join("codey-state/codex-lease.json");
+        let backup_root = temp.path().join("codey-state/codex-backups");
+        fs::create_dir_all(&home).unwrap();
+        let original_config = format!(
+            r#"[model_providers.{id}]
 base_url = "https://user-owned.example/v1"
 wire_api = "responses"
-"#;
-    fs::write(home.join("config.toml"), original_config).unwrap();
-    let endpoint = crate::local_router::RuntimeRouterEndpoint {
-        base_url: "http://127.0.0.1:43127/v1".into(),
-        token: "launch-only-router-token".into(),
-        supports_websockets: false,
-        supports_remote_compaction: false,
-        requires_openai_auth: false,
-    };
+"#
+        );
+        fs::write(home.join("config.toml"), &original_config).unwrap();
+        let endpoint = crate::local_router::RuntimeRouterEndpoint {
+            base_url: "http://127.0.0.1:43127/v1".into(),
+            token: "launch-only-router-token".into(),
+            supports_websockets: false,
+            supports_remote_compaction: false,
+            requires_openai_auth: false,
+        };
 
-    let error = apply_isolated_runtime_router_config(
-        &home,
-        RouterApplyOptions {
-            remote_compaction_models: None,
-            model_contexts: None,
-            required_catalog_models: &Default::default(),
-            stream_max_retries: 5,
-            local_router: Some(&endpoint),
-            use_official_catalog: true,
-            default_model: Some("relay/provider-model"),
-            fastctx_command: None,
-            subagent_optimization: false,
-            subagent_model: DEFAULT_SUBAGENT_MODEL,
-            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
-            subagent_roles: None,
-            scope_guard: false,
-            marker: &marker,
-            backup_root: &backup_root,
-        },
-    )
-    .unwrap_err();
+        let error = apply_isolated_runtime_router_config(
+            &home,
+            RouterApplyOptions {
+                remote_compaction_models: None,
+                model_contexts: None,
+                required_catalog_models: &Default::default(),
+                stream_max_retries: 5,
+                local_router: Some(&endpoint),
+                use_official_catalog: true,
+                default_model: Some("relay/provider-model"),
+                fastctx_command: None,
+                subagent_optimization: false,
+                subagent_model: DEFAULT_SUBAGENT_MODEL,
+                subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+                subagent_roles: None,
+                scope_guard: false,
+                marker: &marker,
+                backup_root: &backup_root,
+            },
+        )
+        .unwrap_err();
 
-    assert!(format!("{error:#}").contains("已占用 Codey 内部 Provider ID"));
-    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original_config);
+        assert!(format!("{error:#}").contains("已占用 Codey 内部 Provider ID"));
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            original_config
+        );
+    }
 }
 
 #[test]
