@@ -271,7 +271,10 @@ fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
         for entry in listing {
             count += 1;
             if count > 20000 {
-                push_unique_warning(warnings, "Skill 发现达到条目限制，部分目录未展示".to_owned());
+                push_unique_warning(
+                    warnings,
+                    "Skill 发现达到条目限制，部分目录未展示".to_owned(),
+                );
                 found.sort();
                 return found;
             }
