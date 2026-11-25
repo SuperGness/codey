@@ -245,7 +245,7 @@ pub(crate) fn renderer_model_catalog_value_at(
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
-        let provider_id = codex_provider::current_provider(codex_home())
+        let provider_id = codex_provider::current_provider(home)
             .map(|provider| provider.id)
             .unwrap_or_default();
         catalog["native_model_provider"] = json!(provider_id.clone());

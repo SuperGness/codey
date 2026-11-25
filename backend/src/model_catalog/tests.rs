@@ -81,24 +81,44 @@ fn official_cache() -> Value {
             {"slug": "codex-auto-review", "visibility": "hide", "priority": 43}
         ]
     });
-    let bundled = codey_runtime_core::model_suffix::bundled_model_catalog().unwrap();
-    for (slug, _) in OFFICIAL_MODELS {
-        let exists = cache["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|model| model["slug"] == slug);
-        if exists {
-            continue;
+    for (slug, display_name, priority, default_effort, has_ultra) in [
+        ("gpt-6-astra", "GPT-6-Astra", 0, "medium", true),
+        ("gpt-5.6-terra", "GPT-5.6-Terra", 2, "medium", true),
+        ("gpt-5.6-luna", "GPT-5.6-Luna", 3, "medium", false),
+    ] {
+        let mut levels = vec![
+            json!({"effort": "low"}),
+            json!({"effort": "medium"}),
+            json!({"effort": "high"}),
+            json!({"effort": "xhigh"}),
+            json!({"effort": "max"}),
+        ];
+        if has_ultra {
+            levels.push(json!({"effort": "ultra"}));
         }
-        let model = bundled["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["slug"] == slug)
-            .unwrap()
-            .clone();
-        cache["models"].as_array_mut().unwrap().push(model);
+        let mut entry = json!({
+            "slug": slug,
+            "display_name": display_name,
+            "description": display_name,
+            "visibility": "list",
+            "priority": priority,
+            "default_reasoning_level": default_effort,
+            "supported_reasoning_levels": levels,
+            "service_tiers": [{"id": "priority"}],
+            "additional_speed_tiers": ["fast"]
+        });
+        if slug == "gpt-6-astra" {
+            entry["use_responses_lite"] = json!(true);
+            entry["tool_mode"] = json!("code_mode_only");
+            entry["multi_agent_reasoning_effort"] = json!("xhigh");
+            entry["node_repl_auto_review_required"] = json!(true);
+            entry["experimental_supported_tools"] = json!(["send_user_message_async", "clock"]);
+            entry["service_tiers"] = json!([{
+                "id": "priority",
+                "description": "2x speed, increased usage"
+            }]);
+        }
+        cache["models"].as_array_mut().unwrap().push(entry);
     }
     for model in cache["models"].as_array_mut().unwrap() {
         let slug = model["slug"].as_str().unwrap_or("test-model").to_string();
@@ -124,12 +144,12 @@ fn official_cache() -> Value {
     cache
 }
 
+fn write_snapshot_cache(home: &Path, cache: Value) {
+    write_test_runtime_catalog(home, cache, false);
+}
+
 fn write_cache(home: &Path) {
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&official_cache()).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, official_cache());
 }
 
 #[test]
@@ -167,7 +187,6 @@ fn catalog_operation_reuses_runtime_resolution_across_refresh_and_state_reads() 
 #[test]
 fn selection_reads_missing_or_outdated_snapshots_without_starting_cli() {
     let home = tempfile::tempdir().unwrap();
-    write_cache(home.path());
     let runtime = home.path().join("codex");
     fs::write(&runtime, "runtime v1").unwrap();
     let runtime_path = runtime.to_str().unwrap();
@@ -226,9 +245,12 @@ fn new_catalog_operation_rechecks_runtime_identity_and_rejects_previous_snapshot
     .unwrap();
     let has_account_model = |context: &CatalogContext<'_>| {
         read_official_entries_in_context(home.path(), context)
-            .unwrap()
-            .iter()
-            .any(|model| model["slug"] == "account-only-model")
+            .ok()
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|model| model["slug"] == "account-only-model")
+            })
     };
     assert!(has_account_model(&first));
     let second_path = second_runtime.to_str().unwrap();
@@ -389,14 +411,12 @@ fn matching_source_remains_usable_offline_and_cache_keys_include_runtime_source(
 }
 
 #[test]
-fn account_merge_excludes_old_runtime_templates_but_preserves_official_cache() {
+fn account_merge_excludes_old_runtime_templates() {
     let home = tempfile::tempdir().unwrap();
     let first = home.path().join("first-cli");
     let second = home.path().join("second-cli");
     fs::write(&first, "runtime one").unwrap();
     fs::write(&second, "runtime two").unwrap();
-    write_cache(home.path());
-    let cache_before = fs::read(home.path().join("models_cache.json")).unwrap();
     let mut snapshot = official_cache();
     for model in snapshot["models"].as_array_mut().unwrap() {
         model["base_instructions"] = json!("old installation instructions");
@@ -424,11 +444,7 @@ fn account_merge_excludes_old_runtime_templates_but_preserves_official_cache() {
         saved["models"][0]["base_instructions"],
         "old installation instructions"
     );
-    assert!(model_instruction_source(&saved["models"][0]).is_some());
-    assert_eq!(
-        cache_before,
-        fs::read(home.path().join("models_cache.json")).unwrap()
-    );
+    assert!(model_instruction_source(&saved["models"][0]).is_none());
 }
 
 #[test]
@@ -680,7 +696,14 @@ fn route_overrides_can_be_removed_from_a_cached_catalog_without_losing_native_ti
 #[test]
 fn account_snapshot_borrows_a_local_template_for_slugs_the_fallback_list_omits() {
     let home = tempfile::tempdir().unwrap();
-    write_cache(home.path());
+    let mut local_catalog = official_cache();
+    local_catalog["codey_runtime_source"] = json!(catalog_source_for_app(""));
+    fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
+    fs::write(
+        home.path().join(MODEL_CATALOG_RELATIVE_PATH),
+        serde_json::to_vec(&local_catalog).unwrap(),
+    )
+    .unwrap();
     let snapshot = json!({
         "codey_account_snapshot": true,
         "codey_runtime_source": catalog_source_for_app(""),
@@ -699,7 +722,6 @@ fn account_snapshot_borrows_a_local_template_for_slugs_the_fallback_list_omits()
             {"slug": "codex-auto-review", "visibility": "hide"}
         ]
     });
-    fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
     fs::write(
         home.path().join(DEBUG_CATALOG_RELATIVE_PATH),
         serde_json::to_vec(&snapshot).unwrap(),
@@ -1047,9 +1069,8 @@ fn benchmark_combined_catalog_refresh() {
         model["base_instructions"] =
             json!("synthetic instructions for catalog benchmark\n".repeat(1_000));
     }
-    let cache = serde_json::to_vec(&cache).unwrap();
     for home in [staged.path(), combined.path()] {
-        fs::write(home.join("models_cache.json"), &cache).unwrap();
+        write_snapshot_cache(home, cache.clone());
     }
     let selected = (0..24)
         .map(|i| format!("route-{i}/gpt-5.6-sol"))
@@ -1119,11 +1140,7 @@ fn write_cache_with_native_web_search(home: &Path) {
         .unwrap();
     sol["supports_search_tool"] = json!(true);
     sol["web_search_tool_type"] = json!("text_and_image");
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, cache);
 }
 
 fn write_cache_with_image_detail_original(home: &Path) {
@@ -1135,11 +1152,7 @@ fn write_cache_with_image_detail_original(home: &Path) {
         .find(|model| model["slug"] == "gpt-5.6-sol")
         .unwrap();
     sol["supports_image_detail_original"] = json!(true);
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, cache);
 }
 
 fn write_cache_with_template_only(home: &Path) {
@@ -1156,11 +1169,7 @@ fn write_cache_with_template_only(home: &Path) {
             }
         });
     }
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, cache);
 }
 
 fn write_cache_without_fast_metadata(home: &Path) {
@@ -1170,11 +1179,7 @@ fn write_cache_without_fast_metadata(home: &Path) {
         object.remove("service_tiers");
         object.remove("additional_speed_tiers");
     }
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, cache);
 }
 
 fn write_cache_with_prompt_fields(home: &Path) {
@@ -1193,11 +1198,7 @@ fn write_cache_with_prompt_fields(home: &Path) {
             "nested": "runtime-cache-only nested variable"
         }
     });
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, cache);
 }
 
 fn write_cache_with_sol_reasoning_metadata(
@@ -1229,11 +1230,7 @@ fn write_cache_with_sol_reasoning_metadata(
             object.remove("default_reasoning_level");
         }
     }
-    fs::write(
-        home.join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home, cache);
 }
 
 fn assert_native_fast(model: &Value) {
@@ -1513,11 +1510,7 @@ fn generated_catalog_fills_missing_or_empty_official_descriptions() {
         .iter_mut()
         .find(|model| model["slug"] == "gpt-5.6-luna")
         .unwrap()["description"] = json!("   ");
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home.path(), cache);
 
     refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
@@ -1540,114 +1533,6 @@ fn generated_catalog_fills_missing_or_empty_official_descriptions() {
     for slug in ["gpt-5.5", "gpt-5.6-luna"] {
         let model = models.iter().find(|model| model["slug"] == slug).unwrap();
         assert_eq!(model["description"], model["display_name"]);
-    }
-}
-
-#[test]
-fn instruction_bearing_snapshot_entry_repairs_an_incomplete_cache_entry() {
-    let home = tempfile::tempdir().unwrap();
-    // Codex 26.908+ may keep a cache file that lacks runtime fields while a
-    // `codex debug models` snapshot captured by Codey carries them. The
-    // merge must prefer the instruction-bearing entry per slug.
-    let mut incomplete = official_cache();
-    for model in incomplete["models"].as_array_mut().unwrap() {
-        let object = model.as_object_mut().unwrap();
-        object.remove("base_instructions");
-        object.remove("model_messages");
-    }
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&incomplete).unwrap(),
-    )
-    .unwrap();
-    fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
-    fs::write(
-        home.path().join(DEBUG_CATALOG_RELATIVE_PATH),
-        serde_json::to_vec(&{
-            let mut cache = official_cache();
-            cache["codey_runtime_source"] = json!(catalog_source_for_app(""));
-            cache
-        })
-        .unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        refresh_for_provider(home.path(), true, None, &[]).unwrap(),
-        OFFICIAL_MODELS.len()
-    );
-    let catalog: Value =
-        serde_json::from_slice(&fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap())
-            .unwrap();
-    let sol = catalog["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["slug"] == "gpt-5.6-sol")
-        .unwrap();
-    assert!(
-        sol["base_instructions"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
-}
-
-#[test]
-fn incomplete_local_reasoning_metadata_is_completed_from_fallback_catalog() {
-    let cases = [
-        (None, None, "low"),
-        (None, Some("xhigh"), "xhigh"),
-        (
-            Some(json!([{"effort": "low", "description": "local low"}])),
-            Some("low"),
-            "low",
-        ),
-    ];
-
-    for (supported_reasoning_levels, default_reasoning_level, expected_default) in cases {
-        let home = tempfile::tempdir().unwrap();
-        write_cache_with_sol_reasoning_metadata(
-            home.path(),
-            supported_reasoning_levels,
-            default_reasoning_level,
-        );
-
-        let state = selection_state(home.path(), true, None, &[], None).unwrap();
-        let sol_state = state
-            .official_models
-            .iter()
-            .find(|model| model.slug == "gpt-5.6-sol")
-            .unwrap();
-        assert_eq!(
-            sol_state.supported_reasoning_efforts,
-            ["low", "medium", "high", "xhigh", "max", "ultra"]
-        );
-        assert_eq!(sol_state.default_reasoning_effort, expected_default);
-
-        refresh_for_provider(home.path(), true, None, &[]).unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let sol = catalog["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["slug"] == "gpt-5.6-sol")
-            .unwrap();
-        assert_eq!(
-            reasoning_efforts_from_value(sol),
-            ["low", "medium", "high", "xhigh", "max", "ultra"]
-        );
-        assert_eq!(sol["default_reasoning_level"], expected_default);
-        assert_eq!(
-            sol["base_instructions"],
-            "test-only instructions for gpt-5.6-sol"
-        );
-        assert_eq!(
-            sol["model_messages"]["instructions_template"],
-            "test-only template"
-        );
     }
 }
 
@@ -1820,11 +1705,7 @@ fn mixed_catalog_drops_prompt_free_official_stubs_without_blocking_supported_mod
         .unwrap();
     stub.remove("base_instructions");
     stub.remove("model_messages");
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home.path(), cache);
     let selected = vec![
         "gpt-5.6-sol".into(),
         "gpt-5.6-luna".into(),
@@ -2145,49 +2026,6 @@ fn catalog_overrides_do_not_restore_third_party_compaction_identity() {
     assert_eq!(models[0]["context_window"], 272_000);
     assert_eq!(models[0]["auto_compact_token_limit"], 240_000);
     assert_eq!(models[0]["codey_remote_compaction"], true);
-}
-
-#[test]
-fn cached_catalog_migrates_the_legacy_1m_context_window() {
-    let home = tempfile::tempdir().unwrap();
-    write_cache(home.path());
-    let selected = vec!["route/gpt-5.6-sol".to_string(), "route/gpt-5.5".to_string()];
-
-    refresh_for_provider_with_capabilities(
-        home.path(),
-        false,
-        Some(&selected),
-        &selected,
-        CapabilityLists::default(),
-        "",
-    )
-    .unwrap();
-    let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
-    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    for model in catalog["models"].as_array_mut().unwrap() {
-        model["context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
-        model["max_context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
-        model["effective_context_window_percent"] = json!(100);
-        model["auto_compact_token_limit"] = Value::Null;
-        model["codey_context_source"] = json!("legacy_1m");
-        model.as_object_mut().unwrap().remove("codey_context_base");
-    }
-    fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
-
-    assert!(
-        prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[], &[], "").unwrap(),
-        "the legacy window must be rewritten"
-    );
-    let catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    for model in catalog["models"].as_array().unwrap() {
-        assert_eq!(model["context_window"], DEFAULT_CONTEXT_WINDOW);
-        assert_eq!(model["max_context_window"], DEFAULT_CONTEXT_WINDOW);
-        assert_eq!(
-            model["effective_context_window_percent"],
-            DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT
-        );
-        assert!(model["auto_compact_token_limit"].is_null());
-    }
 }
 
 #[test]
@@ -2519,15 +2357,6 @@ fn cached_catalog_fallback_removes_stale_capability_metadata() {
     let mut stale: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(stale["models"][0]["supports_search_tool"], true);
     assert!(stale["models"][0]["web_search_tool_type"].is_string());
-    stale["models"][0]["context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
-    stale["models"][0]["max_context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
-    stale["models"][0]["effective_context_window_percent"] = json!(100);
-    stale["models"][0]["auto_compact_token_limit"] = Value::Null;
-    stale["models"][0]["codey_context_source"] = json!("legacy_1m");
-    stale["models"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("codey_context_base");
     stale["models"][0]
         .as_object_mut()
         .unwrap()
@@ -2541,10 +2370,6 @@ fn cached_catalog_fallback_removes_stale_capability_metadata() {
     let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert!(sanitized["models"][0].get("supports_search_tool").is_none());
     assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
-    assert_eq!(
-        sanitized["models"][0]["context_window"],
-        DEFAULT_CONTEXT_WINDOW
-    );
     let sanitized_bytes = fs::read(&path).unwrap();
 
     assert!(
@@ -2684,11 +2509,7 @@ fn astra_selection_and_route_metadata_follow_the_native_reasoning_levels() {
         .as_array_mut()
         .unwrap()
         .retain(|level| level["effort"] != "ultra");
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home.path(), cache);
 
     refresh_for_provider(home.path(), false, Some(&route), &route).unwrap();
     let catalog = read_catalog_value(&home.path().join(relative_path())).unwrap();
@@ -2772,11 +2593,7 @@ fn cache_without_astra_keeps_existing_routes_and_requires_its_own_runtime_templa
         .as_array_mut()
         .unwrap()
         .retain(|model| model["slug"] != "gpt-6-astra");
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home.path(), cache);
 
     for (official, model) in [
         (true, "gpt-5.6-sol"),
@@ -2813,11 +2630,7 @@ fn mixed_catalog_preserves_official_account_alias_identity() {
         .unwrap();
     source["description"] = json!("Official account model description");
     let expected_instructions = model_instruction_source(source).unwrap().to_string();
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home.path(), cache);
 
     let first = crate::config::official_profile_id("acct-one");
     let second = crate::config::official_profile_id("acct-two");
@@ -2870,11 +2683,7 @@ fn official_route_aliases_without_a_local_runtime_template_are_dropped() {
         .unwrap();
     prompt_free.remove("base_instructions");
     prompt_free.remove("model_messages");
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
+    write_snapshot_cache(home.path(), cache);
 
     let first = crate::config::official_profile_id("acct-one");
     let second = crate::config::official_profile_id("acct-two");
@@ -2914,8 +2723,14 @@ fn prompt_free_existing_catalog_is_not_reused_as_a_runtime_fallback() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
-        serde_json::to_vec(&codey_runtime_core::model_suffix::bundled_model_catalog().unwrap())
-            .unwrap(),
+        serde_json::to_vec(&json!({
+            "models": [{
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "description": "Prompt-free catalog entry"
+            }]
+        }))
+        .unwrap(),
     )
     .unwrap();
 
@@ -3228,11 +3043,7 @@ fn selection_state_falls_back_from_unavailable_default_to_first_route_model() {
 #[test]
 fn selection_exposes_every_model_available_on_the_current_route() {
     let home = tempfile::tempdir().unwrap();
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&official_cache()).unwrap(),
-    )
-    .unwrap();
+    write_cache(home.path());
     let upstream = vec![
         "gpt-5.6-sol".into(),
         "gpt-5.6-terra".into(),
@@ -3246,35 +3057,6 @@ fn selection_exposes_every_model_available_on_the_current_route() {
         assert!(state.available_model(model).is_some(), "{model}");
     }
     assert_eq!(state.available_model("gpt-5.4"), None);
-}
-
-#[test]
-fn selection_ignores_a_stale_shared_cache_client_version() {
-    let home = tempfile::tempdir().unwrap();
-    let mut cache = official_cache();
-    cache["client_version"] = json!("0.146.1");
-    fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&cache).unwrap(),
-    )
-    .unwrap();
-    let upstream = vec![
-        "gpt-5.6-sol".into(),
-        "gpt-5.6-luna".into(),
-        "third-model".into(),
-    ];
-
-    let state = selection_state(
-        home.path(),
-        false,
-        Some(&upstream),
-        &["gpt-5.6-luna".into(), "third-model".into()],
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(state.available_model("gpt-5.6-luna"), Some("gpt-5.6-luna"));
-    assert_eq!(state.available_model("third-model"), Some("third-model"));
 }
 
 #[test]
@@ -3532,75 +3314,6 @@ fn codex_26_908_snapshot_alone_generates_the_catalog() {
             .iter()
             .map(|(slug, _)| *slug)
             .collect::<Vec<_>>()
-    );
-}
-#[test]
-fn newer_snapshot_supersedes_a_stale_cache_entry() {
-    // A capture happens when the snapshot is missing or older than the
-    // installed Codex, so a snapshot that outdates `models_cache.json`
-    // carries the instructions the cache cannot. Reading sources in a
-    // fixed order would let the stale cache win and silently waste the
-    // capture, leaving upgraded installs on pre-upgrade instructions.
-    let home = tempfile::tempdir().unwrap();
-    let source = |label: &str| {
-        json!({
-            "codey_runtime_source": catalog_source_for_app(""),
-            "models": OFFICIAL_MODELS
-                .iter()
-                .map(|(slug, _)| {
-                    json!({
-                        "slug": slug,
-                        "display_name": slug,
-                        "description": format!("{label} description"),
-                        "base_instructions": format!("{label} instructions for {slug}"),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-    };
-    let cache = home.path().join("models_cache.json");
-    let snapshot = home.path().join(DEBUG_CATALOG_RELATIVE_PATH);
-    fs::write(&cache, serde_json::to_vec(&source("CACHED")).unwrap()).unwrap();
-    fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
-    fs::write(&snapshot, serde_json::to_vec(&source("SNAPSHOT")).unwrap()).unwrap();
-
-    let older = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
-    let newer = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200);
-    for (path, stamp) in [(cache, older), (snapshot, newer)] {
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(stamp)
-            .unwrap();
-    }
-
-    let entries = read_official_entries(home.path(), "").unwrap();
-    let sol = entries
-        .iter()
-        .find(|model| model["slug"] == "gpt-5.6-sol")
-        .unwrap();
-    assert_eq!(
-        sol["base_instructions"],
-        "SNAPSHOT instructions for gpt-5.6-sol"
-    );
-
-    // The reverse order still prefers the cache, so an install whose Codex
-    // keeps writing its own cache does not inherit Codey snapshot text.
-    std::fs::File::options()
-        .write(true)
-        .open(home.path().join("models_cache.json"))
-        .unwrap()
-        .set_modified(newer + std::time::Duration::from_secs(100))
-        .unwrap();
-    let entries = read_official_entries(home.path(), "").unwrap();
-    let sol = entries
-        .iter()
-        .find(|model| model["slug"] == "gpt-5.6-sol")
-        .unwrap();
-    assert_eq!(
-        sol["base_instructions"],
-        "CACHED instructions for gpt-5.6-sol"
     );
 }
 
@@ -4254,11 +3967,6 @@ fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
     assert_eq!(native_large["context_window"], 400_000);
     assert_eq!(native_large["max_context_window"], 1_000_000);
     assert_eq!(native_large["effective_context_window_percent"], 95);
-    let mut legacy_override = json!({ "slug": "route/legacy", "codey_source": "third_party", "context_window": 1000000, "max_context_window": 1000000, "effective_context_window_percent": 100, "auto_compact_token_limit": null, "codey_context_source": "legacy_1m" });
-    prepare_cached_context_window(&mut legacy_override);
-    assert_eq!(legacy_override["context_window"], 272_000);
-    assert_eq!(legacy_override["max_context_window"], 272_000);
-    assert_eq!(legacy_override["effective_context_window_percent"], 95);
 }
 
 #[cfg(test)]
@@ -4354,11 +4062,7 @@ fn official_default_context_recomputes_only_window_based_compaction_limits() {
             model["auto_compact_token_limit"] = json!(limit);
             model["effective_context_window_percent"] = json!(percent);
         }
-        fs::write(
-            home.path().join("models_cache.json"),
-            serde_json::to_vec(&cache).unwrap(),
-        )
-        .unwrap();
+        write_snapshot_cache(home.path(), cache);
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
         let models = read_runtime_catalog_models(home.path()).unwrap();
         let model = models

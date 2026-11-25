@@ -1,18 +1,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 
 mod delivery;
 
 use super::AppState;
 use crate::codex_config::codex_home;
-use crate::config::{CodeyConfig, ConfigStore};
+use crate::config::CodeyConfig;
 use crate::notifications::{
     NotificationChannelConfig, NotificationChannelKind, NotificationDispatcher, NotificationEvent,
 };
@@ -20,14 +18,6 @@ use crate::pending_approval;
 use crate::pending_approval::{CompletedTurn, RecentSessionEvents, SessionLifecycleStatus};
 use crate::{local_router, model_id};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WaitingNotificationLedger {
-    #[serde(default)]
-    notification_keys: Vec<String>,
-}
-
-const WEBHOOK_NOTIFICATION_HISTORY_LIMIT: usize = 2048;
 const MAX_CONCURRENT_WEBHOOK_DELIVERIES: usize = 4;
 const NOTIFICATION_TITLE_BUDGET: Duration = Duration::from_millis(200);
 const NOTIFICATION_TITLE_CACHE_LIMIT: usize = 256;
@@ -90,86 +80,6 @@ impl WaitingNotificationSnapshot {
         // 扫描失败或会话超出索引范围时，缺少记录不能证明提问已结束。
         self.known_sessions.contains(session_id) && !self.active_keys.contains(event_key)
     }
-}
-
-fn waiting_notification_ledger_path(store: &ConfigStore) -> PathBuf {
-    store.path().with_file_name("webhook-notifications.json")
-}
-
-/// Persisted "waiting" reservation keys in insertion order so the ledger stays
-/// bounded like the in-memory settled history: once the cap is exceeded the
-/// oldest reservations fall off. Evicting a key that old only weakens dedup
-/// toward the documented at-most-once boundary (a suppressed resend can become
-/// possible again), never toward duplicate sends of recent notifications.
-#[derive(Debug, Default)]
-pub(super) struct WaitingLedgerState {
-    keys: HashSet<String>,
-    order: VecDeque<String>,
-    revision: u64,
-    io: Arc<Mutex<u64>>,
-}
-
-impl WaitingLedgerState {
-    fn contains(&self, key: &str) -> bool {
-        self.keys.contains(key)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(super) fn iter(&self) -> impl Iterator<Item = &String> {
-        self.order.iter()
-    }
-
-    fn ordered_keys(&self) -> Vec<String> {
-        self.order.iter().cloned().collect()
-    }
-
-    fn insert(&mut self, key: String) -> bool {
-        if !self.keys.insert(key.clone()) {
-            return false;
-        }
-        self.order.push_back(key);
-        while self.order.len() > WEBHOOK_NOTIFICATION_HISTORY_LIMIT {
-            if let Some(oldest) = self.order.pop_front() {
-                self.keys.remove(&oldest);
-            }
-        }
-        self.revision += 1;
-        true
-    }
-
-    fn extend(&mut self, keys: impl IntoIterator<Item = String>) -> bool {
-        let mut changed = false;
-        for key in keys {
-            changed |= self.insert(key);
-        }
-        changed
-    }
-}
-
-fn load_waiting_notification_entries(path: &Path) -> Vec<String> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(ledger) = serde_json::from_str::<WaitingNotificationLedger>(&contents) else {
-        return Vec::new();
-    };
-    let mut seen = HashSet::new();
-    ledger
-        .notification_keys
-        .into_iter()
-        .filter(|key| key.starts_with("waiting:") && seen.insert(key.clone()))
-        .collect()
-}
-
-#[cfg(test)]
-fn load_waiting_notification_ledger(path: &Path) -> HashSet<String> {
-    load_waiting_notification_entries(path)
-        .into_iter()
-        .collect()
 }
 
 fn waiting_notification_key(session_id: &str, turn_id: &str, waiting_id: &str) -> String {
@@ -393,31 +303,6 @@ fn unix_timestamp_seconds() -> i64 {
     crate::fs_util::timestamp_secs() as i64
 }
 
-fn initialize_waiting_notifications(path: &Path, baseline: HashSet<String>) -> WaitingLedgerState {
-    let path_existed = path.exists();
-    let mut initialized = WaitingLedgerState::default();
-    let mut loaded_matches_file = true;
-    if path_existed {
-        let entries = load_waiting_notification_entries(path);
-        let entry_count = entries.len();
-        initialized.extend(entries);
-        loaded_matches_file = initialized.order.len() == entry_count;
-    }
-    let baseline_changed = initialized.extend(baseline);
-    if !initialized.is_empty() && (!path_existed || !loaded_matches_file || baseline_changed) {
-        let _ = save_waiting_notification_ledger(path, initialized.ordered_keys());
-    }
-    initialized
-}
-
-pub(super) fn initial_waiting_notifications(
-    store: &ConfigStore,
-    pending_approvals: &[pending_approval::PendingApproval],
-) -> WaitingLedgerState {
-    let path = waiting_notification_ledger_path(store);
-    initialize_waiting_notifications(&path, waiting_notification_keys(pending_approvals))
-}
-
 fn waiting_notification_keys(
     pending_approvals: &[pending_approval::PendingApproval],
 ) -> HashSet<String> {
@@ -433,46 +318,6 @@ fn waiting_notification_keys(
         .collect()
 }
 
-fn save_waiting_notification_ledger(
-    path: &Path,
-    notification_keys: Vec<String>,
-) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "消息通知记录路径无父目录".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("创建消息通知记录目录失败：{error}"))?;
-    let bytes = serde_json::to_vec_pretty(&WaitingNotificationLedger { notification_keys })
-        .map_err(|error| format!("序列化消息通知记录失败：{error}"))?;
-    crate::fs_util::atomic_write_private(path, &bytes)
-        .map_err(|error| format!("替换消息通知记录失败：{error}"))?;
-    Ok(())
-}
-
-/// Writes the current ledger snapshot to disk without holding the state lock
-/// across IO. The write itself runs on a blocking thread; the per-ledger `io`
-/// mutex serializes writers, and the revision check skips writes that a later
-/// snapshot already covered (a higher revision is always a more recent state).
-async fn persist_waiting_ledger(state: &Arc<AppState>) -> Result<(), String> {
-    let io = {
-        let ledger = state.persisted_waiting_notifications.lock().await;
-        ledger.io.clone()
-    };
-    let mut written = io.lock().await;
-    let (snapshot, revision) = {
-        let ledger = state.persisted_waiting_notifications.lock().await;
-        if ledger.revision <= *written {
-            return Ok(());
-        }
-        (ledger.ordered_keys(), ledger.revision)
-    };
-    let path = waiting_notification_ledger_path(&state.store);
-    tokio::task::spawn_blocking(move || save_waiting_notification_ledger(&path, snapshot))
-        .await
-        .map_err(|error| format!("写入消息通知记录任务失败：{error}"))??;
-    *written = revision;
-    Ok(())
-}
-
 async fn baseline_waiting_notifications(
     state: &Arc<AppState>,
     pending_approvals: &[pending_approval::PendingApproval],
@@ -482,12 +327,10 @@ async fn baseline_waiting_notifications(
         return;
     }
 
-    let changed = {
-        let mut persisted = state.persisted_waiting_notifications.lock().await;
-        persisted.extend(baseline.iter().cloned())
-    };
-    if changed {
-        let _ = persist_waiting_ledger(state).await;
+    if let Ok(outbox) = delivery::outbox(state).await {
+        let _ = outbox
+            .record_baseline_keys(baseline.into_iter().collect(), delivery::now_ms())
+            .await;
     }
 }
 pub(super) fn webhook_watcher_should_run(config: &CodeyConfig) -> bool {
@@ -814,7 +657,6 @@ pub(super) async fn test_notification_channel(
     let previous = state.config.read().await.webhook.clone();
     let mut draft = crate::notifications::WebhookConfig {
         channels: vec![channel],
-        ..crate::notifications::WebhookConfig::default()
     };
     draft.merge_redacted_secrets(&previous);
     let channel = draft
@@ -1155,16 +997,10 @@ async fn notify_webhook_waiting(state: &Arc<AppState>, payload: &Value) -> Resul
     }
 
     let notification_key = waiting_notification_key(&session_id, turn_id, waiting_id);
-    // 旧账本只作为历史去重记录，新的等待通知由 outbox 原子入队。
-    if state
-        .persisted_waiting_notifications
-        .lock()
-        .await
-        .contains(&notification_key)
-        || delivery::outbox(state)
-            .await?
-            .has_event(notification_key.clone())
-            .await?
+    if delivery::outbox(state)
+        .await?
+        .has_event(notification_key.clone())
+        .await?
     {
         return Ok(json!({"status":"duplicate"}));
     }
@@ -1197,7 +1033,9 @@ async fn notify_webhook_waiting(state: &Arc<AppState>, payload: &Value) -> Resul
 mod tests {
     include!("webhooks/observation_tests.rs");
     include!("webhooks/runtime_tests.rs");
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1331,12 +1169,8 @@ mod tests {
     ) -> Arc<AppState> {
         Arc::new(AppState {
             store: ConfigStore::new(directory.join("config.json")),
-            persisted_waiting_notifications: Mutex::new(WaitingLedgerState::default()),
             config: RwLock::new(CodeyConfig {
-                webhook: crate::notifications::WebhookConfig {
-                    channels,
-                    ..crate::notifications::WebhookConfig::default()
-                },
+                webhook: crate::notifications::WebhookConfig { channels },
                 ..CodeyConfig::default()
             }),
             webhook_http_client_override: Some(
@@ -1615,7 +1449,6 @@ mod tests {
             config: RwLock::new(CodeyConfig {
                 webhook: crate::notifications::WebhookConfig {
                     channels: vec![fresh_channel],
-                    ..crate::notifications::WebhookConfig::default()
                 },
                 ..CodeyConfig::default()
             }),
@@ -1673,7 +1506,6 @@ mod tests {
             config: RwLock::new(CodeyConfig {
                 webhook: crate::notifications::WebhookConfig {
                     channels: vec![channel.clone()],
-                    ..crate::notifications::WebhookConfig::default()
                 },
                 ..CodeyConfig::default()
             }),
@@ -1735,7 +1567,6 @@ mod tests {
             config: RwLock::new(CodeyConfig {
                 webhook: crate::notifications::WebhookConfig {
                     channels: vec![channel.clone()],
-                    ..crate::notifications::WebhookConfig::default()
                 },
                 ..CodeyConfig::default()
             }),
@@ -1813,7 +1644,6 @@ mod tests {
             config: RwLock::new(CodeyConfig {
                 webhook: crate::notifications::WebhookConfig {
                     channels: vec![channel.clone()],
-                    ..crate::notifications::WebhookConfig::default()
                 },
                 ..CodeyConfig::default()
             }),
@@ -2041,28 +1871,6 @@ mod tests {
         assert!(session_events_are_active(&waiting_later));
     }
 
-    #[test]
-    fn waiting_notification_ledger_survives_restart() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("webhook-notifications.json");
-        let expected = HashSet::from([
-            "waiting:session-1:turn-1:approval-1".to_string(),
-            "waiting:session-2:turn-2:approval-2".to_string(),
-        ]);
-
-        save_waiting_notification_ledger(&path, expected.iter().cloned().collect()).unwrap();
-
-        assert_eq!(load_waiting_notification_ledger(&path), expected);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
     #[tokio::test]
     async fn waiting_notification_is_durable_before_delivery() {
         let directory = tempfile::tempdir().unwrap();
@@ -2157,25 +1965,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_waiting_keys_are_tombstones_without_replay() {
-        let directory = tempfile::tempdir().unwrap();
-        let server = MockWebhookServer::start(vec!["200 OK"]).await;
-        let state = channel_delivery_test_state(directory.path(), vec![server.channel("waiting")]);
-        let key = waiting_notification_key("legacy", "turn", "approval");
-        let path = waiting_notification_ledger_path(&state.store);
-        save_waiting_notification_ledger(&path, vec![key]).unwrap();
-        *state.persisted_waiting_notifications.lock().await =
-            initialize_waiting_notifications(&path, HashSet::new());
-        let payload = json!({"sessionId":"legacy","turnId":"turn","waitingId":"approval"});
-        assert_eq!(
-            notify_webhook_waiting(&state, &payload).await.unwrap()["status"],
-            "duplicate"
-        );
-        assert!(drive_due(&state).await.is_empty());
-        assert!(server.requests.lock().await.is_empty());
-    }
-
-    #[tokio::test]
     async fn changed_channel_binding_cancels_queued_delivery() {
         let directory = tempfile::tempdir().unwrap();
         let original = MockWebhookServer::start(vec!["200 OK"]).await;
@@ -2193,73 +1982,10 @@ mod tests {
         assert!(replacement.requests.lock().await.is_empty());
     }
 
-    #[test]
-    fn invalid_waiting_notification_ledger_is_ignored() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("webhook-notifications.json");
-        fs::write(&path, b"not-json").unwrap();
-
-        assert!(load_waiting_notification_ledger(&path).is_empty());
-    }
-
-    #[test]
-    fn existing_waits_become_the_first_run_baseline() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("webhook-notifications.json");
-        let baseline = HashSet::from(["waiting:session-old:turn-old:approval-old".to_string()]);
-
-        let initialized = initialize_waiting_notifications(&path, baseline.clone());
-        assert_eq!(
-            initialized.iter().cloned().collect::<HashSet<_>>(),
-            baseline
-        );
-        assert_eq!(load_waiting_notification_ledger(&path), baseline);
-    }
-
-    #[test]
-    fn waiting_ledger_evicts_oldest_keys_beyond_the_cap() {
-        let mut ledger = WaitingLedgerState::default();
-        for index in 0..=WEBHOOK_NOTIFICATION_HISTORY_LIMIT {
-            ledger.insert(format!("waiting:session:{index}:approval"));
-        }
-
-        assert_eq!(
-            ledger.ordered_keys().len(),
-            WEBHOOK_NOTIFICATION_HISTORY_LIMIT
-        );
-        assert!(!ledger.contains("waiting:session:0:approval"));
-        assert!(ledger.contains(&format!(
-            "waiting:session:{WEBHOOK_NOTIFICATION_HISTORY_LIMIT}:approval"
-        )));
-    }
-
-    #[test]
-    fn every_startup_merges_all_existing_waits_into_the_baseline() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("webhook-notifications.json");
-        let persisted = HashSet::from(["waiting:session-sent:turn-sent:approval-sent".to_string()]);
-        save_waiting_notification_ledger(&path, persisted.iter().cloned().collect()).unwrap();
-        let existing_wait = "waiting:session-old:turn-old:approval-old".to_string();
-
-        let loaded =
-            initialize_waiting_notifications(&path, HashSet::from([existing_wait.clone()]));
-
-        let expected = persisted
-            .into_iter()
-            .chain([existing_wait])
-            .collect::<HashSet<_>>();
-        assert_eq!(loaded.iter().cloned().collect::<HashSet<_>>(), expected);
-        assert_eq!(load_waiting_notification_ledger(&path), expected);
-    }
-
     #[tokio::test]
     async fn startup_baseline_only_suppresses_waits_seen_before_runtime_start() {
         let directory = tempfile::tempdir().unwrap();
-        let state = Arc::new(AppState {
-            store: ConfigStore::new(directory.path().join("config.json")),
-            persisted_waiting_notifications: Mutex::new(WaitingLedgerState::default()),
-            ..isolated_test_state(directory.path())
-        });
+        let state = Arc::new(isolated_test_state(directory.path()));
         let before_start = PendingApproval {
             session_id: "session-old".to_string(),
             turn_id: "turn-old".to_string(),
@@ -2275,17 +2001,27 @@ mod tests {
 
         baseline_waiting_notifications(&state, std::slice::from_ref(&before_start)).await;
 
-        let baseline = state.persisted_waiting_notifications.lock().await;
-        assert!(baseline.contains(&waiting_notification_key(
-            &before_start.session_id,
-            &before_start.turn_id,
-            &before_start.waiting_id,
-        )));
-        assert!(!baseline.contains(&waiting_notification_key(
-            &during_start.session_id,
-            &during_start.turn_id,
-            &during_start.waiting_id,
-        )));
+        let outbox = delivery::outbox(&state).await.unwrap();
+        assert!(
+            outbox
+                .has_event(waiting_notification_key(
+                    &before_start.session_id,
+                    &before_start.turn_id,
+                    &before_start.waiting_id,
+                ))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !outbox
+                .has_event(waiting_notification_key(
+                    &during_start.session_id,
+                    &during_start.turn_id,
+                    &during_start.waiting_id,
+                ))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

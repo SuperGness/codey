@@ -37,20 +37,12 @@ fn official_concurrency_profile_migrates_and_rejects_invalid_values() {
 }
 
 #[test]
-fn official_concurrency_derivation_keeps_legacy_and_account_settings_separate() {
-    let mut legacy = ProviderProfile::new("兼容官方线路");
-    legacy.official_account = true;
-    legacy.max_concurrency = 3;
-    let mut config = CodeyConfig {
-        profiles: vec![legacy.clone()],
-        ..CodeyConfig::default()
-    };
-    let mut derived = legacy.clone();
-    derived.max_concurrency = 0;
-    config.apply_launch_official_profiles(vec![derived.clone()]);
-    assert_eq!(config.profiles[0].max_concurrency, 3);
+fn official_concurrency_derivation_uses_account_settings() {
+    let mut derived = ProviderProfile::new("官方线路");
+    derived.official_account = true;
     derived.official_account_id = Some("acct-limit".into());
     derived.max_concurrency = 8;
+    let mut config = CodeyConfig::default();
     config.apply_launch_official_profiles(vec![derived.clone()]);
     assert_eq!(config.profiles[0].max_concurrency, 8);
     derived.max_concurrency = 0;
@@ -1514,96 +1506,6 @@ fn launch_official_profile_is_first_without_stealing_active_third_party_route() 
 }
 
 #[test]
-fn launch_official_profile_migrates_legacy_official_provider_state() {
-    let mut legacy = ProviderProfile::new("OpenAI 官方直登");
-    legacy.id = DERIVED_OFFICIAL_PROFILE_ID.into();
-    legacy.source_provider_id = Some("local-official".into());
-    legacy.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
-    legacy.normalize();
-
-    let mut launched = ProviderProfile::new("OpenAI 官方直登");
-    launched.id = "launch-openai".into();
-    launched.source_provider_id = Some("openai".into());
-    launched.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
-    launched.normalize();
-
-    let mut config = CodeyConfig {
-        active_profile_id: legacy.id.clone(),
-        profiles: vec![legacy],
-        initial_route_import_completed: true,
-        default_model: "local-official/gpt-5.6-terra".into(),
-        subagent_model: "local-official/gpt-5.6-luna".into(),
-        subagent_reasoning_effort: "high".into(),
-        subagent_roles: uniform_subagent_roles("local-official/gpt-5.6-luna", "high"),
-        ..CodeyConfig::default()
-    };
-    config
-        .selected_models_by_provider
-        .insert("local-official".into(), vec!["gpt-5.6-terra".into()]);
-    config
-        .manual_third_party_models_by_provider
-        .insert("local-official".into(), vec!["manual-model".into()]);
-    config
-        .declared_official_models_by_provider
-        .insert("local-official".into(), vec!["gpt-5.6-luna".into()]);
-    config
-        .upstream_models_by_provider
-        .insert("local-official".into(), vec!["gpt-5.6-terra".into()]);
-    config.default_model = "local-official/gpt-5.6-terra".into();
-
-    config.apply_launch_official_profiles(vec![launched]);
-
-    assert_eq!(config.profiles.len(), 1);
-    assert_eq!(config.profiles[0].id, DERIVED_OFFICIAL_PROFILE_ID);
-    assert_eq!(config.profiles[0].provider_id(), "openai");
-    assert_eq!(config.active_profile_id, DERIVED_OFFICIAL_PROFILE_ID);
-    assert_eq!(
-        config.selected_models_by_provider["openai"],
-        ["gpt-5.6-terra"]
-    );
-    assert_eq!(
-        config.manual_third_party_models_by_provider["openai"],
-        ["manual-model"]
-    );
-    assert_eq!(
-        config.declared_official_models_by_provider["openai"],
-        ["gpt-5.6-luna"]
-    );
-    assert_eq!(
-        config.upstream_models_by_provider["openai"],
-        ["gpt-5.6-terra"]
-    );
-    assert_eq!(config.default_model, "openai/gpt-5.6-terra");
-    assert_eq!(config.subagent_model, "openai/gpt-5.6-luna");
-    assert!(
-        config
-            .subagent_roles
-            .values()
-            .all(|selection| selection.model == "openai/gpt-5.6-luna")
-    );
-    assert!(
-        !config
-            .selected_models_by_provider
-            .contains_key("local-official")
-    );
-    assert!(
-        !config
-            .manual_third_party_models_by_provider
-            .contains_key("local-official")
-    );
-    assert!(
-        !config
-            .declared_official_models_by_provider
-            .contains_key("local-official")
-    );
-    assert!(
-        !config
-            .upstream_models_by_provider
-            .contains_key("local-official")
-    );
-}
-
-#[test]
 fn launch_official_profiles_give_every_stored_account_its_own_route() {
     let mut first = ProviderProfile::new("主力账号");
     first.source_provider_id = Some("openai".into());
@@ -1787,31 +1689,6 @@ fn diagnostic_guards_can_be_disabled_explicitly() {
 }
 
 #[test]
-fn legacy_webhook_is_migrated_to_a_feishu_channel_without_the_old_secret() {
-    let config = serde_json::from_str::<CodeyConfig>(
-        r#"{"activeProfileId":"","profiles":[],"webhook":{"enabled":true,"url":"https://open.feishu.cn/example","secret":"legacy-sign-key"}}"#,
-    )
-    .unwrap()
-    .normalize();
-    let serialized = serde_json::to_value(&config).unwrap();
-
-    assert!(!config.webhook.enabled);
-    assert!(config.webhook.url.is_empty());
-    assert_eq!(config.webhook.channels.len(), 1);
-    let channel = &config.webhook.channels[0];
-    assert_eq!(channel.id, "legacy-feishu");
-    assert_eq!(
-        channel.kind,
-        crate::notifications::NotificationChannelKind::Feishu
-    );
-    assert!(channel.enabled);
-    assert_eq!(channel.url, "https://open.feishu.cn/example");
-    assert!(serialized["webhook"].get("enabled").is_none());
-    assert!(serialized["webhook"].get("url").is_none());
-    assert!(serialized["webhook"].get("secret").is_none());
-}
-
-#[test]
 fn trace_log_guard_defaults_to_enabled_for_existing_configs() {
     let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
         .unwrap()
@@ -1841,44 +1718,33 @@ fn local_router_defaults_to_enabled_for_existing_configs() {
 }
 
 #[test]
-fn codey_update_policy_migrates_legacy_and_preserves_channels() {
+fn codey_update_policy_preserves_channels_and_rejects_unknown_values() {
     assert_eq!(
         CodeyConfig::default().codey_update_policy,
         CodeyUpdatePolicy::Stable
     );
-    let legacy = serde_json::from_str::<CodeyConfig>(r#"{}"#)
+    let default_loaded = serde_json::from_str::<CodeyConfig>(r#"{}"#)
         .unwrap()
         .normalize();
-    assert_eq!(legacy.codey_update_policy, CodeyUpdatePolicy::Stable);
+    assert_eq!(
+        default_loaded.codey_update_policy,
+        CodeyUpdatePolicy::Stable
+    );
 
-    for enabled in [false, true] {
-        let config = serde_json::from_value::<CodeyConfig>(serde_json::json!({
-            "autoCheckCodeyUpdates": enabled,
-        }))
-        .unwrap()
-        .normalize();
-        let expected = if enabled {
-            CodeyUpdatePolicy::Stable
-        } else {
-            CodeyUpdatePolicy::Off
-        };
-        assert_eq!(config.codey_update_policy, expected);
-        assert_eq!(
-            serde_json::to_value(config).unwrap()["codeyUpdatePolicy"],
-            expected.as_str()
-        );
-    }
     for policy in ["off", "stable", "experimental"] {
         let config: CodeyConfig =
             serde_json::from_value(serde_json::json!({"codeyUpdatePolicy": policy})).unwrap();
         let serialized = serde_json::to_value(config).unwrap();
         assert_eq!(serialized["codeyUpdatePolicy"], policy);
-        assert!(serialized.get("autoCheckCodeyUpdates").is_none());
     }
-    assert!(
-        serde_json::from_value::<CodeyConfig>(serde_json::json!({"codeyUpdatePolicy": "unknown"}))
+    for invalid in [serde_json::json!("unknown"), serde_json::json!(true)] {
+        assert!(
+            serde_json::from_value::<CodeyConfig>(
+                serde_json::json!({"codeyUpdatePolicy": invalid})
+            )
             .is_err()
-    );
+        );
+    }
 }
 
 #[test]
@@ -2627,51 +2493,4 @@ fn explicit_prompt_optimization_key_clear_does_not_restore_the_previous_secret()
 
     assert!(incoming.prompt_optimization.api_key.is_empty());
     assert!(!incoming.prompt_optimization.api_key_configured);
-}
-
-#[test]
-fn retired_subagent_roles_migrate_to_their_successors() {
-    let config = serde_json::from_str::<CodeyConfig>(
-        r#"{
-            "activeProfileId":"",
-            "profiles":[],
-            "subagentRoles":{
-                "codey_deep_research":{"enabled":false,"model":"deep-model","reasoningEffort":"high"},
-                "codey_quick_scan":{"enabled":true,"model":"quick-model","reasoningEffort":"low"},
-                "codey_worker":{"enabled":true,"model":"worker-model","reasoningEffort":"medium"},
-                "codey_visual_worker":{"enabled":true,"model":"ui-model","reasoningEffort":"high"},
-                "codey_visual_analysis":{"enabled":false,"model":"review-model","reasoningEffort":"xhigh"},
-                "default":{"model":"fallback-model","reasoningEffort":"medium"}
-            }
-        }"#,
-    )
-    .unwrap()
-    .normalize();
-
-    let explorer = &config.subagent_roles[SUBAGENT_ROLE_EXPLORER];
-    assert_eq!(
-        (explorer.model.as_str(), explorer.enabled),
-        ("quick-model", true)
-    );
-    assert_eq!(
-        config.subagent_roles[SUBAGENT_ROLE_WORKER].model,
-        "worker-model"
-    );
-    let reviewer = &config.subagent_roles[SUBAGENT_ROLE_REVIEWER];
-    assert_eq!(
-        (reviewer.model.as_str(), reviewer.enabled),
-        ("review-model", false)
-    );
-    assert_eq!(
-        config
-            .subagent_roles
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        {
-            let mut ids = SUBAGENT_ROLE_IDS.to_vec();
-            ids.sort_unstable();
-            ids
-        }
-    );
 }

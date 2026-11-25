@@ -577,7 +577,7 @@ async fn load_or_register_device(
         // 设备管理需要一眼看到客户端环境，登记时一并带上。
         "codexVersion": current_codex_version().await,
         "osName": current_os_name(),
-        "osVersion": current_os_version(),
+        "osVersion": current_os_version().await,
     });
     let register_url = format!("{base_url}/api/devices/register");
     let response = device_http_client(&register_url)
@@ -653,7 +653,7 @@ async fn fetch_release_admin_update(
     if let Some(codex_version) = current_codex_version().await {
         query.push(("codexVersion", codex_version));
     }
-    if let Some(os_version) = current_os_version() {
+    if let Some(os_version) = current_os_version().await {
         query.push(("osVersion", os_version));
     }
     let client = if identity.is_some() {
@@ -1152,13 +1152,21 @@ fn current_os_name() -> &'static str {
 }
 
 /// 系统版本只用于发布管理展示，探测一次后缓存，失败时返回 None 而不是阻断检查更新。
-fn current_os_version() -> Option<String> {
+async fn current_os_version() -> Option<String> {
     #[cfg(test)]
     if let Ok(version) = TEST_DEVICE_VERSIONS.try_with(|versions| versions.os.clone()) {
         return version;
     }
-    static CACHE: OnceLock<Option<String>> = OnceLock::new();
-    CACHE.get_or_init(platform_os_version).clone()
+    static CACHE: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async {
+            tokio::task::spawn_blocking(platform_os_version)
+                .await
+                .ok()
+                .flatten()
+        })
+        .await
+        .clone()
 }
 
 #[cfg(target_os = "macos")]

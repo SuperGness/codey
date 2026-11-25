@@ -1611,10 +1611,10 @@ async fn confirm_cli_wrapper_startup(
 /// Polls the wrapper's marker file. Resolves on an executed or failed record;
 /// keeps waiting while the file is missing or still says launching.
 #[cfg(any(windows, target_os = "macos"))]
-async fn watch_cli_wrapper_marker(path: &std::path::Path) -> Result<()> {
+async fn watch_cli_wrapper_marker(path: &std::path::Path, poll_interval: Duration) -> Result<()> {
     use crate::codex_startup_patch::{CliWrapperFailure, CliWrapperMarker, CliWrapperMarkerStatus};
 
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    let mut interval = tokio::time::interval(poll_interval);
     let mut launching_logged = false;
     let mut invalid_logged = false;
     loop {
@@ -1668,6 +1668,22 @@ async fn wait_for_cli_wrapper(
     handshake: CliWrapperHandshake,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
+    wait_for_cli_wrapper_with_timings(
+        handshake,
+        deadline,
+        Duration::from_millis(750),
+        Duration::from_millis(250),
+    )
+    .await
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+async fn wait_for_cli_wrapper_with_timings(
+    handshake: CliWrapperHandshake,
+    deadline: tokio::time::Instant,
+    read_timeout: Duration,
+    marker_poll_interval: Duration,
+) -> Result<()> {
     use crate::codex_startup_patch::{CliWrapperFailure, MAX_CLI_WRAPPER_FAILURE_BYTES};
     use tokio::io::AsyncReadExt;
 
@@ -1682,7 +1698,7 @@ async fn wait_for_cli_wrapper(
             loop {
                 let (mut stream, _) = listener.accept().await?;
                 let mut received = vec![0; expected_token.len()];
-                if tokio::time::timeout(Duration::from_millis(750), stream.read_exact(&mut received))
+                if tokio::time::timeout(read_timeout, stream.read_exact(&mut received))
                     .await
                     .is_ok_and(|result| result.is_ok())
                     && received == expected_token
@@ -1706,7 +1722,7 @@ async fn wait_for_cli_wrapper(
                     }
                     let mut body = Vec::new();
                     let payload = tokio::time::timeout(
-                        Duration::from_millis(750),
+                        read_timeout,
                         stream
                             .take((MAX_CLI_WRAPPER_FAILURE_BYTES + 1) as u64)
                             .read_to_end(&mut body),
@@ -1728,7 +1744,7 @@ async fn wait_for_cli_wrapper(
                 }
             }
         };
-        let marker = watch_cli_wrapper_marker(&marker_path);
+        let marker = watch_cli_wrapper_marker(&marker_path, marker_poll_interval);
         tokio::select! {
             result = accept_handshake => result,
             result = marker => result,
@@ -2197,13 +2213,15 @@ mod cli_wrapper_tests {
                 if failed {
                     valid.write_all(b"!").await.unwrap();
                 } else {
-                    // 创建进程超过旧的 750ms 窗口，仍应等到明确的执行结果。
-                    tokio::time::sleep(Duration::from_millis(900)).await;
+                    // 创建进程超过读超时窗口，仍应等到明确的执行结果。
+                    tokio::time::sleep(Duration::from_millis(70)).await;
                 }
             });
-            let result = wait_for_cli_wrapper(
+            let result = wait_for_cli_wrapper_with_timings(
                 handshake,
                 tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+                Duration::from_millis(40),
+                Duration::from_millis(10),
             )
             .await;
             assert_eq!(result.is_err(), failed);
@@ -2225,11 +2243,11 @@ mod cli_wrapper_tests {
             let (handshake, marker_path) = test_handshake(listener, b"token");
             let writer_path = marker_path.clone();
             let writer = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
                 CliWrapperMarker::new(CliWrapperMarkerStatus::Launching)
                     .write(&writer_path)
                     .unwrap();
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
                 let mut marker = CliWrapperMarker::new(if failed {
                     CliWrapperMarkerStatus::Failed
                 } else {
@@ -2241,9 +2259,11 @@ mod cli_wrapper_tests {
                 }
                 marker.write(&writer_path).unwrap();
             });
-            let result = wait_for_cli_wrapper(
+            let result = wait_for_cli_wrapper_with_timings(
                 handshake,
                 tokio::time::Instant::now() + Duration::from_secs(5),
+                Duration::from_millis(750),
+                Duration::from_millis(10),
             )
             .await;
             writer.await.unwrap();

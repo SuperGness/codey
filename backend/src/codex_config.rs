@@ -13,11 +13,9 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value, value};
 
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
-    ROOT_AGENT_MULTI_AGENT_MODE_HINT, ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS,
-    SUBAGENT_TASK_BOUNDARY_GUARD, append_root_agent_collaboration_usage_hint,
-    remove_codey_fastctx_guidance, remove_subagent_guidance, root_agent_collaboration_usage_hint,
-    subagent_source_config,
+    CODEY_FASTCTX_GUIDANCE, ROOT_AGENT_MULTI_AGENT_MODE_HINT, SUBAGENT_TASK_BOUNDARY_GUARD,
+    append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
+    root_agent_collaboration_usage_hint, subagent_source_config,
 };
 use crate::config::{
     CodeyConfig, SUBAGENT_REASONING_EFFORTS, SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS,
@@ -147,19 +145,20 @@ fn read_codex_config_document(path: &Path) -> Result<DocumentMut> {
     })
 }
 
-fn read_or_create_codex_config(path: &Path) -> Result<Vec<u8>> {
+fn load_or_create_codex_config(
+    path: &Path,
+) -> Result<std::sync::Arc<codey_runtime_core::config_manager::ConfigSnapshot>> {
     let manager = ConfigManager::new(path);
     let snapshot = manager.load()?;
     if snapshot.exists() {
-        return Ok(snapshot.raw().to_vec());
+        return Ok(snapshot);
     }
-    let created = manager.replace_text(
+    manager.replace_text(
         Some(snapshot.revision()),
         "",
         "create empty Codex config.toml for desktop compatibility",
-        "codex_config.read_or_create_codex_config",
-    )?;
-    Ok(created.raw().to_vec())
+        "codex_config.load_or_create_codex_config",
+    )
 }
 
 fn codex_config_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
@@ -417,14 +416,17 @@ fn apply_isolated_runtime_router_config(
     fs::create_dir_all(home)?;
     let config_path = home.join("config.toml");
     let hooks_path = home.join("hooks.json");
-    let original_config = if local_router.is_some() {
-        Some(read_or_create_codex_config(&config_path)?)
+    let (original_config, persistent) = if local_router.is_some() {
+        let snapshot = load_or_create_codex_config(&config_path)?;
+        (Some(snapshot.raw().to_vec()), snapshot.document().clone())
     } else {
-        read_codex_config(&config_path)?
+        let snapshot = ConfigManager::new(&config_path).load()?;
+        if snapshot.exists() {
+            (Some(snapshot.raw().to_vec()), snapshot.document().clone())
+        } else {
+            (None, DocumentMut::new())
+        }
     };
-    let existing = str::from_utf8(original_config.as_deref().unwrap_or_default())
-        .context("Codex config.toml 不是 UTF-8")?;
-    let persistent = parse_document(existing).context("解析 Codex config.toml 失败")?;
     if local_router.is_some() && user_owned_router_provider_occupies_id(&persistent) {
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
@@ -450,8 +452,9 @@ fn apply_isolated_runtime_router_config(
                     .unwrap_or_default()
             })
     });
-    let effective = patch_config_with_fastctx_mode(
-        existing,
+    let mut effective_document = persistent.clone();
+    patch_document_with_fastctx_mode(
+        &mut effective_document,
         RouterPatchOptions {
             config_path: &config_path,
             model_catalog_path: model_catalog_path.as_deref(),
@@ -464,7 +467,6 @@ fn apply_isolated_runtime_router_config(
             local_router,
         },
     )?;
-    let mut effective_document = parse_document(&effective).context("解析 Codey 运行时约束失败")?;
     if use_official_catalog {
         update_model_catalog_reference(
             &mut effective_document,
@@ -1006,11 +1008,6 @@ fn apply_isolated_prompt_sources(
         "developer_instructions",
         remove_codey_fastctx_guidance,
     );
-    remove_guidance_from_table(
-        document.as_table_mut(),
-        "developer_instructions",
-        remove_subagent_guidance,
-    );
     if let Some(instructions) = fastctx_instructions {
         append_table_constraint_text(
             document.as_table_mut(),
@@ -1032,11 +1029,6 @@ fn apply_isolated_prompt_sources(
         "subagent_developer_instructions",
         remove_codey_fastctx_guidance,
     );
-    remove_guidance_from_table(
-        multi_agent,
-        "subagent_developer_instructions",
-        remove_subagent_guidance,
-    );
     if let Some(instructions) = fastctx_instructions {
         append_table_constraint_text(
             multi_agent,
@@ -1050,14 +1042,9 @@ fn apply_isolated_prompt_sources(
             .get("root_agent_usage_hint_text")
             .and_then(Item::as_str)
             .unwrap_or_default();
-        let cleaned = ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS
-            .iter()
-            .fold(existing.to_string(), |current, guidance| {
-                remove_constraint_text(&current, guidance)
-            });
         multi_agent.insert(
             "root_agent_usage_hint_text",
-            value(append_constraint_text(&cleaned, collaboration_hint)),
+            value(append_constraint_text(existing, collaboration_hint)),
         );
     }
     Ok(())
@@ -1084,26 +1071,6 @@ fn append_table_constraint_text(
         table.insert(key, value(combined));
     }
     Ok(())
-}
-
-fn remove_constraint_text(existing: &str, constraint: &str) -> String {
-    let constraint = constraint.trim();
-    if constraint.is_empty() {
-        return existing.to_string();
-    }
-    let mut current = existing.to_string();
-    while let Some(index) = current.find(constraint) {
-        let mut start = index;
-        if current[..start].ends_with("\n\n") {
-            start -= 2;
-        }
-        let mut end = index + constraint.len();
-        if current[end..].starts_with("\n\n") {
-            end += 2;
-        }
-        current.replace_range(start..end, "");
-    }
-    current.trim().to_string()
 }
 
 fn optional_file_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
@@ -1360,7 +1327,7 @@ fn restore_runtime_config_at(
             .with_context(|| format!("解析 Codey Codex lease 失败：{}", marker.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return if repair_router_config {
-                repair_persistent_codey_runtime_config(home)
+                restore_persistent_router_resume_shim_if_owned(home)
             } else {
                 Ok(false)
             };
@@ -1371,7 +1338,7 @@ fn restore_runtime_config_at(
     // 预算和 Hook 的恢复均保留用户在运行期间做出的修改。
     rollback_isolated_runtime_config(home, marker, &state)?;
     if repair_router_config {
-        let _ = repair_persistent_codey_runtime_config(home)?;
+        let _ = restore_persistent_router_resume_shim_if_owned(home)?;
     }
     Ok(true)
 }
@@ -1384,7 +1351,7 @@ fn runtime_agent_remote_compaction_models(config: &CodeyConfig) -> HashSet<Strin
         .collect()
 }
 
-fn repair_persistent_codey_runtime_config(home: &Path) -> Result<bool> {
+fn restore_persistent_router_resume_shim_if_owned(home: &Path) -> Result<bool> {
     let config_path = home.join("config.toml");
     let manager = ConfigManager::new(&config_path);
     let snapshot = manager.load()?;
@@ -1396,21 +1363,14 @@ fn repair_persistent_codey_runtime_config(home: &Path) -> Result<bool> {
         document_provider_table(&document, id)
             .is_some_and(codey_router_provider_table_is_codey_owned)
     });
-    let codey_router_dangling = persistent_codey_router_selection_is_dangling(&document);
-    let removed = remove_persistent_codey_runtime_config(&mut document, home);
-    let shimmed = if codey_router_owned || codey_router_dangling {
-        ensure_persistent_router_resume_shim(&mut document)?
-    } else {
-        false
-    };
-    if !removed && !shimmed {
+    if !codey_router_owned || !ensure_persistent_router_resume_shim(&mut document)? {
         return Ok(false);
     }
     manager.replace_document(
         Some(snapshot.revision()),
         document,
-        "repair legacy Codey runtime-only settings",
-        "codex_config.repair_persistent_codey_runtime_config",
+        "restore persistent codey_router resume shim",
+        "codex_config.restore_persistent_router_resume_shim",
     )?;
     Ok(true)
 }
@@ -1653,39 +1613,6 @@ pub(crate) fn prepare_runtime_router_disk_provider_at(
     Ok(true)
 }
 
-fn remove_persistent_codey_runtime_config(doc: &mut DocumentMut, home: &Path) -> bool {
-    let before = doc.to_string();
-    let codey_router_owned = codey_router_provider_is_codey_owned(doc);
-    let codey_subagent_owned = persistent_codey_subagent_config_is_owned(doc);
-    let codey_router_selected = persistent_codey_router_is_selected(doc);
-    let codey_router_runtime_selected =
-        codey_router_selected && (codey_router_owned || codey_subagent_owned);
-    let codey_router_dangling = persistent_codey_router_selection_is_dangling(doc);
-    if codey_router_runtime_selected || codey_router_dangling {
-        doc.as_table_mut().remove("model_provider");
-    }
-    if doc
-        .get("model")
-        .and_then(Item::as_str)
-        .is_some_and(|_| codey_router_runtime_selected || codey_router_dangling)
-    {
-        doc.as_table_mut().remove("model");
-    }
-    remove_codey_model_catalog_reference(doc, home);
-    remove_codey_owned_agents_config(doc, codey_subagent_owned);
-    remove_codey_owned_multi_agent_defaults(doc, codey_subagent_owned);
-    remove_legacy_codey_hooks(doc, &home.join("config.toml"));
-    if document_provider_table(doc, local_router::REMOTE_COMPACTION_PROVIDER_ID)
-        .is_some_and(codey_router_provider_table_is_codey_owned)
-        && let Some(providers) = doc
-            .get_mut("model_providers")
-            .and_then(Item::as_table_like_mut)
-    {
-        providers.remove(local_router::REMOTE_COMPACTION_PROVIDER_ID);
-    }
-    doc.to_string() != before
-}
-
 pub(crate) fn user_owned_router_provider_occupies_id(document: &DocumentMut) -> bool {
     local_router::OWNED_ROUTER_PROVIDER_IDS.iter().any(|id| {
         document_provider_item(document, id).is_some_and(|item| {
@@ -1695,15 +1622,6 @@ pub(crate) fn user_owned_router_provider_occupies_id(document: &DocumentMut) -> 
     })
 }
 
-fn codey_router_provider_is_codey_owned(doc: &DocumentMut) -> bool {
-    let id = doc
-        .get("model_provider")
-        .and_then(Item::as_str)
-        .filter(|id| local_router::is_router_provider(id))
-        .unwrap_or(local_router::ROUTER_PROVIDER_ID);
-    document_provider_table(doc, id).is_some_and(codey_router_provider_table_is_codey_owned)
-}
-
 fn codey_router_provider_table_is_codey_owned(provider: &dyn TableLike) -> bool {
     let has_codey_token_header = provider
         .get("http_headers")
@@ -1711,20 +1629,6 @@ fn codey_router_provider_table_is_codey_owned(provider: &dyn TableLike) -> bool 
         .is_some_and(|headers| headers.contains_key(local_router::ROUTER_AUTH_HEADER));
     let has_codey_name = table_like_str(provider, "name") == Some(LOCAL_ROUTER_PROVIDER_NAME);
     has_codey_token_header || has_codey_name
-}
-
-fn persistent_codey_router_is_selected(doc: &DocumentMut) -> bool {
-    doc.get("model_provider")
-        .and_then(Item::as_str)
-        .is_some_and(|provider| local_router::is_router_provider(provider.trim()))
-}
-
-fn persistent_codey_router_selection_is_dangling(doc: &DocumentMut) -> bool {
-    persistent_codey_router_is_selected(doc)
-        && doc
-            .get("model_provider")
-            .and_then(Item::as_str)
-            .is_some_and(|id| document_provider_table(doc, id.trim()).is_none())
 }
 
 fn ensure_persistent_router_resume_shim(doc: &mut DocumentMut) -> Result<bool> {
@@ -1949,130 +1853,6 @@ fn is_loopback_http_url(url: &str) -> bool {
         || url.starts_with("https://[::1]:")
 }
 
-fn is_route_qualified_model(model: &str) -> bool {
-    // Shared parser: the route segment never contains `/`, so splitting on
-    // the first slash matches `model_alias` even for slash-containing models.
-    crate::model_id::parse_alias(model).is_some()
-}
-
-fn remove_codey_model_catalog_reference(doc: &mut DocumentMut, home: &Path) {
-    let Some(catalog_path) = doc.get("model_catalog_json").and_then(Item::as_str) else {
-        return;
-    };
-    let catalog_path = catalog_path.trim();
-    let relative = crate::model_catalog::relative_path();
-    let absolute = home.join(relative).to_string_lossy().replace('\\', "/");
-    let normalized = catalog_path.replace('\\', "/");
-    if normalized == relative
-        || normalized == absolute
-        || normalized.ends_with(&format!("/{relative}"))
-    {
-        doc.as_table_mut().remove("model_catalog_json");
-    }
-}
-
-fn persistent_codey_subagent_config_is_owned(doc: &DocumentMut) -> bool {
-    let owned_role = doc
-        .get("agents")
-        .and_then(Item::as_table)
-        .is_some_and(|agents| {
-            crate::config::owned_subagent_role_ids().any(|role| {
-                agents
-                    .get(role)
-                    .and_then(Item::as_table)
-                    .is_some_and(agent_role_table_is_codey_owned)
-            }) || crate::config::owned_subagent_role_ids()
-                .filter(|role| *role != SUBAGENT_ROLE_DEFAULT)
-                .any(|role| agents.contains_key(role))
-        });
-    let owned_multi_agent_hint = doc
-        .get("features")
-        .and_then(Item::as_table)
-        .and_then(|features| features.get("multi_agent_v2"))
-        .and_then(Item::as_table)
-        .is_some_and(|multi_agent| {
-            multi_agent
-                .get("multi_agent_mode_hint_text")
-                .and_then(Item::as_str)
-                .is_some_and(|hint| ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS.contains(&hint))
-                || multi_agent
-                    .get("root_agent_usage_hint_text")
-                    .and_then(Item::as_str)
-                    .is_some_and(|hint| {
-                        ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS
-                            .iter()
-                            .any(|owned| hint.contains(owned.trim()))
-                    })
-        });
-    owned_role || owned_multi_agent_hint
-}
-
-fn remove_codey_owned_agents_config(doc: &mut DocumentMut, codey_owned: bool) {
-    let Some(agents) = doc.get_mut("agents").and_then(Item::as_table_mut) else {
-        return;
-    };
-    for role in crate::config::owned_subagent_role_ids() {
-        let remove_role = agents
-            .get(role)
-            .and_then(Item::as_table)
-            .is_some_and(agent_role_table_is_codey_owned)
-            || (codey_owned && role != SUBAGENT_ROLE_DEFAULT);
-        if remove_role {
-            agents.remove(role);
-        }
-    }
-    let removed_default_model = agents
-        .get("default_subagent_model")
-        .and_then(Item::as_str)
-        .is_some_and(|model| codey_owned && is_route_qualified_model(model));
-    if removed_default_model {
-        agents.remove("default_subagent_model");
-        agents.remove("default_subagent_reasoning_effort");
-    }
-    if agents.is_empty() {
-        doc.as_table_mut().remove("agents");
-    }
-}
-
-fn agent_role_table_is_codey_owned(role: &Table) -> bool {
-    role.get("config_file")
-        .and_then(Item::as_str)
-        .is_some_and(|path| {
-            let normalized = path.replace('\\', "/");
-            normalized.contains("/codex-constraints/runtime/")
-                || normalized.starts_with("codex-constraints/runtime/")
-        })
-}
-
-fn remove_codey_owned_multi_agent_defaults(doc: &mut DocumentMut, codey_owned: bool) {
-    if !codey_owned {
-        return;
-    }
-    let Some(features) = doc.get_mut("features").and_then(Item::as_table_mut) else {
-        return;
-    };
-    let Some(multi_agent) = features
-        .get_mut("multi_agent_v2")
-        .and_then(Item::as_table_mut)
-    else {
-        return;
-    };
-    if multi_agent
-        .get("default_subagent_model")
-        .and_then(Item::as_str)
-        .is_some_and(is_route_qualified_model)
-    {
-        multi_agent.remove("default_subagent_model");
-        multi_agent.remove("default_subagent_reasoning_effort");
-    }
-    if multi_agent.is_empty() {
-        features.remove("multi_agent_v2");
-    }
-    if features.is_empty() {
-        doc.as_table_mut().remove("features");
-    }
-}
-
 fn restore_runtime_hooks_file(home: &Path, state: &RuntimeConfigLease) -> Result<()> {
     if !state.runtime_hooks_applied {
         return Ok(());
@@ -2224,10 +2004,20 @@ struct RouterPatchOptions<'a> {
     local_router: Option<&'a RuntimeRouterEndpoint>,
 }
 
+#[cfg(test)]
 fn patch_config_with_fastctx_mode(
     existing: &str,
     options: RouterPatchOptions<'_>,
 ) -> Result<String> {
+    let mut doc = parse_document(existing)?;
+    patch_document_with_fastctx_mode(&mut doc, options)?;
+    document_string(&doc)
+}
+
+fn patch_document_with_fastctx_mode(
+    doc: &mut DocumentMut,
+    options: RouterPatchOptions<'_>,
+) -> Result<()> {
     let RouterPatchOptions {
         config_path,
         model_catalog_path,
@@ -2239,29 +2029,28 @@ fn patch_config_with_fastctx_mode(
         scope_guard,
         local_router,
     } = options;
-    let mut doc = parse_document(existing)?;
     if let Some(local_router) = local_router {
-        ensure_provider_table(&mut doc)?;
+        ensure_provider_table(doc)?;
         for (id, table) in runtime_router_provider_tables(local_router) {
             doc["model_providers"]
                 .as_table_mut()
                 .expect("model_providers was initialized")[id] = Item::Table(table);
         }
         doc["model_provider"] = value(local_router::ROUTER_PROVIDER_ID);
-        update_model_catalog_reference(&mut doc, config_path, model_catalog_path);
-        set_model_selection(&mut doc, default_model);
+        update_model_catalog_reference(doc, config_path, model_catalog_path);
+        set_model_selection(doc, default_model);
     }
-    enable_desktop_reasoning_efforts(&mut doc)?;
-    set_runtime_model_defaults(&mut doc);
+    enable_desktop_reasoning_efforts(doc)?;
+    set_runtime_model_defaults(doc);
     let fastctx_namespace = if let Some(command) = fastctx_command {
-        enable_fast_context_tools(&mut doc, command)?
+        enable_fast_context_tools(doc, command)?
     } else {
-        disable_fast_context_tools(&mut doc);
+        disable_fast_context_tools(doc);
         None
     };
     if subagent_optimization {
         enable_subagent_optimization(
-            &mut doc,
+            doc,
             subagent_model,
             subagent_reasoning_effort,
             fastctx_namespace.as_deref(),
@@ -2271,9 +2060,9 @@ fn patch_config_with_fastctx_mode(
         // Hook definitions live in the runtime hooks.json built by
         // `build_runtime_hooks_file`; the TOML document only carries the
         // feature flag that `build_isolated_runtime_overrides` forwards.
-        enable_hooks_feature(&mut doc)?;
+        enable_hooks_feature(doc)?;
     }
-    document_string(&doc)
+    Ok(())
 }
 
 fn enable_subagent_optimization(
@@ -3026,167 +2815,6 @@ fn hook_command_is_codey_owned(command: &str) -> bool {
     command.contains(crate::subagent_gate::HOOK_ARGUMENT)
         || command.contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
         || command.contains(crate::scope_guard::HOOK_ARGUMENT)
-}
-
-/// Releases before the runtime `hooks.json` carried their hook definitions in
-/// `config.toml`. Codex loads both files, so a leftover Codey group makes every
-/// hook run twice, and the second run rejects the spawn that the first one just
-/// admitted. Drop the Codey-owned groups, keep user groups and move their trust
-/// state to the surviving indices.
-fn remove_legacy_codey_hooks(doc: &mut DocumentMut, config_path: &Path) {
-    let Some(hooks) = doc.get_mut("hooks").and_then(Item::as_table_mut) else {
-        return;
-    };
-    for (toml_event, state_event) in LEGACY_CODEY_HOOK_EVENTS {
-        let Some((index_map, event_is_empty)) =
-            hooks.get_mut(toml_event).and_then(remove_codey_hook_groups)
-        else {
-            continue;
-        };
-        if event_is_empty {
-            hooks.remove(toml_event);
-        }
-        if let Some(state) = hooks.get_mut("state").and_then(Item::as_table_mut) {
-            remap_hook_state_entries(state, config_path, state_event, &index_map);
-        }
-    }
-}
-
-const LEGACY_CODEY_HOOK_EVENTS: [(&str, &str); 7] = [
-    ("PreToolUse", "pre_tool_use"),
-    ("PostToolUse", "post_tool_use"),
-    ("UserPromptSubmit", "user_prompt_submit"),
-    ("SubagentStart", "subagent_start"),
-    ("SubagentStop", "subagent_stop"),
-    ("Stop", "stop"),
-    ("SessionEnd", "session_end"),
-];
-
-fn remove_codey_hook_groups(event: &mut Item) -> Option<(Vec<Option<usize>>, bool)> {
-    let (owned, group_count) = match event {
-        Item::ArrayOfTables(groups) => (
-            groups
-                .iter()
-                .map(table_hook_group_is_codey_owned)
-                .collect::<Vec<_>>(),
-            groups.len(),
-        ),
-        Item::Value(Value::Array(groups)) => (
-            groups
-                .iter()
-                .map(value_hook_group_is_codey_owned)
-                .collect::<Vec<_>>(),
-            groups.len(),
-        ),
-        _ => return None,
-    };
-    if !owned.iter().any(|owned| *owned) {
-        return None;
-    }
-
-    let mut next_index = 0;
-    let index_map = owned
-        .iter()
-        .map(|owned| {
-            if *owned {
-                None
-            } else {
-                let index = next_index;
-                next_index += 1;
-                Some(index)
-            }
-        })
-        .collect::<Vec<_>>();
-    for index in (0..group_count).rev() {
-        if !owned[index] {
-            continue;
-        }
-        match event {
-            Item::ArrayOfTables(groups) => {
-                groups.remove(index);
-            }
-            Item::Value(Value::Array(groups)) => {
-                groups.remove(index);
-            }
-            _ => {}
-        }
-    }
-    Some((index_map, next_index == 0))
-}
-
-fn table_hook_group_is_codey_owned(group: &Table) -> bool {
-    group
-        .get("hooks")
-        .is_some_and(hook_handlers_item_is_codey_owned)
-}
-
-fn value_hook_group_is_codey_owned(group: &Value) -> bool {
-    group
-        .as_inline_table()
-        .and_then(|group| group.get("hooks"))
-        .and_then(Value::as_array)
-        .is_some_and(|handlers| handlers.iter().any(value_hook_handler_is_codey_owned))
-}
-
-fn hook_handlers_item_is_codey_owned(handlers: &Item) -> bool {
-    match handlers {
-        Item::ArrayOfTables(handlers) => handlers.iter().any(table_hook_handler_is_codey_owned),
-        Item::Value(Value::Array(handlers)) => {
-            handlers.iter().any(value_hook_handler_is_codey_owned)
-        }
-        _ => false,
-    }
-}
-
-fn table_hook_handler_is_codey_owned(handler: &Table) -> bool {
-    ["command", "commandWindows", "command_windows"]
-        .into_iter()
-        .filter_map(|key| handler.get(key).and_then(Item::as_str))
-        .any(hook_command_is_codey_owned)
-}
-
-fn value_hook_handler_is_codey_owned(handler: &Value) -> bool {
-    handler.as_inline_table().is_some_and(|handler| {
-        ["command", "commandWindows", "command_windows"]
-            .into_iter()
-            .filter_map(|key| handler.get(key).and_then(Value::as_str))
-            .any(hook_command_is_codey_owned)
-    })
-}
-
-fn remap_hook_state_entries(
-    state: &mut Table,
-    config_path: &Path,
-    event_key: &str,
-    index_map: &[Option<usize>],
-) {
-    let prefix = format!("{}:{event_key}:", config_path.display());
-    let keys = state
-        .iter()
-        .filter(|(key, _)| key.starts_with(&prefix))
-        .map(|(key, _)| key.to_string())
-        .collect::<Vec<_>>();
-    let mut retained = Vec::new();
-    for key in keys {
-        let Some((group_index, handler_index)) = key[prefix.len()..].split_once(':') else {
-            continue;
-        };
-        let Ok(group_index) = group_index.parse::<usize>() else {
-            continue;
-        };
-        let Some(new_group_index) = index_map.get(group_index) else {
-            continue;
-        };
-        let Some(entry) = state.remove(&key) else {
-            continue;
-        };
-        if let Some(new_group_index) = new_group_index {
-            retained.push((format!("{prefix}{new_group_index}:{handler_index}"), entry));
-        }
-    }
-    for (key, entry) in retained {
-        state.insert(&key, entry);
-    }
 }
 
 fn local_router_provider_table(endpoint: &RuntimeRouterEndpoint) -> Table {

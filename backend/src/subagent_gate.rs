@@ -48,12 +48,10 @@ const RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_SUBAGENT_ATTESTATION_PREFIX: &str = "runtime-attestation-";
 const MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES: u64 = 2 * 1024 * 1024;
-const LEGACY_RUNTIME_ID: &str = "legacy-runtime";
 const PENDING_INIT_GRACE_MILLIS: u64 = 10 * 60 * 1000;
 const STATE_ERROR_GRACE_MILLIS: u64 = 10 * 60 * 1000;
 const UNAVAILABLE_STATUS_GRACE_MILLIS: u64 = 30 * 1000;
 const UNAVAILABLE_STATUS_SINCE_FILE: &str = "unavailable-status-since.state";
-const PENDING_INIT_OBSERVED_FILE: &str = "pending-init-observed.state";
 const CHILD_TOOL_IN_FLIGHT_PREFIX: &str = "child-tool-in-flight-";
 const STATE_ERROR_SINCE_FILE: &str = "state-error-since.state";
 const PROTOCOL_HEALTH_FILE: &str = "protocol-health.json";
@@ -155,10 +153,19 @@ pub fn run_hook_if_requested() -> Result<bool> {
     };
     let state_root = crate::codex_config::codex_home().join(STATE_DIRECTORY);
     let runtime_id = current_runtime_id();
-    let output = match mode {
-        HookMode::SubagentOnly => handle_hook_for_runtime(&input, &state_root, &runtime_id),
-        HookMode::WithFastctx => {
-            combined_hook_output_for_runtime(&input, &state_root, &runtime_id, gate_active)
+    let output = match (mode, gate_active) {
+        (HookMode::SubagentOnly, _) => runtime_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("缺少 {RUNTIME_ID_ENV} 环境变量"))
+            .and_then(|runtime_id| handle_hook_for_runtime(&input, &state_root, runtime_id)),
+        (HookMode::WithFastctx, true) => runtime_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("缺少 {RUNTIME_ID_ENV} 环境变量"))
+            .and_then(|runtime_id| {
+                combined_hook_output_for_runtime(&input, &state_root, runtime_id, true)
+            }),
+        (HookMode::WithFastctx, false) => {
+            combined_hook_output_for_runtime(&input, &state_root, "", false)
         }
     }
     .unwrap_or_else(|error| {
@@ -206,12 +213,16 @@ fn runtime_gate_is_active(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
-fn current_runtime_id() -> String {
+fn current_runtime_id() -> Option<String> {
     std::env::var(RUNTIME_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| LEGACY_RUNTIME_ID.to_string())
+}
+
+#[cfg(test)]
+fn test_runtime_id() -> String {
+    current_runtime_id().unwrap_or_else(|| "test-runtime".to_string())
 }
 
 fn write_hook_output(output: &Value) -> Result<()> {
@@ -266,7 +277,7 @@ pub(crate) fn hook_trust_hash(
 
 #[cfg(test)]
 fn handle_hook(input: &HookInput, state_root: &Path) -> Result<Value> {
-    handle_hook_for_runtime(input, state_root, &current_runtime_id())
+    handle_hook_for_runtime(input, state_root, &test_runtime_id())
 }
 
 fn handle_hook_for_runtime(
@@ -1613,12 +1624,6 @@ fn recover_root_active_state(
             PENDING_INIT_GRACE_MILLIS,
         )?;
     if let Some(recovery) = &ledger_pending_recovery {
-        remove_session_auxiliary_file(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            PENDING_INIT_OBSERVED_FILE,
-        )?;
         for agent_id_hash in recovery {
             remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
         }
@@ -1628,15 +1633,6 @@ fn recover_root_active_state(
             return Ok(0);
         }
     }
-    let legacy_pending_init_elapsed = ledger_pending_recovery.is_none()
-        && observation_elapsed_if_present(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            PENDING_INIT_OBSERVED_FILE,
-            now_ms,
-            PENDING_INIT_GRACE_MILLIS,
-        )?;
     // An unavailable status tool does not stop an already-running child tool.
     let child_tool_running = any_child_tool_in_flight(state_root, runtime_id, &input.session_id)?;
     let status_unavailable = observation_elapsed_if_present(
@@ -1647,7 +1643,7 @@ fn recover_root_active_state(
         now_ms,
         UNAVAILABLE_STATUS_GRACE_MILLIS,
     )?;
-    if !child_tool_running && (status_unavailable || legacy_pending_init_elapsed) {
+    if !child_tool_running && status_unavailable {
         crate::subagent_orchestrator::recover_active_reservations(
             state_root,
             runtime_id,
@@ -2095,56 +2091,13 @@ fn reconcile_list_agents_response(
         now_ms,
         PENDING_INIT_GRACE_MILLIS,
     )? {
-        // Ledger-backed sessions keep the timer in the authoritative
-        // reservation. Remove a pre-upgrade session-wide observation so Stop
-        // cannot later fence healthy siblings with the legacy all-or-nothing
-        // recovery path.
-        remove_session_auxiliary_file(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            PENDING_INIT_OBSERVED_FILE,
-        )?;
         for agent_id_hash in &recovery {
             remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
         }
-        if snapshot == AgentListSnapshotState::AllChildrenTerminal {
-            return Ok(true);
-        }
-        return Ok(false);
+        return Ok(snapshot == AgentListSnapshotState::AllChildrenTerminal);
     }
 
-    // Legacy marker-only sessions have no reversible identity mapping. Preserve
-    // the conservative session-level fallback instead of guessing which opaque
-    // marker belongs to a canonical task path.
-    match snapshot {
-        AgentListSnapshotState::AllChildrenTerminal => Ok(true),
-        AgentListSnapshotState::OnlyPendingInit => {
-            if observe_and_check_elapsed(
-                state_root,
-                runtime_id,
-                &input.session_id,
-                PENDING_INIT_OBSERVED_FILE,
-                now_ms,
-                PENDING_INIT_GRACE_MILLIS,
-            )? {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-        AgentListSnapshotState::HasLiveChildren => {
-            remove_session_auxiliary_file(
-                state_root,
-                runtime_id,
-                &input.session_id,
-                PENDING_INIT_OBSERVED_FILE,
-            )?;
-            Ok(false)
-        }
-        // Both states return before this match; the arm only keeps it exhaustive.
-        AgentListSnapshotState::NoChildren | AgentListSnapshotState::Unknown => Ok(false),
-    }
+    Ok(snapshot == AgentListSnapshotState::AllChildrenTerminal)
 }
 
 fn list_agents_query_is_full(tool_input: Option<&Value>) -> bool {

@@ -36,13 +36,23 @@ pub(super) async fn repair_plugin_marketplace() -> Result<Value, String> {
     let home = codex_home();
     let marketplace_home = home;
     let result = tokio::task::spawn_blocking(move || {
-        plugin_marketplace::ensure_marketplaces(marketplace_home)
+        let repair = plugin_marketplace::ensure_marketplaces(marketplace_home)?;
+        let mut status = plugin_marketplace::marketplaces_status(marketplace_home);
+        if let Some(object) = status.as_object_mut() {
+            for key in ["initializedRemote", "configuredRemote", "configChanged"] {
+                if let Some(value) = repair.get(key) {
+                    object.insert(key.into(), value.clone());
+                }
+            }
+        }
+        decorate_plugin_marketplace_status(marketplace_home, &mut status);
+        Ok::<_, anyhow::Error>(status)
     })
     .await
     .map_err(|error| format!("插件市场修复任务异常退出：{error}"))
     .and_then(|result| result.map_err(|error| error.to_string()));
-    let repair = match result {
-        Ok(repair) => repair,
+    match result {
+        Ok(status) => Ok(status),
         Err(error) => {
             error_log::record_failure(
                 "patch_failed",
@@ -52,19 +62,9 @@ pub(super) async fn repair_plugin_marketplace() -> Result<Value, String> {
                     "codexHome": home,
                 }),
             );
-            return Err(error);
-        }
-    };
-    let mut status = plugin_marketplace::marketplaces_status(home);
-    if let Some(object) = status.as_object_mut() {
-        for key in ["initializedRemote", "configuredRemote", "configChanged"] {
-            if let Some(value) = repair.get(key) {
-                object.insert(key.into(), value.clone());
-            }
+            Err(error)
         }
     }
-    decorate_plugin_marketplace_status(home, &mut status);
-    Ok(status)
 }
 
 pub(super) async fn prepare_computer_use() -> Result<Value, String> {

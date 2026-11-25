@@ -504,6 +504,7 @@ pub(crate) fn find_thread(
             continue;
         }
         let db = Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
         if !has_table(&db, "threads")? {
             continue;
         }
@@ -577,23 +578,21 @@ fn active_thread_database(home: &Path) -> Result<Option<PathBuf>> {
         if !db_path.exists() {
             continue;
         }
-        let db =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let db = Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
         if !has_table(&db, "threads")? {
             continue;
         }
         let columns = table_columns(&db, "threads")?;
-        if !columns.iter().any(|column| column == "id")
-            || !columns.iter().any(|column| column == "rollout_path")
-            || !columns.iter().any(|column| column == "cwd")
+        if !columns.contains("id") || !columns.contains("rollout_path") || !columns.contains("cwd")
         {
             continue;
         }
-        let score_expression = if columns.iter().any(|column| column == "recency_at_ms") {
+        let score_expression = if columns.contains("recency_at_ms") {
             "COALESCE(MAX(recency_at_ms), 0)"
-        } else if columns.iter().any(|column| column == "updated_at_ms") {
+        } else if columns.contains("updated_at_ms") {
             "COALESCE(MAX(updated_at_ms), 0)"
-        } else if columns.iter().any(|column| column == "updated_at") {
+        } else if columns.contains("updated_at") {
             "COALESCE(MAX(updated_at), 0) * 1000"
         } else {
             "COUNT(*)"
@@ -621,6 +620,7 @@ fn thread_exists(home: &Path, session_id: &str) -> Result<bool> {
             continue;
         }
         let db = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
         if !has_table(&db, "threads")? {
             continue;
         }

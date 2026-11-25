@@ -1,7 +1,5 @@
 use super::*;
 
-/// Context window an older Codey version wrote for models flagged as 1M capable.
-pub(super) const LEGACY_1M_CONTEXT_WINDOW: u64 = 1_000_000;
 pub(super) const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
 pub(super) const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const OFFICIAL_DEFAULT_CONTEXT_WINDOW: u64 = 400_000;
@@ -728,14 +726,16 @@ fn render_catalog_for_provider(
     {
         return Ok(Vec::new());
     }
-    let mut official_models = read_official_entries_in_context(home, context)?;
-    // Codex 26.908+ may never write `models_cache.json`; capture the CLI's own
-    // catalog before declaring the runtime cache unusable. A snapshot older
-    // than the local Codex binary is refreshed again so a
-    // Codex upgrade does not keep serving stale instructions.
-    let sources_unusable = official_models
-        .iter()
-        .all(|model| model_instruction_source(model).is_none());
+    let mut official_models = match read_official_entries_in_context(home, context) {
+        Ok(models) => models,
+        Err(_) => Arc::new(Vec::new()),
+    };
+    // Capture the bundled CLI's catalog when no matching local snapshot exists
+    // or when the installed Codex binary is newer than the snapshot.
+    let sources_unusable = official_models.is_empty()
+        || official_models
+            .iter()
+            .all(|model| model_instruction_source(model).is_none());
     let stale_snapshot = !sources_unusable && runtime_snapshot_is_stale(home, context);
     if sources_unusable || stale_snapshot {
         let snapshot_synced =
@@ -744,12 +744,14 @@ fn render_catalog_for_provider(
                 false
             });
         if snapshot_synced {
-            official_models = read_official_entries_in_context(home, context)?;
+            official_models = read_official_entries_in_context(home, context)
+                .unwrap_or_else(|_| Arc::new(Vec::new()));
         }
     }
-    if official_models
-        .iter()
-        .all(|model| model_instruction_source(model).is_none())
+    if official_models.is_empty()
+        || official_models
+            .iter()
+            .all(|model| model_instruction_source(model).is_none())
     {
         return Err(RuntimeModelCacheUnavailable.into());
     }
@@ -1157,37 +1159,42 @@ pub(crate) fn validate_runtime_subagent_models(
     Ok(())
 }
 
-/// Repairs catalogs written by older Codey versions that copied model-cache
-/// entries without Codex's now-required `description` fields on models and
-/// their reasoning levels.
 pub fn is_runtime_model_cache_unavailable(error: &anyhow::Error) -> bool {
     error.is::<RuntimeModelCacheUnavailable>()
 }
 
-pub(super) fn cached_instruction_templates(home: &Path) -> Vec<Value> {
-    fs::read(home.join("models_cache.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .map(|value| official_models_from_value(&value))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|model| model_instruction_source(model).is_some())
-        .collect()
-}
-
-pub(super) fn complete_account_models(models: &[Value], templates: &[Value]) -> Vec<Value> {
-    models
+pub(super) fn complete_account_models_in_place(
+    models: &mut [Value],
+    other_catalogs: &[Vec<Value>],
+) {
+    let needs_completion = models
         .iter()
-        .map(|model| {
-            if model_instruction_source(model).is_some() || model_is_hidden(model) {
-                return model.clone();
-            }
-            let slug = model.get("slug").and_then(Value::as_str).unwrap_or("");
-            instruction_template_for(slug, templates)
-                .map(|template| account_model_with_runtime_template(template, model))
-                .unwrap_or_else(|| model.clone())
-        })
-        .collect()
+        .any(|model| model_instruction_source(model).is_none() && !model_is_hidden(model));
+    if !needs_completion {
+        return;
+    }
+    let replacements: Vec<(usize, Value)> = {
+        let templates = models
+            .iter()
+            .chain(other_catalogs.iter().flat_map(|catalog| catalog.iter()))
+            .filter(|model| model_instruction_source(model).is_some())
+            .collect::<Vec<_>>();
+        models
+            .iter()
+            .enumerate()
+            .filter_map(|(index, model)| {
+                if model_instruction_source(model).is_some() || model_is_hidden(model) {
+                    return None;
+                }
+                let slug = model.get("slug").and_then(Value::as_str).unwrap_or("");
+                let template = instruction_template_for_refs(slug, &templates)?;
+                Some((index, account_model_with_runtime_template(template, model)))
+            })
+            .collect()
+    };
+    for (index, replacement) in replacements {
+        models[index] = replacement;
+    }
 }
 
 pub(super) fn merge_account_model(
@@ -1204,7 +1211,8 @@ pub(super) fn merge_account_model(
         return account_model_with_runtime_template(existing, incoming);
     }
     let slug = incoming.get("slug").and_then(Value::as_str).unwrap_or("");
-    if let Some(template) = instruction_template_for(slug, templates) {
+    let template_refs = templates.iter().collect::<Vec<_>>();
+    if let Some(template) = instruction_template_for_refs(slug, &template_refs) {
         return account_model_with_runtime_template(template, incoming);
     }
     existing.cloned().unwrap_or_else(|| incoming.clone())
@@ -1221,8 +1229,8 @@ fn model_is_hidden(model: &Value) -> bool {
     model.get("visibility").and_then(Value::as_str) == Some("hide")
 }
 
-fn instruction_template_for<'a>(slug: &str, templates: &'a [Value]) -> Option<&'a Value> {
-    let same_slug = templates.iter().find(|model| {
+fn instruction_template_for_refs<'a>(slug: &str, templates: &[&'a Value]) -> Option<&'a Value> {
+    let same_slug = templates.iter().copied().find(|model| {
         model
             .get("slug")
             .and_then(Value::as_str)
@@ -1235,6 +1243,7 @@ fn instruction_template_for<'a>(slug: &str, templates: &'a [Value]) -> Option<&'
     let family = model_family_key(slug);
     templates
         .iter()
+        .copied()
         .find(|model| {
             !model_is_hidden(model)
                 && model_instruction_source(model).is_some()
@@ -1246,6 +1255,7 @@ fn instruction_template_for<'a>(slug: &str, templates: &'a [Value]) -> Option<&'
         .or_else(|| {
             templates
                 .iter()
+                .copied()
                 .find(|model| !model_is_hidden(model) && model_instruction_source(model).is_some())
         })
 }
@@ -1822,7 +1832,7 @@ fn is_official_route_alias(model_id: &str) -> bool {
 
 /// 匹配官方模板的第三方模型不能继承其压缩身份，否则切换模型时 Codex
 /// 会先用旧线路压缩。字段缺失还能兼容会话中已经记录的旧值；改成新常量仍会触发。
-pub(super) fn normalize_third_party_compaction_identity(model: &mut Value) {
+pub(super) fn normalize_third_party_compaction_identity(model: &mut Value) -> bool {
     let is_third_party_alias = model.get("codey_source").and_then(Value::as_str)
         == Some("third_party")
         && model
@@ -1832,9 +1842,10 @@ pub(super) fn normalize_third_party_compaction_identity(model: &mut Value) {
                 // 官方裸模型及派生账号优先按身份保留，兼容旧目录中的错误来源标记。
                 model_id::parse_alias(slug).is_some() && !is_official_route_alias(slug)
             });
-    if is_third_party_alias && let Some(object) = model.as_object_mut() {
-        object.remove("comp_hash");
-    }
+    is_third_party_alias
+        && model
+            .as_object_mut()
+            .is_some_and(|object| object.remove("comp_hash").is_some())
 }
 
 fn third_party_reasoning_levels(template: &Value, use_template_metadata: bool) -> Value {
@@ -1927,9 +1938,18 @@ fn synthetic_model(
     model
 }
 
-/// Restores the context fields of a reused catalog to their declared values and
-/// migrates the larger window an older Codey version wrote for selected models.
-pub(super) fn prepare_cached_context_window(model: &mut Value) {
+fn set_json_field_if_changed(model: &mut Value, key: &str, next: Value) -> bool {
+    if model.get(key) == Some(&next) {
+        false
+    } else {
+        model[key] = next;
+        true
+    }
+}
+
+/// Restores the context fields of a reused catalog to their declared values.
+pub(super) fn prepare_cached_context_window(model: &mut Value) -> bool {
+    let mut changed = false;
     if model.get("codey_source").and_then(Value::as_str) == Some("third_party")
         && model.get("codey_context_source").is_none()
         && !model
@@ -1942,34 +1962,22 @@ pub(super) fn prepare_cached_context_window(model: &mut Value) {
                     .any(|official| model_id::equal(official, upstream))
             })
     {
-        model["context_window"] = json!(200_000);
-        model["max_context_window"] = json!(200_000);
-        model["effective_context_window_percent"] = json!(95);
-        model["auto_compact_token_limit"] = Value::Null;
-        model["codey_context_source"] = json!("conservative_fallback");
-    }
-    // Preserve the unmodified declaration so cached catalogs can remove an
-    // override without inheriting stale window/threshold values.
-    if model.get("codey_context_base").is_none()
-        && matches!(
-            model.get("codey_context_source").and_then(Value::as_str),
-            None | Some("legacy_1m")
-        )
-        && model.get("context_window").and_then(Value::as_u64) == Some(LEGACY_1M_CONTEXT_WINDOW)
-    {
-        // Migrate a pre-baseline Codey override once. A source explicitly
-        // identified as official metadata must retain its declared window.
-        model["context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
-        model["max_context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
-        model["effective_context_window_percent"] = json!(DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
-        model["auto_compact_token_limit"] = Value::Null;
+        changed |= set_json_field_if_changed(model, "context_window", json!(200_000));
+        changed |= set_json_field_if_changed(model, "max_context_window", json!(200_000));
+        changed |= set_json_field_if_changed(model, "effective_context_window_percent", json!(95));
+        changed |= set_json_field_if_changed(model, "auto_compact_token_limit", Value::Null);
+        changed |= set_json_field_if_changed(
+            model,
+            "codey_context_source",
+            json!("conservative_fallback"),
+        );
     }
     if let Some(base) = model.get("codey_context_base").cloned() {
         for field in CONTEXT_FIELDS {
             if let Some(value) = base.get(field) {
-                model[field] = value.clone();
+                changed |= set_json_field_if_changed(model, field, value.clone());
             } else if let Some(object) = model.as_object_mut() {
-                object.remove(field);
+                changed |= object.remove(field).is_some();
             }
         }
     } else {
@@ -1980,8 +1988,10 @@ pub(super) fn prepare_cached_context_window(model: &mut Value) {
             }
         }
         model["codey_context_base"] = Value::Object(base);
+        changed = true;
     }
-    apply_official_context_default(model);
+    changed |= apply_official_context_default(model);
+    changed
 }
 
 pub(super) fn declared_context_capacity(model: &Value) -> Option<u64> {
@@ -2001,24 +2011,25 @@ fn is_official_catalog_model(model: &Value) -> bool {
         && (model_id::parse_alias(slug).is_none() || is_official_route_alias(slug))
 }
 
-fn apply_official_context_default(model: &mut Value) {
+fn apply_official_context_default(model: &mut Value) -> bool {
     if !is_official_catalog_model(model)
         || matches!(
             model["codey_context_source"].as_str(),
             Some("conservative_fallback" | "plugin_declared" | "user_declared")
         )
     {
-        return;
+        return false;
     }
     let window = OFFICIAL_DEFAULT_CONTEXT_WINDOW;
     let Some(capacity) = declared_context_capacity(model).filter(|capacity| *capacity >= window)
     else {
-        return;
+        return false;
     };
     let declared_window = model["context_window"].as_u64();
-    model["context_window"] = json!(window);
-    model["max_context_window"] = json!(capacity);
-    model["codey_context_source"] = json!("official_catalog");
+    let mut changed = false;
+    changed |= set_json_field_if_changed(model, "context_window", json!(window));
+    changed |= set_json_field_if_changed(model, "max_context_window", json!(capacity));
+    changed |= set_json_field_if_changed(model, "codey_context_source", json!("official_catalog"));
     if let Some(limit) = model["auto_compact_token_limit"].as_u64() {
         let percent = model["effective_context_window_percent"]
             .as_u64()
@@ -2032,12 +2043,14 @@ fn apply_official_context_default(model: &mut Value) {
                     || limit == declared * 9 / 10
                     || (declared == DEFAULT_CONTEXT_WINDOW && limit == 240_000))
         });
-        model["auto_compact_token_limit"] = json!(if follows_window {
+        let next_limit = if follows_window {
             ceiling
         } else {
             limit.min(ceiling)
-        });
+        };
+        changed |= set_json_field_if_changed(model, "auto_compact_token_limit", json!(next_limit));
     }
+    changed
 }
 
 pub(super) fn default_compact_limit(window: u64, effective_percent: u64) -> u64 {

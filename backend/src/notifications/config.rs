@@ -248,32 +248,12 @@ impl NotificationChannelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookConfig {
-    // Read the pre-channel-list format and migrate it in `normalize`. These
-    // fields are deliberately omitted once the new format is serialized.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "is_false")]
-    pub enabled: bool,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub url: String,
     #[serde(default)]
     pub channels: Vec<NotificationChannelConfig>,
 }
 
 impl WebhookConfig {
     pub(crate) fn normalize(&mut self) {
-        if self.channels.is_empty() && (self.enabled || !self.url.trim().is_empty()) {
-            self.channels.push(NotificationChannelConfig {
-                id: "legacy-feishu".to_string(),
-                kind: NotificationChannelKind::Feishu,
-                enabled: self.enabled,
-                url: self.url.trim().to_string(),
-                ..NotificationChannelConfig::default()
-            });
-        }
-        self.enabled = false;
-        self.url.clear();
-
         let mut ids = BTreeSet::new();
         for channel in &mut self.channels {
             channel.id = channel.id.trim().to_string();
@@ -474,10 +454,6 @@ fn same_wechat_claw_binding(
         && left.chat_id.trim() == right.chat_id.trim()
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,7 +488,6 @@ mod tests {
             channels: (0..=MAX_NOTIFICATION_CHANNELS)
                 .map(|_| NotificationChannelConfig::default())
                 .collect(),
-            ..WebhookConfig::default()
         };
 
         assert_eq!(
@@ -595,7 +570,6 @@ mod tests {
                 url_configured: true,
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].url.clear();
@@ -617,7 +591,6 @@ mod tests {
                 url_configured: true,
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].url.clear();
@@ -643,7 +616,6 @@ mod tests {
                 url_configured: true,
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].url.clear();
@@ -669,7 +641,6 @@ mod tests {
                 chat_id: "-100123".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].bot_token.clear();
@@ -689,7 +660,6 @@ mod tests {
                 chat_id: "-100123".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].bot_token.clear();
@@ -819,7 +789,6 @@ mod tests {
                 chat_id: "codey-topic".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].url.clear();
@@ -844,7 +813,6 @@ mod tests {
                 chat_id: "codey-topic".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].bot_token.clear();
@@ -878,7 +846,6 @@ mod tests {
                 chat_id: "user@im.wechat".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut incoming = previous.clone();
         incoming.channels[0].url.clear();
@@ -908,7 +875,6 @@ mod tests {
                 chat_id: "user@im.wechat".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         assert!(previous.channels[0].is_configured());
 
@@ -958,7 +924,6 @@ mod tests {
                 session_status: NotificationChannelSessionStatus::Expired,
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
         let mut redacted_save = previous.clone();
         redacted_save.channels[0].session_status = NotificationChannelSessionStatus::Active;
@@ -1001,7 +966,6 @@ mod tests {
                 chat_id: "old-user@im.wechat".to_string(),
                 ..NotificationChannelConfig::default()
             }],
-            ..WebhookConfig::default()
         };
 
         let mut cleared = previous.clone();

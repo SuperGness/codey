@@ -481,9 +481,13 @@ mod tests {
     #[test]
     fn synchronized_ultrafast_is_scoped_to_the_route_and_ignores_overrides() {
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join("models_cache.json"), serde_json::to_vec(&json!({
-            "models":[{"slug":"gpt-5.6-sol","description":"Template","base_instructions":"Fixture"}]
-        })).unwrap()).unwrap();
+        model_catalog::write_test_runtime_catalog(
+            home.path(),
+            json!({
+                "models":[{"slug":"gpt-5.6-sol","description":"Template","base_instructions":"Fixture"}]
+            }),
+            true,
+        );
         let mut config = config_with_custom_context();
         let mut relay = ProviderProfile::new("Relay");
         relay.id = "relay".into();
@@ -564,9 +568,13 @@ mod tests {
         );
         assert!(!home.path().join(model_catalog::relative_path()).exists());
 
-        std::fs::write(home.path().join("models_cache.json"), serde_json::to_vec(&json!({
-            "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
-        })).unwrap()).unwrap();
+        model_catalog::write_test_runtime_catalog(
+            home.path(),
+            json!({
+                "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
+            }),
+            true,
+        );
         assert!(refresh_model_catalog_or_fallback_at(&config, home.path()).is_ok());
         let catalog: Value = serde_json::from_slice(
             &std::fs::read(home.path().join(model_catalog::relative_path())).unwrap(),
@@ -625,9 +633,13 @@ mod tests {
                 std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
                 std::fs::write(&runtime, previous).unwrap();
             }
-            std::fs::write(home.path().join("models_cache.json"), serde_json::to_vec(&json!({
-                "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
-            })).unwrap()).unwrap();
+            model_catalog::write_test_runtime_catalog(
+                home.path(),
+                json!({
+                    "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
+                }),
+                true,
+            );
 
             assert!(refresh_model_catalog_or_fallback_at(&config, home.path()).is_ok());
             let catalog: Value = serde_json::from_slice(&std::fs::read(&runtime).unwrap()).unwrap();
@@ -676,9 +688,13 @@ mod tests {
                     std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
                     std::fs::write(&runtime, previous).unwrap();
                 }
-                std::fs::write(home.path().join("models_cache.json"), serde_json::to_vec(&json!({
-                    "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
-                })).unwrap()).unwrap();
+                model_catalog::write_test_runtime_catalog(
+                    home.path(),
+                    json!({
+                        "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
+                    }),
+                    true,
+                );
 
                 let error = refresh_model_catalog_or_fallback_at(&config, home.path())
                     .err()

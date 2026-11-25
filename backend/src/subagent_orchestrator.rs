@@ -19,8 +19,6 @@ use crate::subagent::telemetry::{
 mod contract;
 mod identity;
 #[cfg(test)]
-mod migration_tests;
-#[cfg(test)]
 mod scheduling_tests;
 
 use contract::*;
@@ -30,9 +28,7 @@ use identity::*;
 pub(crate) const POST_TOOL_HOOK_MATCHER: &str = "*";
 
 const LEDGER_SCHEMA_VERSION: u32 = 19;
-// v14 already carries attempt identity and runtime fencing. Older formats lack
-// the evidence needed to preserve active work safely.
-const MIN_LEDGER_SCHEMA_VERSION: u32 = 14;
+const MIN_LEDGER_SCHEMA_VERSION: u32 = 16;
 const LEDGER_FILE: &str = "orchestrator-ledger-v1.json";
 const LEDGER_LOCK_FILE: &str = "orchestrator-ledger-v1.lock";
 const CONCURRENCY_LIMIT: usize = 2;
@@ -108,9 +104,6 @@ struct Reservation {
     #[serde(default)]
     origin_runtime_id_hash: String,
     role: String,
-    // Decode the retired permission flag once, without broadening old attempts.
-    #[serde(default, rename = "write_capable", skip_serializing)]
-    legacy_write_capable: Option<bool>,
     workspace_root: Option<String>,
     state: ReservationState,
     #[serde(default)]
@@ -773,18 +766,6 @@ fn validate_ledger(ledger: &mut SessionLedger) -> Result<bool> {
         ledger.schema_version
     );
     let mut changed = false;
-    for reservation in ledger.reservations.values_mut() {
-        anyhow::ensure!(
-            ledger.schema_version >= 16 || reservation.legacy_write_capable.is_some(),
-            "旧版子代理账本缺少权限元数据，无法安全迁移"
-        );
-        if reservation.legacy_write_capable == Some(false) {
-            reservation
-                .capabilities
-                .retain(|capability| capability != "workspace.write");
-        }
-        changed |= reservation.legacy_write_capable.take().is_some();
-    }
     let before = ledger.issued_task_ids.len();
     ledger
         .issued_task_ids
@@ -1008,7 +989,6 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
             runtime_generation,
             origin_runtime_id_hash,
             role: prepared.role,
-            legacy_write_capable: None,
             workspace_root: prepared.workspace_root,
             state: ReservationState::Pending,
             outcome: ExecutionOutcome::Unknown,
@@ -1727,12 +1707,6 @@ fn update_reservation_lifecycle(
                 // failed trace here would double-count the attempt when the
                 // subsequent wait/list response supplies its real outcome.
                 None
-            }
-            ReservationState::Failed => {
-                reservation.outcome = ExecutionOutcome::Failed;
-                reservation.completed_at_ms = Some(now_ms);
-                reservation.fenced_at_ms = Some(now_ms);
-                Some((TraceEventKind::Failed, ExecutionStatus::Failed))
             }
             ReservationState::Recovered => {
                 reservation.outcome = ExecutionOutcome::Lost;

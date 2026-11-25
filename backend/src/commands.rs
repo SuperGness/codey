@@ -72,10 +72,7 @@ pub(crate) use updates::{
 };
 #[cfg(test)]
 use updates::{UpdateManifest, assess_update_manifest, current_update_arch};
-use webhooks::{
-    WaitingLedgerState, initial_waiting_notifications, sync_waiting_webhook_watcher,
-    test_notification_channel,
-};
+use webhooks::{sync_waiting_webhook_watcher, test_notification_channel};
 use wechat_claw::{
     WechatClawLoginState, WechatClawSessionGuard, WechatClawSyncHandle,
     pause_wechat_claw_notification_channel, poll_wechat_claw_login,
@@ -179,7 +176,6 @@ pub struct AppState {
     notification_title_query: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     session_metadata_cache_contended: Notify,
-    persisted_waiting_notifications: Mutex<WaitingLedgerState>,
     notification_waiting_snapshot: RwLock<webhooks::WaitingNotificationSnapshot>,
     notification_outbox: tokio::sync::OnceCell<crate::notifications::outbox::Outbox>,
     notification_delivery_wake: Notify,
@@ -275,7 +271,6 @@ impl AppState {
     fn with_store(store: ConfigStore) -> Self {
         let (config, config_load_error) = load_config_or_defaults(&store);
         let protect_crashpad_pending = config.protect_crashpad_pending;
-        let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
         let (shutdown_reason, _) = watch::channel(None);
         Self {
             store,
@@ -325,7 +320,6 @@ impl AppState {
             notification_title_query: Arc::new(tokio::sync::Semaphore::new(1)),
             #[cfg(test)]
             session_metadata_cache_contended: Notify::new(),
-            persisted_waiting_notifications: Mutex::new(persisted_waiting_notifications),
             notification_waiting_snapshot: RwLock::new(Default::default()),
             notification_outbox: tokio::sync::OnceCell::new(),
             notification_delivery_wake: Notify::new(),
@@ -1274,7 +1268,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "clear_route_request_logs" => clear_route_request_logs(state).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
-        "clear_diagnostic_storage" | "repair_codex_config" | "repair_main_process_injection" => {
+        "clear_diagnostic_storage" | "repair_codex_config" => {
             diagnostics::invoke(state, command, &args).await
         }
         "test_notification_channel" => {
@@ -1298,10 +1292,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "start_official_account_siwc"
         | "poll_official_account_siwc"
         | "cancel_official_account_siwc"
-        | "remove_official_account_siwc"
-        | "save_official_account_route_settings" => {
-            official_accounts::invoke(state, command, &args).await
-        }
+        | "remove_official_account_siwc" => official_accounts::invoke(state, command, &args).await,
         "start_wechat_claw_login" => start_wechat_claw_login(state).await,
         "poll_wechat_claw_login" => match string_argument(&args, "loginId") {
             Ok(login_id) => poll_wechat_claw_login(state, login_id).await,
@@ -1792,8 +1783,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let fields = config_value
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
-    let codey_update_policy_present =
-        fields.contains_key("codeyUpdatePolicy") || fields.contains_key("autoCheckCodeyUpdates");
+    let codey_update_policy_present = fields.contains_key("codeyUpdatePolicy");
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
     let model_reasoning_efforts_present = fields.contains_key("modelReasoningEffortsByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
@@ -2258,11 +2248,7 @@ fn merge_profile_secrets(
             return Err("请输入短名称".to_string());
         }
         profile.normalize();
-        // 线路名上限与渲染层一致。旧配置里已经超限的名称只要这次没有改动就
-        // 放行，用户仍能保存其他设置或删除这条线路，不会被历史数据卡住。
-        let kept_legacy_name =
-            previous_profile.is_some_and(|saved| saved.name.trim() == profile.name);
-        if !kept_legacy_name && profile.name.chars().count() > MAX_ROUTE_NAME_CHARS {
+        if profile.name.chars().count() > MAX_ROUTE_NAME_CHARS {
             return Err(format!(
                 "线路「{}」的线路名最多 {MAX_ROUTE_NAME_CHARS} 个字符",
                 profile.name
@@ -2847,7 +2833,6 @@ fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
     for profile in &mut public.profiles {
         profile.api_key_configured = !profile.api_key.trim().is_empty();
     }
-    public.webhook.url.clear();
     for channel in &mut public.webhook.channels {
         channel.url_configured = !channel.url.trim().is_empty();
         if !matches!(

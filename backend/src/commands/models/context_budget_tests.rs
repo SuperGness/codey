@@ -274,7 +274,11 @@ fn official_builtin_budget_is_preserved_when_sync_installs_a_codey_default() {
     let home = tempfile::tempdir().unwrap();
     let config = official_budget_config(&["gpt-5.6-sol"]);
     let path = official_budget_catalog(home.path(), 272_000, 240_000);
-    std::fs::copy(&path, home.path().join("models_cache.json")).unwrap();
+    model_catalog::write_test_runtime_catalog(
+        home.path(),
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
+        true,
+    );
     let runtime = CodeyRuntime::for_model_delivery_test(config.clone(), "", None)
         .with_context_budgets_for_test(home.path(), None);
     official_budget_catalog(home.path(), 400_000, 360_000);

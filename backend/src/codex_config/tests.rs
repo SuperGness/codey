@@ -1,7 +1,6 @@
 use super::*;
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, SUBAGENT_GUIDANCE_VERSIONS,
-    codey_fastctx_guidance_for_namespace, remove_codey_fastctx_guidance,
+    CODEY_FASTCTX_GUIDANCE, codey_fastctx_guidance_for_namespace, remove_codey_fastctx_guidance,
     root_agent_collaboration_usage_hint,
 };
 const LEGACY_GLOBAL_PROVIDER_ID: &str = "codey_global";
@@ -202,230 +201,6 @@ fn discarding_a_cancelled_startup_clears_active_and_pending_runtime_policy() {
 }
 
 #[test]
-fn restore_without_a_lease_removes_a_standalone_codey_catalog_reference() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    fs::create_dir_all(&home).unwrap();
-    let config_path = home.join("config.toml");
-    let marker = temp.path().join("missing-lease.json");
-    let absolute = home.join(crate::model_catalog::relative_path());
-    for catalog in [
-        crate::model_catalog::relative_path(),
-        absolute.to_str().unwrap(),
-        "/user/catalog.json",
-    ] {
-        let original = format!("model = 'user-model'\nmodel_catalog_json = '{catalog}'\n");
-        fs::write(&config_path, &original).unwrap();
-        let codey_owned = catalog != "/user/catalog.json";
-        assert_eq!(
-            restore_runtime_config_at(&home, &marker, true).unwrap(),
-            codey_owned
-        );
-        let repaired = fs::read_to_string(&config_path).unwrap();
-        let document = repaired.parse::<DocumentMut>().unwrap();
-        assert_eq!(document["model"].as_str(), Some("user-model"));
-        if codey_owned {
-            assert!(document.get("model_catalog_json").is_none());
-        } else {
-            assert_eq!(repaired, original);
-        }
-        assert!(!restore_runtime_config_at(&home, &marker, true).unwrap());
-    }
-}
-
-#[test]
-fn restore_without_a_lease_repairs_legacy_persistent_codey_runtime_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    fs::create_dir_all(&home).unwrap();
-    let original = br#"model_provider = "codey_router"
-model = "custom/gpt-5.6-terra"
-model_catalog_json = "model-catalogs/codey-official.json"
-
-[model_providers.codey_router]
-name = "Codey Local Router"
-base_url = "http://127.0.0.1:43127/v1"
-wire_api = "responses"
-supports_websockets = false
-experimental_bearer_token = "runtime-token"
-http_headers = { x-codey-router-token = "runtime-token" }
-
-[model_providers.user_relay]
-name = "User Relay"
-base_url = "https://relay.example/v1"
-
-[agents]
-enabled = true
-default_subagent_model = "custom/gpt-5.6-terra"
-default_subagent_reasoning_effort = "low"
-
-[agents.default]
-model = "custom/gpt-5.6-terra"
-model_reasoning_effort = "low"
-config_file = "/tmp/codey/codex-constraints/runtime/default-agent.toml"
-
-[agents.codey_worker]
-model = "custom/gpt-5.6-terra"
-model_reasoning_effort = "medium"
-config_file = "/tmp/codey/codex-constraints/runtime/agents/codey_worker.toml"
-
-[features.multi_agent_v2]
-enabled = true
-tool_namespace = "agents"
-multi_agent_mode_hint_text = "Codey runtime hint"
-default_subagent_model = "custom/gpt-5.6-luna"
-default_subagent_reasoning_effort = "max"
-"#;
-    fs::write(home.join("config.toml"), original).unwrap();
-
-    assert!(
-        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
-    let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
-    let document = repaired.parse::<DocumentMut>().unwrap();
-
-    assert!(document.get("model").is_none());
-    assert!(document.get("model_provider").is_none());
-    assert!(document.get("model_catalog_json").is_none());
-    assert_resume_shim(&document, "https://relay.example/v1", false);
-    assert_eq!(
-        document["model_providers"]["user_relay"]["base_url"].as_str(),
-        Some("https://relay.example/v1")
-    );
-    assert!(document["agents"].get("default_subagent_model").is_none());
-    assert!(
-        document["agents"]
-            .get("default_subagent_reasoning_effort")
-            .is_none()
-    );
-    assert!(document["agents"].get("default").is_none());
-    assert!(document["agents"].get("codey_worker").is_none());
-    assert_eq!(document["agents"]["enabled"].as_bool(), Some(true));
-    assert!(
-        document
-            .get("features")
-            .and_then(Item::as_table)
-            .and_then(|features| features.get("multi_agent_v2"))
-            .is_some()
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .get("default_subagent_model")
-            .is_none()
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .get("default_subagent_reasoning_effort")
-            .is_none()
-    );
-    assert_eq!(fs::read(home.join("config.toml.bak")).unwrap(), original);
-}
-
-#[test]
-fn restore_without_a_lease_removes_legacy_toml_codey_hooks() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    fs::create_dir_all(&home).unwrap();
-    let config_path = home.join("config.toml");
-    let original = format!(
-        r#"[features]
-hooks = true
-
-[hooks.state.{legacy_pre_tool_key}]
-trusted_hash = "sha256:legacy-codey"
-
-[hooks.state.{second_legacy_pre_tool_key}]
-trusted_hash = "sha256:legacy-codey-second"
-
-[hooks.state.{user_pre_tool_key}]
-trusted_hash = "sha256:user-hook"
-
-[hooks.state.{legacy_post_tool_key}]
-trusted_hash = "sha256:legacy-codey"
-
-[[hooks.PreToolUse]]
-matcher = "*"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "'/old/codey' {gate}"
-
-[[hooks.PreToolUse]]
-matcher = "*"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "'/older/codey' {combined}"
-
-[[hooks.PreToolUse]]
-matcher = "Bash"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "echo keep-user-hook"
-
-[[hooks.PostToolUse]]
-matcher = "*"
-
-[[hooks.PostToolUse.hooks]]
-type = "command"
-command = "'/old/codey' {gate}"
-"#,
-        legacy_pre_tool_key =
-            toml_string_literal(&format!("{}:pre_tool_use:0:0", config_path.display())),
-        second_legacy_pre_tool_key =
-            toml_string_literal(&format!("{}:pre_tool_use:1:0", config_path.display())),
-        user_pre_tool_key =
-            toml_string_literal(&format!("{}:pre_tool_use:2:0", config_path.display())),
-        legacy_post_tool_key =
-            toml_string_literal(&format!("{}:post_tool_use:0:0", config_path.display())),
-        gate = crate::subagent_gate::HOOK_ARGUMENT,
-        combined = crate::subagent_gate::COMBINED_HOOK_ARGUMENT,
-    );
-    fs::write(&config_path, &original).unwrap();
-
-    assert!(
-        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
-    let repaired = fs::read_to_string(&config_path).unwrap();
-    let document = repaired.parse::<DocumentMut>().unwrap();
-
-    let pre_tool_use = document["hooks"]["PreToolUse"]
-        .as_array_of_tables()
-        .unwrap();
-    assert_eq!(pre_tool_use.len(), 1);
-    assert_eq!(
-        pre_tool_use.get(0).unwrap()["matcher"].as_str(),
-        Some("Bash")
-    );
-    assert!(!repaired.contains("/old/codey"));
-    assert!(!repaired.contains("/older/codey"));
-    assert!(document["hooks"].get("PostToolUse").is_none());
-    assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
-
-    let state = document["hooks"]["state"].as_table().unwrap();
-    assert_eq!(
-        state[&format!("{}:pre_tool_use:0:0", config_path.display())]["trusted_hash"].as_str(),
-        Some("sha256:user-hook")
-    );
-    assert!(
-        state
-            .get(&format!("{}:pre_tool_use:1:0", config_path.display()))
-            .is_none()
-    );
-    assert!(
-        state
-            .get(&format!("{}:pre_tool_use:2:0", config_path.display()))
-            .is_none()
-    );
-    assert!(
-        state
-            .get(&format!("{}:post_tool_use:0:0", config_path.display()))
-            .is_none()
-    );
-}
-
-#[test]
 fn read_only_router_mode_does_not_repair_or_rewrite_codex_config_without_a_lease() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
@@ -446,38 +221,6 @@ http_headers = { x-codey-router-token = "runtime-token" }
         !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), false,).unwrap()
     );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
-}
-
-#[test]
-fn restore_without_a_lease_repairs_dangling_codey_router_selection() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    fs::create_dir_all(&home).unwrap();
-    let original = br#"model_provider = "codey_router"
-model = "route-a/gpt-5.6-terra"
-model_catalog_json = "model-catalogs/codey-official.json"
-
-[model_providers.relay]
-name = "Relay"
-base_url = "https://relay.example/v1"
-"#;
-    fs::write(home.join("config.toml"), original).unwrap();
-
-    assert!(
-        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
-    let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
-    let document = repaired.parse::<DocumentMut>().unwrap();
-
-    assert!(document.get("model_provider").is_none());
-    assert!(document.get("model").is_none());
-    assert!(document.get("model_catalog_json").is_none());
-    assert_resume_shim(&document, "https://relay.example/v1", false);
-    assert_eq!(
-        document["model_providers"]["relay"]["base_url"].as_str(),
-        Some("https://relay.example/v1")
-    );
-    assert_eq!(fs::read(home.join("config.toml.bak")).unwrap(), original);
 }
 
 #[test]
@@ -726,58 +469,6 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
         .unwrap();
     assert_eq!(restored["model_provider"].as_str(), Some("relay"));
     assert_resume_shim(&restored, "https://relay.example/v1", false);
-}
-
-#[test]
-fn restore_cleans_owned_router_siblings_without_changing_a_user_owned_selection() {
-    for (user_id, owned_id) in [
-        (
-            local_router::ROUTER_PROVIDER_ID,
-            local_router::REMOTE_COMPACTION_PROVIDER_ID,
-        ),
-        (
-            local_router::REMOTE_COMPACTION_PROVIDER_ID,
-            local_router::ROUTER_PROVIDER_ID,
-        ),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path();
-        let original = format!(
-            r#"
-model_provider = "{user_id}"
-model = "user-model"
-[model_providers.{user_id}]
-name = "User-Owned Router"
-base_url = "https://relay.example/v1"
-wire_api = "responses"
-[model_providers.{owned_id}]
-name = "OpenAI"
-base_url = "http://127.0.0.1:43127/v1"
-experimental_bearer_token = "expired-launch-token"
-http_headers = {{ x-codey-router-token = "expired-launch-token" }}
-"#
-        );
-        fs::write(home.join("config.toml"), &original).unwrap();
-        assert!(repair_persistent_codey_runtime_config(home).unwrap());
-        let restored = fs::read_to_string(home.join("config.toml")).unwrap();
-        let document = restored.parse::<DocumentMut>().unwrap();
-        assert_eq!(document["model_provider"].as_str(), Some(user_id));
-        assert_eq!(document["model"].as_str(), Some("user-model"));
-        assert_eq!(
-            document["model_providers"][user_id].to_string(),
-            original.parse::<DocumentMut>().unwrap()["model_providers"][user_id].to_string()
-        );
-        if owned_id == local_router::REMOTE_COMPACTION_PROVIDER_ID {
-            assert!(document_provider_item(&document, owned_id).is_none());
-        } else {
-            assert_eq!(
-                document["model_providers"][owned_id]["base_url"].as_str(),
-                Some(CHATGPT_CODEX_BASE_URL)
-            );
-        }
-        assert!(!restored.contains("expired-launch-token"));
-        assert!(!repair_persistent_codey_runtime_config(home).unwrap());
-    }
 }
 
 #[test]
@@ -1220,27 +911,18 @@ fn stale_role_template_source_is_repaired_instead_of_failing_the_reconcile() {
 }
 
 #[test]
-fn isolated_prompt_sources_migrate_historical_defaults_and_preserve_user_guidance() {
+fn isolated_prompt_sources_preserve_user_guidance_idempotently() {
     let temp = tempfile::tempdir().unwrap();
     let mut sources: Vec<String> = Vec::new();
     let collaboration_source = root_agent_collaboration_usage_hint();
-    for (name, current, versions) in [
-        (
-            "fastctx.md",
-            CODEY_FASTCTX_GUIDANCE.to_string(),
-            CODEY_FASTCTX_GUIDANCE_VERSIONS,
-        ),
-        (
-            "collaboration.md",
-            collaboration_source,
-            ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
-        ),
+    for (name, current) in [
+        ("fastctx.md", CODEY_FASTCTX_GUIDANCE.to_string()),
+        ("collaboration.md", collaboration_source),
     ] {
         let path = temp.path().join(name);
         rebuild_constraint_file(&path, &current).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), current);
-        sources.push(current.clone());
-        assert!(!versions.is_empty());
+        sources.push(current);
     }
     let mut document = parse_document(
         r#"[features.multi_agent_v2]
@@ -1248,24 +930,16 @@ enabled = true
 "#,
     )
     .unwrap();
-    document["developer_instructions"] = value(format!(
-        "User root guidance.\n\n{}\n\n{}",
-        SUBAGENT_GUIDANCE_VERSIONS.last().unwrap(),
-        CODEY_FASTCTX_GUIDANCE_VERSIONS[1..].join("\n\n"),
-    ));
-    document["features"]["multi_agent_v2"]["subagent_developer_instructions"] = value(format!(
-        "User child guidance.\n\n{}",
-        CODEY_FASTCTX_GUIDANCE_VERSIONS[1..].join("\n\n"),
-    ));
-    document["features"]["multi_agent_v2"]["root_agent_usage_hint_text"] = value(format!(
-        "User collaboration policy.\n\n{}",
-        ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS[1..].join("\n\n"),
-    ));
+    document["developer_instructions"] =
+        value(format!("User root guidance.\n\n{CODEY_FASTCTX_GUIDANCE}"));
+    document["features"]["multi_agent_v2"]["subagent_developer_instructions"] =
+        value("User child guidance.");
+    document["features"]["multi_agent_v2"]["root_agent_usage_hint_text"] =
+        value("User collaboration policy.");
     apply_isolated_prompt_sources(&mut document, Some(&sources[0]), Some(&sources[1])).unwrap();
     let first = document_string(&document).unwrap();
     let root = document["developer_instructions"].as_str().unwrap();
     assert!(root.contains("User root guidance."));
-    assert!(!root.contains("## 子代理使用"));
     assert_eq!(root.matches(CODEY_FASTCTX_GUIDANCE).count(), 1);
     let child = document["features"]["multi_agent_v2"]["subagent_developer_instructions"]
         .as_str()
@@ -1284,14 +958,6 @@ enabled = true
             root_agent_collaboration_usage_hint()
         )
     );
-    for stale in [
-        "CODEY_DELEGATION_V2",
-        "resolve_batch",
-        "成本点预算",
-        "filter_mode=project",
-    ] {
-        assert!(!first.contains(stale), "{stale}");
-    }
     apply_isolated_prompt_sources(&mut document, Some(&sources[0]), Some(&sources[1])).unwrap();
     assert_eq!(document_string(&document).unwrap(), first);
 }
@@ -1655,15 +1321,15 @@ fn runtime_context_overlay_uses_user_catalog_and_reset_restores_its_path() {
     let config = b"model_catalog_json = 'models/custom.json'\n";
     fs::write(home.join("config.toml"), config).unwrap();
     let source = home.join("models/custom.json");
-    let mut catalog = codey_runtime_core::model_suffix::bundled_model_catalog().unwrap();
-    let model = catalog["models"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|model| model["slug"] == "gpt-5.6-sol")
-        .unwrap();
-    model["context_window"] = serde_json::json!(1000000);
-    model["base_instructions"] = serde_json::json!("User instructions");
+    let catalog = serde_json::json!({
+        "models": [{
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "description": "GPT-5.6-Sol",
+            "context_window": 1000000,
+            "base_instructions": "User instructions"
+        }]
+    });
     let original = serde_json::to_vec(&catalog).unwrap();
     fs::write(&source, &original).unwrap();
     let policies = BTreeMap::from([(
@@ -1808,10 +1474,14 @@ fn context_budget_startup_applies_and_recovers_global_conflicts() {
     fs::create_dir_all(&home).unwrap();
     let original = "model_catalog_json='catalog.json'\nmodel_context_window=372000\nmodel_auto_compact_token_limit=300000\n";
     fs::write(home.join("config.toml"), original).unwrap();
-    let mut catalog = codey_runtime_core::model_suffix::bundled_model_catalog().unwrap();
-    for model in catalog["models"].as_array_mut().unwrap() {
-        model["base_instructions"] = serde_json::json!("Test instructions");
-    }
+    let catalog = serde_json::json!({
+        "models": [{
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "description": "GPT-5.6-Sol",
+            "base_instructions": "Test instructions"
+        }]
+    });
     fs::write(
         home.join("catalog.json"),
         serde_json::to_vec(&catalog).unwrap(),
@@ -2984,9 +2654,6 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__codey_fastctx", "mcp__code
     assert!(!guidance.contains("list_mcp_resources"));
     assert!(!guidance.contains("read_mcp_resource"));
     assert!(!guidance.contains("Write-Output"));
-    for stale_guidance in &CODEY_FASTCTX_GUIDANCE_VERSIONS[1..] {
-        assert!(!guidance.contains(stale_guidance));
-    }
     assert_eq!(
         document["features"]["code_mode"]["direct_only_tool_namespaces"]
             .as_array()
@@ -3963,7 +3630,7 @@ wire_api = "responses"
     fs::create_dir_all(&seeded_constraints_dir).unwrap();
     fs::write(
         seeded_constraints_dir.join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE),
-        SUBAGENT_GUIDANCE_VERSIONS[0],
+        "retired root instructions",
     )
     .unwrap();
     fs::write(
@@ -4466,46 +4133,6 @@ fn unrelated_provider_ids_and_missing_configs_stay_untouched() {
 
     assert!(repair_reserved_provider_ids(&home).unwrap().is_empty());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
-}
-
-#[test]
-fn retired_role_files_and_owned_tables_are_removed() {
-    let temp = tempfile::tempdir().unwrap();
-    let constraints_dir = temp.path().join("codex-constraints");
-    let mut stale = Vec::new();
-    for (retired, _) in crate::config::LEGACY_SUBAGENT_ROLES {
-        stale.push(runtime_agent_path(&constraints_dir, retired));
-        stale.push(
-            constraints_dir
-                .join(CODEY_SUBAGENT_SOURCES_DIR)
-                .join(format!("{retired}.toml")),
-        );
-    }
-    for path in &stale {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, b"retired role").unwrap();
-    }
-    let roles = crate::config::default_subagent_roles();
-    let registrations = prepare_runtime_agent_files(&constraints_dir, &roles, None, None).unwrap();
-    assert_eq!(registrations.len(), SUBAGENT_ROLE_IDS.len());
-    for path in &stale {
-        assert!(!path.exists(), "{}", path.display());
-    }
-
-    let mut document = parse_document(
-        r#"[agents.codey_quick_scan]
-config_file = "/home/u/.codex/codex-constraints/runtime/agents/codey_quick_scan.toml"
-
-[agents.user_role]
-config_file = "/home/u/roles/user_role.toml"
-"#,
-    )
-    .unwrap();
-    assert!(persistent_codey_subagent_config_is_owned(&document));
-    remove_codey_owned_agents_config(&mut document, true);
-    let agents = document["agents"].as_table().unwrap();
-    assert!(!agents.contains_key("codey_quick_scan"));
-    assert!(agents.contains_key("user_role"));
 }
 
 #[test]

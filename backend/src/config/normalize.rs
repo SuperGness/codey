@@ -285,25 +285,11 @@ impl CodeyConfig {
         official_profiles: Vec<ProviderProfile>,
     ) {
         let previous_active_id = self.active_profile_id.clone();
-        // 没有独立账号记录的兼容线路仍从配置保存并发值；已存储账号始终
-        // 使用账号记录中的值，不能被旧配置覆盖。
-        let legacy_max_concurrency = self
-            .profiles
-            .iter()
-            .find(|profile| profile.official_account && profile.official_account_id.is_none())
-            .map(|profile| profile.max_concurrency)
-            .unwrap_or(0);
         let previous_official_profiles = self
             .profiles
             .iter()
             .filter(|profile| profile.official_account)
-            .map(|profile| {
-                (
-                    profile.provider_id().to_string(),
-                    profile.official_account_id.clone(),
-                    profile.enabled,
-                )
-            })
+            .map(|profile| (profile.official_account_id.clone(), profile.enabled))
             .collect::<Vec<_>>();
         let placeholder_provider_id = self
             .looks_like_empty_default_route()
@@ -338,7 +324,7 @@ impl CodeyConfig {
                 .filter(|short_name| !short_name.is_empty())
                 .collect::<BTreeSet<_>>();
             let mut derived = Vec::with_capacity(official_profiles.len());
-            for (index, mut official_profile) in official_profiles.into_iter().enumerate() {
+            for mut official_profile in official_profiles {
                 let account_id = official_profile.official_account_id.clone();
                 match account_id.as_deref() {
                     // 每个账号拥有独立的 Provider ID，同一段对话里可以并存多条
@@ -347,26 +333,14 @@ impl CodeyConfig {
                         official_profile.id = official_profile_id(account_id);
                         official_profile.source_provider_id = None;
                     }
-                    // 升级前没有账号记录时保留原有 Provider ID，Codex 仍按官方
-                    // 登录直接访问。
                     None => {
                         official_profile.id = DERIVED_OFFICIAL_PROFILE_ID.to_string();
-                        official_profile.max_concurrency = legacy_max_concurrency;
                     }
                 }
-                let account_key = account_id.unwrap_or_default();
                 let previous = previous_official_profiles
                     .iter()
-                    .find(|(_, previous_account_id, _)| {
-                        previous_account_id.as_deref() == Some(account_key.as_str())
-                    })
-                    .or_else(|| {
-                        // 旧版的单条官方线路由默认账号继承。
-                        previous_official_profiles
-                            .iter()
-                            .find(|(_, account_id, _)| index == 0 && account_id.is_none())
-                    });
-                official_profile.enabled = previous.is_none_or(|(_, _, enabled)| *enabled);
+                    .find(|(previous_account_id, _)| *previous_account_id == account_id);
+                official_profile.enabled = previous.is_none_or(|(_, enabled)| *enabled);
                 official_profile.normalize();
                 official_profile.short_name = unique_official_route_short_name(
                     &official_profile.display_short_name(),
@@ -374,20 +348,6 @@ impl CodeyConfig {
                 );
                 used_short_names.insert(official_profile.short_name.clone());
                 derived.push(official_profile);
-            }
-            // 旧版本只保留一条官方线路，把它的模型选择等状态交给默认账号。
-            if let Some(default_provider_id) = derived.first().map(|profile| profile.provider_id())
-            {
-                let default_provider_id = default_provider_id.to_string();
-                for (previous_provider_id, previous_account_id, _) in &previous_official_profiles {
-                    if previous_account_id.is_some() {
-                        continue;
-                    }
-                    self.migrate_official_provider_state(
-                        previous_provider_id,
-                        &default_provider_id,
-                    );
-                }
             }
             for (index, official_profile) in derived.into_iter().enumerate() {
                 let official_provider_id = official_profile.provider_id().to_string();
@@ -405,75 +365,6 @@ impl CodeyConfig {
             self.active_profile_id = previous_active_id;
         } else if let Some(profile) = self.profiles.first() {
             self.active_profile_id = profile.id.clone();
-        }
-    }
-
-    fn migrate_official_provider_state(
-        &mut self,
-        previous_provider_id: &str,
-        official_provider_id: &str,
-    ) {
-        if previous_provider_id == official_provider_id {
-            return;
-        }
-        // 速度声明没有旧原生账号的身份信息，不能随默认账号迁移给另一个账号。
-        if let Some(models) = self.model_context_by_provider.remove(previous_provider_id) {
-            let target = self
-                .model_context_by_provider
-                .entry(official_provider_id.to_string())
-                .or_default();
-            for (model, policy) in models {
-                target.entry(model).or_insert(policy);
-            }
-        }
-        if let Some(models) = self
-            .model_reasoning_efforts_by_provider
-            .remove(previous_provider_id)
-        {
-            let target = self
-                .model_reasoning_efforts_by_provider
-                .entry(official_provider_id.to_string())
-                .or_default();
-            for (model, efforts) in models {
-                target.entry(model).or_insert(efforts);
-            }
-        }
-        migrate_provider_model_list(
-            &mut self.selected_models_by_provider,
-            previous_provider_id,
-            official_provider_id,
-        );
-        migrate_provider_model_list(
-            &mut self.manual_third_party_models_by_provider,
-            previous_provider_id,
-            official_provider_id,
-        );
-        migrate_provider_model_list(
-            &mut self.declared_official_models_by_provider,
-            previous_provider_id,
-            official_provider_id,
-        );
-        migrate_provider_model_list(
-            &mut self.upstream_models_by_provider,
-            previous_provider_id,
-            official_provider_id,
-        );
-        remap_model_provider_alias(
-            &mut self.default_model,
-            previous_provider_id,
-            official_provider_id,
-        );
-        remap_model_provider_alias(
-            &mut self.subagent_model,
-            previous_provider_id,
-            official_provider_id,
-        );
-        for selection in self.subagent_roles.values_mut() {
-            remap_model_provider_alias(
-                &mut selection.model,
-                previous_provider_id,
-                official_provider_id,
-            );
         }
     }
 
@@ -1609,47 +1500,6 @@ pub(super) fn model_references_provider(model: &str, provider_id: &str) -> bool 
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
 }
 
-pub(super) fn migrate_provider_model_list(
-    models_by_provider: &mut BTreeMap<String, Vec<String>>,
-    previous_provider_id: &str,
-    official_provider_id: &str,
-) {
-    if previous_provider_id == official_provider_id {
-        return;
-    }
-    let Some(mut models) = models_by_provider.remove(previous_provider_id) else {
-        return;
-    };
-    let destination = models_by_provider
-        .entry(official_provider_id.to_string())
-        .or_default();
-    destination.append(&mut models);
-    normalize_model_list(destination);
-}
-
-pub(super) fn remap_model_provider_alias(
-    model: &mut String,
-    previous_provider_id: &str,
-    official_provider_id: &str,
-) {
-    if previous_provider_id == official_provider_id {
-        return;
-    }
-    let previous_prefix = local_router::model_alias(previous_provider_id, "");
-    if !model
-        .get(..previous_prefix.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&previous_prefix))
-    {
-        return;
-    }
-    let suffix = model[previous_prefix.len()..].to_string();
-    *model = format!(
-        "{}{}",
-        local_router::model_alias(official_provider_id, ""),
-        suffix
-    );
-}
-
 pub(crate) fn validate_provider_profiles(profiles: &[ProviderProfile]) -> Result<(), String> {
     if profiles.is_empty() {
         return Err("至少需要保留一条线路".to_string());
@@ -1792,23 +1642,17 @@ pub(super) fn normalize_subagent_selection(model: &mut String, reasoning_effort:
     }
 }
 
-/// 空值对应旧版默认协议；这里只接受明确支持的旧名称，不猜测未知值。
 pub(super) fn recognized_upstream_protocol(value: &str) -> Option<&'static str> {
     Some(match value.trim() {
         UPSTREAM_PROTOCOL_OFFICIAL => UPSTREAM_PROTOCOL_OFFICIAL,
         "" | UPSTREAM_PROTOCOL_OPENAI_RESPONSES => UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
-        UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS | "chatCompletions" | "openaiChatCompletion" => {
-            UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS
-        }
-        UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES | "anthropic" | "anthropicMessagesApi" => {
-            UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES
-        }
+        UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS => UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES => UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
         _ => return None,
     })
 }
 
 pub(super) fn normalize_upstream_protocol(value: &str) -> String {
-    // 读取历史配置保留旧版默认行为；用户提交必须在归一化前校验原始值。
     recognized_upstream_protocol(value)
         .unwrap_or(UPSTREAM_PROTOCOL_OPENAI_RESPONSES)
         .to_string()
@@ -1823,36 +1667,12 @@ pub(super) fn normalize_auth_mode(value: &str, official: bool) -> String {
     .to_string()
 }
 
-/// Carry selections saved under retired role IDs over to their successor when
-/// the successor has no saved selection yet; an enabled legacy role wins.
-fn migrate_legacy_subagent_roles(roles: &mut BTreeMap<String, SubagentRoleConfig>) {
-    for successor in SUBAGENT_ROLE_IDS {
-        if roles.contains_key(successor) {
-            continue;
-        }
-        let candidates = LEGACY_SUBAGENT_ROLES
-            .iter()
-            .filter(|(_, next)| *next == successor)
-            .filter_map(|(legacy, _)| roles.get(*legacy))
-            .collect::<Vec<_>>();
-        let selected = candidates
-            .iter()
-            .find(|selection| selection.enabled)
-            .or_else(|| candidates.first())
-            .map(|selection| (*selection).clone());
-        if let Some(selection) = selected {
-            roles.insert(successor.to_string(), selection);
-        }
-    }
-}
-
 pub(super) fn normalize_subagent_config(
     model: &mut String,
     reasoning_effort: &mut String,
     roles: &mut BTreeMap<String, SubagentRoleConfig>,
 ) {
     normalize_subagent_selection(model, reasoning_effort);
-    migrate_legacy_subagent_roles(roles);
     roles.retain(|role, _| SUBAGENT_ROLE_IDS.contains(&role.as_str()));
     if roles.is_empty() {
         *roles = uniform_subagent_roles(model, reasoning_effort);

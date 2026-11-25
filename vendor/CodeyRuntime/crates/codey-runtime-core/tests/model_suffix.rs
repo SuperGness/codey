@@ -1,18 +1,7 @@
 use codey_runtime_core::model_suffix::{
-    bundled_model_catalog, remove_model_prompt_fields, sanitize_generic_model_metadata,
+    remove_model_prompt_fields, sanitize_generic_model_metadata,
 };
 use serde_json::{Value, json};
-
-#[test]
-fn bundled_catalog_contains_compatibility_metadata_without_prompt_assets() {
-    let catalog = bundled_model_catalog().expect("bundled model metadata");
-    assert_prompt_fields_absent(&catalog);
-    assert!(
-        catalog["models"]
-            .as_array()
-            .is_some_and(|models| !models.is_empty())
-    );
-}
 
 #[test]
 fn remove_model_prompt_fields_strips_prompt_fields_recursively() {
