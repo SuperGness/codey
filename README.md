@@ -54,7 +54,7 @@
 
 **[下载稳定版](https://github.com/SuperGness/codey/releases/latest) → 打开 Codey → 在 Codex 中进入 Codey 控制台**
 
-请先安装 Codex 桌面客户端；Codey 支持 macOS 和 Windows，打开后会自动启动 Codex。通过 Codex 内的 Codey 按钮进入控制台，设置保存后在后台应用，生效结果和重启要求以界面提示为准。
+请先安装 Codex 桌面客户端。Codey 支持 macOS 和 Windows，打开后会自动启动 Codex，并在支持的版本中显示开场动画。通过 Codex 内的 Codey 按钮进入控制台，设置保存后在后台应用，生效结果和重启要求以界面提示为准。
 
 > [!IMPORTANT]
 > 启动可能重启所选 Codex，请先结束正在运行的任务；仅支持可明确识别的客户端，多版本共存时需明确选择。

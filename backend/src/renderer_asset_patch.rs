@@ -13,6 +13,7 @@
 
 mod anchors;
 mod cache;
+mod startup;
 #[cfg(test)]
 mod tests;
 
@@ -89,7 +90,17 @@ pub(crate) struct CodexPaths {
 
 /// Codex 启动前调用：替换旧服务，从端点一出现就开始挂载页面。
 pub(crate) fn start_service(debug_port: u16, disable_pet: bool, paths: Option<CodexPaths>) {
+    replace_service(debug_port, disable_pet, paths, true);
+}
+
+fn replace_service(
+    debug_port: u16,
+    disable_pet: bool,
+    paths: Option<CodexPaths>,
+    cold_start: bool,
+) {
     let mut context = ServiceContext::new(disable_pet, default_cache_dir());
+    context.startup_animation = cold_start;
     if let Some(paths) = &paths {
         context.start_asset_scan(paths);
     }
@@ -126,7 +137,7 @@ pub(crate) fn ensure_service(debug_port: u16, disable_pet: bool) {
         )
     };
     if !running {
-        start_service(debug_port, disable_pet, paths);
+        replace_service(debug_port, disable_pet, paths, false);
     }
 }
 
@@ -179,6 +190,8 @@ struct ServiceContext {
     /// 页面补丁的复合前置规则；资源一条都不命中时不必送进页面求值。
     matcher: PatchAnchorMatcher,
     cache: PatchCache,
+    /// The opening animation is enabled only by the launcher, never by bridge recovery.
+    startup_animation: bool,
     /// 按扁平化会话 id 记录已挂上的页面。
     pages: Mutex<HashMap<String, PageEntry>>,
     permits: tokio::sync::Semaphore,
@@ -189,6 +202,7 @@ impl ServiceContext {
         let install_script: Arc<str> = Arc::from(renderer_asset_patch_document_script());
         Self {
             cache: PatchCache::new(cache_dir, &install_script),
+            startup_animation: false,
             install_script,
             patterns: Mutex::new(fetch_patterns(disable_pet, None)),
             disable_pet,
@@ -219,10 +233,18 @@ impl ServiceContext {
     }
 
     fn current_patterns(&self) -> Value {
-        self.patterns
+        let mut patterns = self
+            .patterns
             .lock()
             .expect("patch pattern slot poisoned")
-            .clone()
+            .clone();
+        if self.startup_animation {
+            patterns
+                .as_array_mut()
+                .expect("fetch patterns are an array")
+                .push(startup::asset_pattern());
+        }
+        patterns
     }
 
     /// 采用扫描结果；扫描失败时保留通配拦截，补丁照常生效。
@@ -279,7 +301,10 @@ impl ServiceContext {
             .map(|page| page.stats)
     }
 
-    fn patch_object_slot(&self, session_id: &str) -> Option<Arc<tokio::sync::Mutex<Option<String>>>> {
+    fn patch_object_slot(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<Option<String>>>> {
         self.pages
             .lock()
             .expect("patch page registry poisoned")
@@ -856,7 +881,18 @@ async fn on_attached(connection: BrowserConnection, context: Arc<ServiceContext>
             json!({ "targetId": target_id, "message": format!("{error:#}") }),
         );
     }
+    // Page commands need a running renderer. The script also runs in any
+    // already-created document so it can still find the native loader.
     resume();
+    if context.startup_animation
+        && (attached_before_load || url == startup::DOCUMENT_URL)
+        && let Err(error) = startup::register_player(&connection, session_id).await
+    {
+        log_service_event(
+            "renderer_asset_patch.startup_script_failed",
+            json!({ "targetId": target_id, "message": format!("{error:#}") }),
+        );
+    }
     if !attached_before_load && url.starts_with("app://") {
         log_service_event(
             "renderer_asset_patch.late_attach",
@@ -883,6 +919,18 @@ async fn on_request_paused(
             session,
         );
     };
+    if context.startup_animation {
+        if let Some(asset) = startup::asset_response(url, &params) {
+            if let Err(error) = connection
+                .call("Fetch.fulfillRequest", asset, session)
+                .await
+            {
+                log_patch_skip(url, format!("startup asset: {error:#}"));
+                pass_through();
+            }
+            return;
+        }
+    }
     if context.disable_pet
         && let Some(pet) = pet_sprite_id(url)
     {
@@ -1079,7 +1127,8 @@ async fn ensure_patch_object_id(
         *guard = Some(installed.clone());
         return Ok((installed, false));
     }
-    let installed = install_patch_entry_object(connection, &context.install_script, session).await?;
+    let installed =
+        install_patch_entry_object(connection, &context.install_script, session).await?;
     Ok((installed, false))
 }
 

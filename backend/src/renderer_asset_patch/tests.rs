@@ -113,6 +113,42 @@ fn paused(session: &str, request_id: &str, url: &str, response: bool) -> Value {
 }
 
 #[tokio::test]
+async fn startup_animation_resumes_the_page_before_registering_the_player() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut service = TestService::start_with(temp.path(), |context| {
+        context.startup_animation = true;
+    })
+    .await;
+    service.answer_startup(json!([])).await;
+    service
+        .attach_page(
+            "aux-session",
+            "aux",
+            "app://-/index.html?initialRoute=%2Fhotkey-window",
+            false,
+        )
+        .await;
+    service.attach_page("main-session", "main", "", true).await;
+    // The renderer cannot acknowledge Page.enable while waiting for the debugger.
+    let resume = service.expect("Runtime.runIfWaitingForDebugger").await;
+    assert_eq!(resume["sessionId"], "main-session");
+    let page_enable = service.expect("Page.enable").await;
+    assert_eq!(page_enable["sessionId"], "main-session");
+    service.reply(&page_enable, json!({})).await;
+    let script = service
+        .expect("Page.addScriptToEvaluateOnNewDocument")
+        .await;
+    assert_eq!(script["sessionId"], "main-session");
+    assert_eq!(script["params"]["worldName"], "codey-startup");
+    assert_eq!(script["params"]["runImmediately"], true);
+    service
+        .reply(&script, json!({ "identifier": "startup" }))
+        .await;
+
+    service.finish().await;
+}
+
+#[tokio::test]
 async fn new_pages_resume_only_after_interception_is_in_place() {
     let temp = tempfile::tempdir().unwrap();
     let mut service = TestService::start(temp.path()).await;
@@ -638,8 +674,14 @@ fn compound_rule_matcher_requires_all_literals_and_splits_js_from_css() {
     ));
 
     // JS 与 CSS 规则互不误命中。
-    assert!(!matcher.matches_asset("app://-/assets/1.aaaaaaaa.js", ".g:has([data-state=open]){}"));
-    assert!(matcher.matches_asset("app://-/assets/e77f816560c6.css", ".g:has([data-state=open]){}"));
+    assert!(!matcher.matches_asset(
+        "app://-/assets/1.aaaaaaaa.js",
+        ".g:has([data-state=open]){}"
+    ));
+    assert!(matcher.matches_asset(
+        "app://-/assets/e77f816560c6.css",
+        ".g:has([data-state=open]){}"
+    ));
     assert!(!matcher.matches_asset(
         "app://-/assets/e77f816560c6.css",
         "EventLoopBlockRenderer rendererHangDetectionEnabled"
@@ -1010,7 +1052,8 @@ fn numeric_assets_require_bounded_hashed_chunk_names() {
 #[test]
 fn page_patch_script_matches_rspack_numeric_assets() {
     assert!(
-        RENDERER_ASSET_PATCH_SCRIPT.contains(r"/^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i")
+        RENDERER_ASSET_PATCH_SCRIPT
+            .contains(r"/^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i")
     );
 }
 
