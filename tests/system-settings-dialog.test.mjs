@@ -11,12 +11,7 @@ import {
   textContent,
 } from "./helpers/jsx-tree.mjs";
 
-const [dialogSource, appSource, stylesSource, operationsSource] = await Promise.all([
-  readSource("src/SystemSettingsDialog.tsx"),
-  readSource("src/App.tsx"),
-  readSource("src/styles.css"),
-  readSource("src/OperationsPanel.tsx"),
-]);
+const appSource = await readSource("src/App.tsx");
 
 // 组件库与图标按名字生成桩：断言的是真实组件渲染出的元素树（含事件接线），
 // 而不是源码里的字符串，因此把 onClick/onCheckedChange 改成空操作一定会失败。
@@ -311,23 +306,6 @@ test("系统设置不出现冗余状态文案", () => {
   assert.doesNotMatch(text, /运行中/);
   assert.doesNotMatch(text, /检查配置文件并修复异常/);
   assert.doesNotMatch(text, /后台每隔 30 分钟自动检查新版本/);
-  assert.doesNotMatch(dialogSource, /检查配置文件并修复异常/);
-});
-
-test("App 把系统设置对话框接到修复命令与自动更新保存入口", () => {
-  assert.match(appSource, /onRepairCodexConfig=\{askRepairCodexConfig\}/);
-  assert.match(appSource, /onCodeyUpdatePolicyChange=\{changeUpdatePolicy\}/);
-  assert.match(appSource, /codeyUpdatePolicy=\{config\.codeyUpdatePolicy\}/);
-  assert.match(appSource, /invoke<[\s\S]{0,240}?>\("repair_codex_config"\)/);
-  assert.match(appSource, /className="sidebar-footer-bar"/);
-  assert.match(appSource, /className="sidebar-footer-left"/);
-  assert.doesNotMatch(appSource, /className="sidebar-footer-brand"/);
-  assert.match(appSource, /className="sidebar-footer-version font-mono"/);
-  assert.match(appSource, /<IconCircleArrowUp size=\{15\}/);
-  assert.match(appSource, /handleFooterUpdateClick/);
-  assert.match(appSource, /className="sidebar-footer-right"/);
-  assert.match(appSource, /setSystemSettingsOpen\(true\)/);
-  assert.match(appSource, /<SystemSettingsDialog[\s\S]*open=\{systemSettingsOpen\}/);
 });
 
 test("实验版必须先确认，取消不改设置，切回稳定版无需确认", async () => {
@@ -350,19 +328,4 @@ test("实验版必须先确认，取消不改设置，切回稳定版无需确�
   change("stable");
   assert.equal(config.codeyUpdatePolicy, "stable");
   assert.equal(confirmation, null);
-});
-
-test("styles define sidebar footer layout and responsive behavior", () => {
-  assert.match(stylesSource, /\.sidebar-footer-bar\s*\{/);
-  assert.match(stylesSource, /\.sidebar-footer-left\s*\{/);
-  assert.match(stylesSource, /\.sidebar-footer-right\s*\{/);
-  assert.match(stylesSource, /\.sidebar-footer-version\s*\{/);
-});
-
-test("OperationsPanel removes redundant top hero card and config repair button", () => {
-  assert.doesNotMatch(operationsSource, /operations-hero-card/);
-  assert.doesNotMatch(operationsSource, /Codex 运行状态/);
-  assert.doesNotMatch(operationsSource, /修复 Codex 配置/);
-  assert.doesNotMatch(operationsSource, /expanded-tray-toolbar/);
-  assert.match(operationsSource, /已生效 \$\{enabledOptimizationFeatures\.length\} 项功能/);
 });

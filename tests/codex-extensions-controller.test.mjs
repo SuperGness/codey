@@ -276,3 +276,36 @@ test("预览输入已改变时忽略迟到错误并释放操作锁", async () =>
   assert.equal(await retry, "failed");
   assert.equal(h.render().error, "新来源无法读取");
 });
+
+test("切走页签保留已加载清单与检查结果，重新进入平滑刷新且切换范围仍清空", async () => {
+  const h = createHarness();
+  h.render(true);
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  const checking = h.render(true).inspect({ action: "test_mcp", id: "docs" });
+  h.writes[0].resolve({ ok: true, message: "连接正常" });
+  assert.equal(await checking, "ok");
+  assert.equal(h.render(true).checks.docs.ok, true);
+
+  // 切离页签不清空已加载的清单与检查结果。
+  const hidden = h.render(false);
+  assert.deepEqual(hidden.inventory, { revision: "r1" });
+  assert.equal(hidden.checks.docs.ok, true);
+  assert.equal(h.reads.length, 1);
+
+  // 切回同一范围保留缓存内容并平滑刷新。
+  const reentered = h.render(true);
+  assert.deepEqual(reentered.inventory, { revision: "r1" });
+  assert.equal(reentered.checks.docs.ok, true);
+  assert.equal(h.reads.length, 2);
+  h.reads[1].resolve({ revision: "r2" });
+  await settle();
+  assert.deepEqual(h.render(true).inventory, { revision: "r2" });
+
+  // 切换范围时清空旧范围清单与检查记录。
+  h.render(true).setScope({ kind: "project", projectPath: "/tmp/demo" });
+  h.render(true);
+  const switched = h.render(true);
+  assert.equal(switched.inventory, null);
+  assert.deepEqual(switched.checks, {});
+});

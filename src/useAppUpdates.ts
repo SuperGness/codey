@@ -56,6 +56,7 @@ function updateInstallReportText(report: UpdateInstallReport): string {
 }
 
 type UseAppUpdatesOptions = {
+  active?: boolean;
   embedded: boolean;
   configLoaded: boolean;
   codeyUpdatePolicy: Config["codeyUpdatePolicy"];
@@ -105,6 +106,7 @@ function publishUpdateAvailability(result: UpdateCheck | null) {
 }
 
 export function useAppUpdates({
+  active = true,
   embedded,
   configLoaded,
   codeyUpdatePolicy,
@@ -123,6 +125,7 @@ export function useAppUpdates({
     useState<UpdateDownload | null>(null);
   const updateCheckRef = useRef<UpdateCheck | null>(null);
   const promptedVersionRef = useRef<string | null>(null);
+  const installReportCheckedRef = useRef(false);
   const [automaticallyChecking, setAutomaticallyChecking] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<UpdateCheck | null>(null);
   const manualCheckVersion = useRef(0);
@@ -164,10 +167,10 @@ export function useAppUpdates({
     updateCheckRef.current = updateCheck;
   }, [updateCheck]);
 
-  // 上一次"安装并重启"的真实结果。助手把结论写在配置目录里，这里读一次并
-  // 展示，避免用户只看到版本号没变却没有任何解释。
+  // 上一次"安装并重启"的真实结果。助手把结论写在配置目录里，这里在页面可见后
+  // 读一次并展示，避免预加载阶段触发无效请求或静默丢弃提示。
   useEffect(() => {
-    if (!configLoaded) return;
+    if (!configLoaded || !active || installReportCheckedRef.current) return;
     let cancelled = false;
     void (async () => {
       let report: UpdateInstallReport | null = null;
@@ -176,7 +179,9 @@ export function useAppUpdates({
       } catch {
         return;
       }
-      if (cancelled || !report || report.status === "installed") return;
+      if (cancelled) return;
+      installReportCheckedRef.current = true;
+      if (!report || report.status === "installed") return;
       if (report.status === "started") {
         setNotice({
           tone: "info",
@@ -189,7 +194,7 @@ export function useAppUpdates({
     return () => {
       cancelled = true;
     };
-  }, [configLoaded, setNotice]);
+  }, [active, configLoaded, setNotice]);
 
   useEffect(() => {
     const applyDetectedUpdate = (
@@ -453,6 +458,5 @@ export function useAppUpdates({
     checkForUpdates,
     downloadUpdate,
     askDownloadUpdate,
-    askInstallDownloadedUpdate,
   };
 }

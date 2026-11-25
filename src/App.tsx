@@ -146,10 +146,13 @@ export function App({
     adoptSavedConfig,
     discardDraft,
   } = useDraftConfig();
+  const overlayActive = !embedded || modalVisible;
+  const activeRef = useRef(overlayActive);
+  activeRef.current = overlayActive;
   const { status, setStatus, markRestartInProgress, refreshStatus, refreshStatusForLoad,
     restartStatusError, setRestartStatusError, acceptConfigApply, configApplyError, retryConfigApply } =
     useRuntimeStatus({
-      active: !embedded || modalVisible,
+      active: overlayActive,
       embedded,
     });
   const [pluginMarketplaceStatus, setPluginMarketplaceStatus] =
@@ -326,6 +329,7 @@ export function App({
     downloadedUpdate,
     checkForUpdates,
   } = useAppUpdates({
+    active: overlayActive,
     embedded,
     configLoaded,
     codeyUpdatePolicy: persistedConfigRef.current?.codeyUpdatePolicy ?? "stable",
@@ -405,6 +409,18 @@ export function App({
         result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
       );
       if (result.modelState) setModelState(result.modelState);
+      if (!activeRef.current) {
+        await refreshPluginMarketplaceStatus(current);
+        if (!current()) return;
+        const loadErrors = [
+          result.startupError && `自动启动失败：${result.startupError}`,
+          result.configLoadError,
+        ].filter(Boolean);
+        if (loadErrors.length > 0) {
+          setNotice({ tone: "error", text: loadErrors.join("；") });
+        }
+        return;
+      }
       const [next] = await Promise.all([
         refreshStatusForLoad(),
         refreshPluginMarketplaceStatus(current),
@@ -1362,6 +1378,8 @@ export function App({
   const handleAnalyzeDiagnosticStorage = useStableEvent(
     (target: DiagnosticStorageTarget) => void analyzeDiagnosticStorage(target),
   );
+  const handleRepairCodexConfig = useStableEvent(askRepairCodexConfig);
+  const handleChangeUpdatePolicy = useStableEvent(changeUpdatePolicy);
   const handleModelPickerOpenChange = useStableEvent((open: boolean) => {
     if (!isBusy || open) setModelPickerVisible(open);
   });
@@ -1379,7 +1397,7 @@ export function App({
             </p>
             {loadFailed && (
               <div className="flex flex-wrap gap-2 mt-3.5">
-                <Button variant="outline" size="sm" disabled={isBusy} onClick={askRepairCodexConfig}>
+                <Button variant="outline" size="sm" disabled={isBusy} onClick={handleRepairCodexConfig}>
                   {busy === "repair-codex-config" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
                   {busy === "repair-codex-config" ? "检查修复中…" : "修复 Codex 配置"}
                 </Button>
@@ -1633,38 +1651,6 @@ export function App({
         {usageAnalysisOpen ? "跳至用量分析" : "跳至设置内容"}
       </a>
 
-      {!embedded && (
-        <div className="macos-titlebar">
-          <div className="macos-traffic-lights">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-3! min-w-3! rounded-full! border! border-[rgb(var(--codey-ink-rgb,0,0,0))]/15! bg-[#ff5f56]! p-0! shadow-none! hover:opacity-85"
-              title="关闭"
-              aria-label="关闭窗口"
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-3! min-w-3! rounded-full! border! border-[rgb(var(--codey-ink-rgb,0,0,0))]/15! bg-[#ffbd2e]! p-0! shadow-none! hover:opacity-85"
-              title="最小化"
-              aria-label="最小化窗口"
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-3! min-w-3! rounded-full! border! border-[rgb(var(--codey-ink-rgb,0,0,0))]/15! bg-[#27c93f]! p-0! shadow-none! hover:opacity-85"
-              title="缩放"
-              aria-label="全屏缩放"
-            />
-          </div>
-          <div className="macos-titlebar-title">
-            <span className="app-title-text">Codey Control Panel</span>
-          </div>
-          <div className="macos-titlebar-right" aria-hidden="true" />
-        </div>
-      )}
-
       {embedded && (
         <Button
           aria-label="关闭配置"
@@ -1702,6 +1688,7 @@ export function App({
                 description="查看 Codex 运行状态，管理客户端功能与通知。"
               />
               <OperationsPanel
+                active={active}
                 fastContextToolsStatus={fastContextToolsStatus}
                 status={operationsStatus}
                 busy={busy}
@@ -1736,7 +1723,7 @@ export function App({
             <ModelSection
               active={active}
               config={config}
-              runtimeStatus={status}
+              remoteCompaction={status.remoteCompaction}
               currentProvider={provider ?? null}
               officialAccountAvailable={status.officialAccountAvailable === true}
               popupContainer={popupContainer}
@@ -1784,7 +1771,9 @@ export function App({
               onSubagentOptimizationChange={handleSubagentOptimizationChange}
             />
           ),
-          plugins: <CodeyPluginsSection container={popupContainer} />,
+          plugins: (active) => (
+            <CodeyPluginsSection active={active} container={popupContainer} />
+          ),
           mcp: (active) => (
             <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />
           ),
@@ -1850,10 +1839,10 @@ export function App({
         codexAppPath={config.codexAppPath || status.codexAppPath}
         isBusy={isBusy}
         busy={busy}
-        onRepairCodexConfig={askRepairCodexConfig}
+        onRepairCodexConfig={handleRepairCodexConfig}
         configRepairNotice={configRepairNotice}
         codeyUpdatePolicy={config.codeyUpdatePolicy}
-        onCodeyUpdatePolicyChange={changeUpdatePolicy}
+        onCodeyUpdatePolicyChange={handleChangeUpdatePolicy}
       />
     </main>
   );

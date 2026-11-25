@@ -2,7 +2,7 @@ import { createContext, useCallback, useEffect, useState, type ReactNode } from 
 import { Modal } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { useToastContainer } from "./components/ui";
-import codeyAppIcon from "../backend/icons/favicon.png?inline";
+import codeyAppIcon from "./assets/codey-brand-64.png?inline";
 
 export const ToastContainerReadyContext = createContext(true);
 

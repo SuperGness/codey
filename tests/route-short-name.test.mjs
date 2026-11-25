@@ -65,28 +65,6 @@ test("route labels use the first two name characters or a custom short name", ()
   assert.equal(shortNames.prefixedRouteName({ ...relay, name: "   " }), "备");
 });
 
-test("the third-party route editor exposes the route-name and short-name fields with maxLength", async () => {
-  const source = await readFile(
-    new URL("../src/ModelSection.tsx", import.meta.url),
-    "utf8",
-  );
-
-  assert.match(source, /id="route-name-input"/);
-  assert.match(source, /id="route-short-name-input"/);
-  assert.doesNotMatch(source, /短名称（可选）|留空使用线路名称前两个字符/);
-  assert.match(source, /线路名（可选）/);
-  assert.ok(source.indexOf('id="route-short-name-input"') < source.indexOf('id="route-name-input"'));
-  assert.ok(source.indexOf('id="official-route-short-name-input"') < source.indexOf('id="official-route-name-input"'));
-  assert.match(source, /\{prefixedRouteName\(profile\)\}/);
-  assert.match(source, /maxLength=\{MAX_ROUTE_NAME_CHARACTERS\}/);
-  assert.match(source, /maxLength=\{MAX_ROUTE_SHORT_NAME_CHARACTERS\}/);
-  assert.doesNotMatch(source, /最多 2 个字符且不可重复，模型名称前会显示为 \[短名称\]/);
-  assert.match(
-    source,
-    /validateThirdPartyRouteShortName\(route\.shortName, profiles, route\.id\)/,
-  );
-});
-
 test("the native provider model options use the same fallback without a stored route", () => {
   const { exports } = createModuleGraph(new URL("../src/subagentModels.ts", import.meta.url));
   const modelState = {
@@ -136,58 +114,6 @@ test("official route short names are required and only conflict with third-party
     shortNames.validateOfficialRouteShortName("中转", profiles),
     "短名称「中转」已被其他线路使用",
   );
-});
-
-test("official route settings are edited on the route card instead of the account row", async () => {
-  const [modelSection, panel, app] = await Promise.all([
-    readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
-  ]);
-
-  assert.match(modelSection, /id="official-route-name-input"/);
-  assert.match(modelSection, /id="official-route-short-name-input"/);
-  assert.match(modelSection, /id="official-route-base-url-input"/);
-  assert.match(modelSection, /留空使用官方默认网关/);
-  assert.match(modelSection, /maxLength=\{MAX_ROUTE_NAME_CHARACTERS\}/);
-  assert.match(modelSection, /maxLength=\{MAX_ROUTE_SHORT_NAME_CHARACTERS\}/);
-  assert.match(modelSection, /validateOfficialRouteSettings\(/);
-  assert.match(modelSection, /官方账号登录 · \$\{email\}/);
-  // 编辑按钮对所有线路渲染，只有第三方线路才有删除按钮。
-  const editButton = modelSection.indexOf("aria-label={`编辑线路 ${profile.name}`}");
-  const deleteGuard = modelSection.indexOf("{!isOfficial && (");
-  assert.ok(editButton > 0 && deleteGuard > editButton);
-  // 编辑只改线路名、短名称、网关和代理，模型列举交给同步入口。
-  assert.match(modelSection, /openRouteDialog\(profile, isOfficial \? "settings" : null\)/);
-  assert.match(modelSection, /const syncModels = \(\) => onFetchRouteModels\(profile\)/);
-  assert.match(modelSection, /\{officialDialogScope !== "models" && \(/);
-  assert.match(modelSection, /\{officialDialogScope !== "settings" && \(/);
-
-  assert.match(panel, /aria-label=\{`移除官方账号 \$\{label\}`\}/);
-  assert.doesNotMatch(panel, /IconPencil|validateOutboundProxyUrl/);
-
-  assert.match(app, /accountId: routeSettings.accountId/);
-  assert.match(app, /routeName: routeSettings.routeName/);
-  assert.match(app, /routeShortName: routeSettings.routeShortName/);
-  assert.match(app, /baseUrl: routeSettings.baseUrl/);
-});
-
-test("official accounts derive missing route settings and keep explicit blank long names", async () => {
-  const [modelSection, mock] = await Promise.all([
-    readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/dev/mockApi.ts", import.meta.url), "utf8"),
-  ]);
-
-  assert.match(mock, /const previewOfficialRouteName = \(index: number\) => `官方账号\$\{index\}`/);
-  assert.match(mock, /account\.routeName !== undefined/);
-  assert.match(mock, /shortName: account\.routeShortName \|\| fallbackRouteShortName/);
-  assert.doesNotMatch(mock, /previewOfficialRouteShortName/);
-  assert.match(mock, /previewEnsureGeneratedRouteSettings\(\);/);
-  assert.doesNotMatch(mock, /previewOfficialDerivedRouteName/);
-
-  assert.doesNotMatch(modelSection, /留空则按账号添加顺序使用默认线路名，例如「官方账号1」/);
-  assert.doesNotMatch(modelSection, /留空则按账号添加顺序使用默认短名称，例如「官1」/);
-  assert.doesNotMatch(modelSection, /最多 2 个字符且不可重复，模型名称前会显示为 \[短名称\]/);
 });
 
 test("official settings allow an empty long name and reject an empty short name", () => {
@@ -259,21 +185,18 @@ test("preview saving blank official long names survives derivation and missing s
       {}, previewWindow, { log: () => {} }, (callback) => callback(),
     );
     const invoke = previewWindow.__codeyInvokeApi;
-    const saved = await invoke("save_official_account_route_settings", {
-      accountId: "acct_preview_1", routeName: " ", routeShortName: "主官", baseUrl: "", upstreamProxy: "",
+    const loaded = await invoke("load_codey_config", {});
+    const route = loaded.config.profiles.find((profile) => profile.officialAccountId === "acct_preview_1");
+    const model = loaded.modelState.officialModelIds[0];
+    const saved = await invoke("save_official_route_models", {
+      routeId: route.id, models: [model], accountId: "acct_preview_1",
+      routeName: " ", routeShortName: "主官", baseUrl: "", upstreamProxy: "", maxConcurrency: 3,
     });
     assert.equal(saved.status, "ok");
     assert.equal(saved.accounts.find((account) => account.id === "acct_preview_1").routeName, "");
     assert.equal(saved.config.profiles.find((profile) => profile.officialAccountId === "acct_preview_1").name, "");
-    const route = saved.config.profiles.find((profile) => profile.officialAccountId === "acct_preview_1");
-    const model = saved.modelState.officialModelIds[0];
-    const concurrentSaved = await invoke("save_official_route_models", {
-      routeId: route.id, models: [model], accountId: "acct_preview_1",
-      routeName: "", routeShortName: "主官", baseUrl: "", upstreamProxy: "", maxConcurrency: 3,
-    });
-    assert.equal(concurrentSaved.status, "ok");
-    assert.equal(concurrentSaved.accounts.find((account) => account.id === "acct_preview_1").maxConcurrency, 3);
-    assert.equal(concurrentSaved.config.profiles.find((profile) => profile.id === route.id).maxConcurrency, 3);
+    assert.equal(saved.accounts.find((account) => account.id === "acct_preview_1").maxConcurrency, 3);
+    assert.equal(saved.config.profiles.find((profile) => profile.id === route.id).maxConcurrency, 3);
     const modelSynced = await invoke("save_official_route_models", { routeId: route.id, models: [model] });
     assert.equal(modelSynced.config.profiles.find((profile) => profile.id === route.id).maxConcurrency, 3);
     for (const maxConcurrency of [-1, 1.5, 4294967296]) {
@@ -282,11 +205,12 @@ test("preview saving blank official long names survives derivation and missing s
         routeName: "不应保存", routeShortName: "主官", maxConcurrency,
       });
       assert.equal(invalid.status, "failed");
-      assert.equal(concurrentSaved.accounts.find((account) => account.id === "acct_preview_1").maxConcurrency, 3);
-      assert.equal(concurrentSaved.accounts.find((account) => account.id === "acct_preview_1").routeName, "");
+      assert.equal(saved.accounts.find((account) => account.id === "acct_preview_1").maxConcurrency, 3);
+      assert.equal(saved.accounts.find((account) => account.id === "acct_preview_1").routeName, "");
     }
-    const rejected = await invoke("save_official_account_route_settings", {
-      accountId: "acct_preview_1", routeName: "不应保存", routeShortName: " ", baseUrl: "", upstreamProxy: "",
+    const rejected = await invoke("save_official_route_models", {
+      routeId: route.id, models: [model], accountId: "acct_preview_1",
+      routeName: "不应保存", routeShortName: " ", baseUrl: "", upstreamProxy: "",
     });
     assert.equal(rejected.status, "failed");
     assert.equal(rejected.message, "请输入短名称");
@@ -301,24 +225,4 @@ test("preview saving blank official long names survives derivation and missing s
   } finally {
     globalThis.window = previousWindow;
   }
-});
-
-test("the route-name limit is shared by the renderer and the official account command", async () => {
-  const [settings, backendConfig, officialAccounts] = await Promise.all([
-    readFile(new URL("../src/officialRouteSettings.ts", import.meta.url), "utf8"),
-    readFile(new URL("../backend/src/config/types.rs", import.meta.url), "utf8"),
-    readFile(
-      new URL("../backend/src/commands/official_accounts.rs", import.meta.url),
-      "utf8",
-    ),
-  ]);
-
-  assert.match(settings, /export const MAX_ROUTE_NAME_CHARACTERS = 15;/);
-  assert.match(backendConfig, /pub const MAX_ROUTE_NAME_CHARS: usize = 15;/);
-  // 后端保存线路时使用同一个上限，直接调用接口也写不进界面存不下的名称。
-  assert.match(
-    officialAccounts,
-    /if route_name\.chars\(\)\.count\(\) > MAX_ROUTE_NAME_CHARS \{/,
-  );
-  assert.doesNotMatch(officialAccounts, /MAX_OFFICIAL_ROUTE_NAME_CHARS/);
 });

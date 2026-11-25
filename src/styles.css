@@ -19,7 +19,6 @@
   --codey-surface-muted: #f7f7f8;
   --codey-surface-sunken: #f1f1f3;
   --codey-surface-elevated: #ffffff;
-  --codey-surface-rgb: 255, 255, 255;
   --codey-ink-rgb: 24, 24, 27;
 
   --codey-border: #e6e7eb;
@@ -34,21 +33,15 @@
   --codey-blue-soft: rgba(47, 100, 200, 0.085);
   --codey-blue-border: rgba(47, 100, 200, 0.24);
 
-  --codey-signal: #2f64c8;
-  --codey-signal-soft: rgba(47, 100, 200, 0.085);
-
   --codey-green: #1e8259;
-  --codey-green-hover: #186f4b;
   --codey-green-soft: rgba(30, 130, 89, 0.085);
   --codey-green-border: rgba(30, 130, 89, 0.24);
 
   --codey-red: #c93b42;
-  --codey-red-hover: #b23037;
   --codey-red-soft: rgba(201, 59, 66, 0.085);
   --codey-red-border: rgba(201, 59, 66, 0.24);
 
   --codey-amber: #b37016;
-  --codey-amber-hover: #9a5f10;
   --codey-amber-soft: rgba(179, 112, 22, 0.095);
   --codey-amber-border: rgba(179, 112, 22, 0.25);
 
@@ -85,7 +78,6 @@
   --codey-surface-muted: #1b1b1e;
   --codey-surface-sunken: #151518;
   --codey-surface-elevated: #27272c;
-  --codey-surface-rgb: 32, 32, 36;
 
   --codey-sidebar: #161618;
   --codey-canvas: #1b1b1e;
@@ -107,21 +99,15 @@
   --codey-blue-soft: rgba(91, 140, 226, 0.13);
   --codey-blue-border: rgba(91, 140, 226, 0.28);
 
-  --codey-signal: #5b8ce2;
-  --codey-signal-soft: rgba(91, 140, 226, 0.13);
-
   --codey-green: #46b283;
-  --codey-green-hover: #58c092;
   --codey-green-soft: rgba(70, 178, 131, 0.13);
   --codey-green-border: rgba(70, 178, 131, 0.28);
 
   --codey-red: #df6b70;
-  --codey-red-hover: #e77e83;
   --codey-red-soft: rgba(223, 107, 112, 0.13);
   --codey-red-border: rgba(223, 107, 112, 0.28);
 
   --codey-amber: #d69f4c;
-  --codey-amber-hover: #e0ae61;
   --codey-amber-soft: rgba(214, 159, 76, 0.13);
   --codey-amber-border: rgba(214, 159, 76, 0.28);
 
@@ -398,6 +384,21 @@ button,
   }
 }
 
+@keyframes codey-dialog-zoom-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.codey-dialog-container[data-entering="true"] {
+  animation: codey-dialog-zoom-in 150ms ease-out;
+}
+
 .settings-modal-shell {
   border: 1px solid var(--codey-border);
   background: var(--codey-canvas);
@@ -449,61 +450,9 @@ button,
   transform: translateY(0);
 }
 
-/* ==========================================================================
-   macOS Window Titlebar & Header
-   ========================================================================== */
-
-.macos-titlebar {
-  display: flex;
-  height: 36px;
-  flex: 0 0 36px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  background: var(--codey-sidebar);
-  border-bottom: 1px solid var(--codey-border);
-  user-select: none;
-  z-index: 40;
-}
-
-.macos-traffic-lights {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1 1 0;
-  min-width: 0;
-  max-width: 140px;
-}
-
-.macos-titlebar-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--codey-font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--codey-muted);
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-}
-
-.app-title-text {
-  color: var(--codey-text-soft);
-}
-
 .settings-modal-header {
   border-bottom: 1px solid var(--codey-border);
   background: var(--codey-surface);
-}
-
-.macos-titlebar-right {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex: 1 1 0;
-  min-width: 0;
-  max-width: 140px;
 }
 
 .config-header-feedback {
@@ -1315,41 +1264,6 @@ button,
 /* 关闭态开关轨道在白底上需要足够对比度。 */
 .switch {
   --switch-control-bg: var(--codey-border-strong);
-}
-
-.section-title {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 10px;
-}
-
-.section-title.compact {
-  align-items: center;
-}
-
-.section-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.section-title h1,
-.section-title h2 {
-  margin: 1px 0;
-  color: var(--codey-text);
-  font-size: 14.5px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-
-.section-title p {
-  margin: 0;
-  color: var(--codey-muted);
-  font-size: 12.5px;
-  line-height: 1.45;
 }
 
 .toast-region {

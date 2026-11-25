@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconAlertTriangle,
   IconEraser,
@@ -40,7 +40,12 @@ import { SettingsPageHeader } from "./SettingsPageHeader";
 import { formatBytes } from "./formatters";
 import { installPluginFileDrop, uploadPluginPackage, validateDroppedPluginFiles } from "./pluginPackageImport";
 
-export function CodeyPluginsSection({ container }: { container?: HTMLElement | null }) {
+type CodeyPluginsSectionProps = {
+  active?: boolean;
+  container?: HTMLElement | null;
+};
+
+function CodeyPluginsSectionComponent({ active = true, container }: CodeyPluginsSectionProps) {
   const [result, setResult] = useState<CodeyPluginsResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -273,9 +278,9 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
   useEffect(() => installPluginFileDrop(
     window, handleDroppedFiles, setDragActive,
-    busy || loading || !known || Boolean(editId || confirm || clearLogsPlugin),
+    busy || loading || !known || !active || Boolean(editId || confirm || clearLogsPlugin),
     () => Boolean(sectionEl?.getClientRects().length),
-  ), [handleDroppedFiles, busy, loading, known, editId, confirm, clearLogsPlugin, sectionEl]);
+  ), [handleDroppedFiles, busy, loading, known, active, editId, confirm, clearLogsPlugin, sectionEl]);
 
   const handleConfirmImport = useCallback(() => {
     if (!preview) return;
@@ -980,3 +985,11 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     </section>
   );
 }
+
+export const CodeyPluginsSection =
+  typeof memo === "function"
+    ? memo(CodeyPluginsSectionComponent, (prev, next) => {
+        if (prev.active === false && next.active === false) return true;
+        return prev.active === next.active && prev.container === next.container;
+      })
+    : CodeyPluginsSectionComponent;

@@ -1,0 +1,161 @@
+/*
+ * 独立请求日志页（/codey/request-logs）专用精简样式表：
+ * 只导入 RequestLogDialog 及其弹层/表单控件实际渲染的 HeroUI 组件样式，
+ * 避免与设置控制台共用全量组件样式。
+ */
+@layer theme, base, components, utilities;
+
+@import "tailwindcss" source(none);
+@import "./tailwind-animate.css";
+
+@import "@heroui/styles/base/base.css" layer(base);
+@import "@heroui/styles/base/scrollbar.css" layer(base);
+
+/* 共享基元 */
+@import "@heroui/styles/components/close-button.css" layer(components);
+@import "@heroui/styles/components/description.css" layer(components);
+@import "@heroui/styles/components/label.css" layer(components);
+
+/* 导航 */
+@import "@heroui/styles/components/pagination.css" layer(components);
+@import "@heroui/styles/components/tabs.css" layer(components);
+@import "@heroui/styles/components/scroll-shadow.css" layer(components);
+
+/* 按钮 */
+@import "@heroui/styles/components/button.css" layer(components);
+
+/* 集合 */
+@import "@heroui/styles/components/list-box-item.css" layer(components);
+@import "@heroui/styles/components/list-box-section.css" layer(components);
+@import "@heroui/styles/components/list-box.css" layer(components);
+
+/* 数据展示 */
+@import "@heroui/styles/components/chip.css" layer(components);
+@import "@heroui/styles/components/table.css" layer(components);
+
+/* 反馈 */
+@import "@heroui/styles/components/alert.css" layer(components);
+@import "@heroui/styles/components/spinner.css" layer(components);
+@import "@heroui/styles/components/toast.css" layer(components);
+
+/* 表单 */
+@import "@heroui/styles/components/input.css" layer(components);
+@import "@heroui/styles/components/input-group.css" layer(components);
+
+/* 布局 */
+@import "@heroui/styles/components/card.css" layer(components);
+@import "@heroui/styles/components/header.css" layer(components);
+
+/* 弹层 */
+@import "@heroui/styles/components/drawer.css" layer(components);
+@import "@heroui/styles/components/modal.css" layer(components);
+@import "@heroui/styles/components/popover.css" layer(components);
+@import "@heroui/styles/components/tooltip.css" layer(components);
+
+/* 选择器 */
+@import "@heroui/styles/components/combo-box.css" layer(components);
+@import "@heroui/styles/components/select.css" layer(components);
+
+@import "@heroui/styles/themes/default" layer(theme);
+@import "@heroui/styles/utilities";
+@import "@heroui/styles/variants";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@source "./request-logs-entry.tsx";
+@source "./RequestLogDialog.tsx";
+@source "./RequestLogRouteDiagnostics.tsx";
+@source "./UiProvider.tsx";
+@source "./components/ui/index.tsx";
+@source "../node_modules/@heroui/react/dist/utils";
+@source "../node_modules/@heroui/react/dist/hooks";
+@source "../node_modules/@heroui/react/dist/components/alert";
+@source "../node_modules/@heroui/react/dist/components/button";
+@source "../node_modules/@heroui/react/dist/components/card";
+@source "../node_modules/@heroui/react/dist/components/chip";
+@source "../node_modules/@heroui/react/dist/components/close-button";
+@source "../node_modules/@heroui/react/dist/components/combo-box";
+@source "../node_modules/@heroui/react/dist/components/description";
+@source "../node_modules/@heroui/react/dist/components/drawer";
+@source "../node_modules/@heroui/react/dist/components/header";
+@source "../node_modules/@heroui/react/dist/components/input";
+@source "../node_modules/@heroui/react/dist/components/input-group";
+@source "../node_modules/@heroui/react/dist/components/label";
+@source "../node_modules/@heroui/react/dist/components/list-box";
+@source "../node_modules/@heroui/react/dist/components/list-box-item";
+@source "../node_modules/@heroui/react/dist/components/list-box-section";
+@source "../node_modules/@heroui/react/dist/components/modal";
+@source "../node_modules/@heroui/react/dist/components/pagination";
+@source "../node_modules/@heroui/react/dist/components/popover";
+@source "../node_modules/@heroui/react/dist/components/scroll-shadow";
+@source "../node_modules/@heroui/react/dist/components/select";
+@source "../node_modules/@heroui/react/dist/components/spinner";
+@source "../node_modules/@heroui/react/dist/components/table";
+@source "../node_modules/@heroui/react/dist/components/tabs";
+@source "../node_modules/@heroui/react/dist/components/toast";
+@source "../node_modules/@heroui/react/dist/components/tooltip";
+
+@layer theme {
+  :root,
+  [data-theme="light"] {
+    --radius: 8px;
+    --accent: #2f64c8;
+    --accent-foreground: #ffffff;
+    --link: #2f64c8;
+    --danger: #c93b42;
+    --success: #1e8259;
+    --warning: #b37016;
+    --background: #ffffff;
+    --foreground: #18181b;
+    --surface: #ffffff;
+    --surface-secondary: #f7f7f8;
+    --surface-tertiary: #f1f1f3;
+    --overlay: #ffffff;
+    --default: #f1f1f3;
+    --default-foreground: #18181b;
+    --muted: #666a73;
+    --border: #e6e7eb;
+    --divider: #efeff2;
+    --field-background: #ffffff;
+    --field-foreground: #18181b;
+    --field-placeholder: #8b909a;
+    --field-radius: 8px;
+    --field-shadow: 0 0 0 0 transparent;
+    --field-border: #dcdde2;
+    --field-border-hover: #c5c8d0;
+    --field-border-focus: #2f64c8;
+    --focus: #2f64c8;
+    --overlay-shadow: 0 10px 28px -6px rgba(15, 17, 21, 0.14), 0 2px 6px rgba(15, 17, 21, 0.06), 0 0 0 1px rgba(15, 17, 21, 0.06);
+  }
+
+  [data-theme="dark"] {
+    --radius: 8px;
+    --accent: #5b8ce2;
+    --accent-foreground: #ffffff;
+    --link: #739ee8;
+    --danger: #df6b70;
+    --success: #46b283;
+    --warning: #d69f4c;
+    --background: #1b1b1e;
+    --foreground: #ececf0;
+    --surface: #202024;
+    --surface-secondary: #242429;
+    --surface-tertiary: #2b2b31;
+    --overlay: #222227;
+    --default: #29292f;
+    --default-foreground: #ececf0;
+    --muted: #8f909a;
+    --border: #2c2c31;
+    --divider: #242429;
+    --field-background: #161619;
+    --field-foreground: #ececf0;
+    --field-placeholder: #848692;
+    --field-radius: 8px;
+    --field-shadow: 0 0 0 0 transparent;
+    --field-border: #303036;
+    --field-border-hover: #42424a;
+    --field-border-focus: #5b8ce2;
+    --focus: #5b8ce2;
+    --overlay-shadow: 0 14px 36px -6px rgba(0, 0, 0, 0.48), 0 3px 10px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+}

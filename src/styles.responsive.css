@@ -54,7 +54,6 @@
     gap: 10px;
   }
 
-  .section-title:has(+ .notification-channel-list),
   .notification-card-header {
     align-items: stretch;
     flex-direction: column;

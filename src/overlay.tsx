@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 // react-aria 用同一份模块实例读取该开关，必须从 react-stately 内部路径导入才能生效。
 import { enableShadowDOM } from "react-stately/private/flags/flags";
@@ -6,24 +5,17 @@ import { UiProvider } from "./UiProvider";
 import utilityStyles from "./tailwind.css?inline";
 import { shadowStyleSheet } from "./shadowStyles";
 import { App } from "./App";
-import { errorText } from "./appUtils";
 import coreStyles from "./styles.css?inline";
 import operationsStyles from "./styles.operations.css?inline";
 import modelStyles from "./styles.models.css?inline";
 import featureStyles from "./styles.features.css?inline";
 import diagnosticStyles from "./styles.diagnostics.css?inline";
+import usageAnalysisStyles from "./styles.usage-analysis.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
-import { codeyApiPath, invoke } from "./api";
+import { codeyApiPath } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
 import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
 import { installOverlayTheme } from "./overlayTheme";
-import { installRequestLogTheme } from "./requestLogTheme";
-import {
-  RequestLogDialog,
-  type RequestLogCatalog,
-} from "./RequestLogDialog";
-
-const REQUEST_LOG_CATALOG_TIMEOUT_MS = 30_000;
 
 type OverlayController = {
   open: () => void;
@@ -42,122 +34,16 @@ declare global {
   }
 }
 
-const REQUEST_LOG_PATH = "/codey/request-logs";
-const REQUEST_LOG_TOKEN_KEY = "codey-request-log-token";
-
-function RequestLogPage() {
-  const [catalog, setCatalog] = useState<RequestLogCatalog | null>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    let settled = false;
-    const timer = window.setTimeout(() => {
-      if (!cancelled && !settled) setError("加载请求日志超时，请刷新页面");
-    }, REQUEST_LOG_CATALOG_TIMEOUT_MS);
-    void invoke<{ config: RequestLogCatalog }>("load_codey_config")
-      .then((result) => {
-        settled = true;
-        if (cancelled) return;
-        setError("");
-        setCatalog(result.config);
-      })
-      .catch((nextError: unknown) => {
-        settled = true;
-        if (cancelled) return;
-        setError(errorText(nextError));
-      })
-      .finally(() => window.clearTimeout(timer));
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, []);
-
-  if (error) return <main className="p-6 text-sm text-[var(--codey-red,#b91c1c)]">{error}</main>;
-  if (!catalog) return <main className="p-6 text-sm text-[var(--codey-muted,#6e6e73)]">正在加载请求日志…</main>;
-  return (
-    <RequestLogDialog
-      catalog={catalog}
-      container={null}
-      opened
-      standalone
-    />
-  );
-}
-
-function installBrowserBridge() {
-  let hashToken = "";
-  try {
-    hashToken = decodeURIComponent(window.location.hash.slice(1));
-  } catch {
-    // Ignore malformed external links and fall back to the last session token.
-  }
-  if (hashToken) {
-    window.sessionStorage.setItem(REQUEST_LOG_TOKEN_KEY, hashToken);
-  }
-  if (window.location.hash) {
-    window.history.replaceState(null, "", window.location.pathname + window.location.search);
-  }
-  const token = hashToken || window.sessionStorage.getItem(REQUEST_LOG_TOKEN_KEY) || "";
-  window.__codeyInvokeApi = async (command, args) => {
-    const response = await fetch(`/codey/api/${command}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-codey-router-token": token,
-      },
-      body: JSON.stringify(args),
-    });
-    let value: { error?: { message?: string }; message?: string };
-    try {
-      value = await response.json();
-    } catch {
-      throw new Error(
-        response.ok
-          ? "Codey 返回了无法解析的响应"
-          : `Codey 请求失败（${response.status}）`,
-      );
-    }
-    if (!response.ok) {
-      throw new Error(value?.error?.message || value?.message || `Codey 请求失败（${response.status}）`);
-    }
-    return value;
-  };
-}
-
 function getOverlayMountTarget() {
   return document.body ?? document.documentElement;
 }
 
-if (window.location.pathname === REQUEST_LOG_PATH) {
-  installRequestLogTheme();
-  installBrowserBridge();
-  document.title = "Codey 请求日志";
-  const style = document.createElement("style");
-  style.textContent = [
-    utilityStyles,
-    coreStyles,
-    operationsStyles,
-    modelStyles,
-    featureStyles,
-    diagnosticStyles,
-    responsiveStyles,
-  ].join("\n");
-  document.head.appendChild(style);
-  const root = document.getElementById("root") ?? document.body.appendChild(document.createElement("div"));
-  ReactDOM.createRoot(root).render(
-    <UiProvider>
-      <RequestLogPage />
-    </UiProvider>,
-  );
-} else {
-  window.__codeyInvokeApi = async (command, args) => {
-    if (typeof window.__codexSessionDeleteBridge !== "function") {
-      throw new Error("Codey bridge 尚未就绪");
-    }
-    return window.__codexSessionDeleteBridge(codeyApiPath(command), args);
-  };
+window.__codeyInvokeApi = async (command, args) => {
+  if (typeof window.__codexSessionDeleteBridge !== "function") {
+    throw new Error("Codey bridge 尚未就绪");
+  }
+  return window.__codexSessionDeleteBridge(codeyApiPath(command), args);
+};
 
 if (!window.__codeySettingsOverlay) {
   const host = document.createElement("div");
@@ -185,6 +71,7 @@ if (!window.__codeySettingsOverlay) {
       modelStyles,
       featureStyles,
       diagnosticStyles,
+      usageAnalysisStyles,
       responsiveStyles,
     ),
   ];
@@ -207,6 +94,7 @@ if (!window.__codeySettingsOverlay) {
 
   let hideTimer: number | undefined;
   let visible = false;
+  let mounted = false;
 
   // 关闭或预加载期间让宿主脱离文档，避免 ShadowRoot 的大样式表常驻主文档的全局样式失效集。
   const hide = () => {
@@ -218,13 +106,14 @@ if (!window.__codeySettingsOverlay) {
     host.remove();
   };
   const reactRoot = ReactDOM.createRoot(rootElement);
-  const render = (visible: boolean) => {
+  const render = (nextVisible: boolean) => {
+    mounted = true;
     reactRoot.render(
       <UiProvider container={modalContainer}>
         <App
           embedded
           modalContainer={modalContainer}
-          modalVisible={visible}
+          modalVisible={nextVisible}
           onAfterClose={hide}
           onClose={close}
         />
@@ -240,6 +129,7 @@ if (!window.__codeySettingsOverlay) {
   };
   const open = () => {
     if (visible) return;
+    const alreadyMounted = mounted;
     visible = true;
     window.clearTimeout(hideTimer);
     hideTimer = undefined;
@@ -248,16 +138,18 @@ if (!window.__codeySettingsOverlay) {
     host.style.display = "block";
     host.setAttribute("aria-hidden", "false");
     render(true);
-    window.dispatchEvent(new CustomEvent(SETTINGS_OPENED_EVENT));
+    if (alreadyMounted) {
+      window.dispatchEvent(new CustomEvent(SETTINGS_OPENED_EVENT));
+    }
   };
   const isOpen = () => visible;
 
-  render(false);
+  // 预加载阶段仅准备 ShadowRoot 与样式表，首次打开时再挂载 React 树，
+  // 避免未打开设置页就触发 runtime_status 探针和配置/更新请求。
   window.__codeySettingsOverlay = {
     open,
     close,
     isOpen,
     toggle: () => (visible ? close() : open()),
   };
-}
 }

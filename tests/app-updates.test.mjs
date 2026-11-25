@@ -521,3 +521,64 @@ test("切换频道丢弃进行中的旧请求并清除已发现的更新", async
   fixture.render();
   assert.equal(fixture.requests.length, 2);
 });
+
+test("不可见预加载阶段延迟读取更新安装报告，首次可见后只提示一次", async () => {
+  const notices = [];
+  const h = harness(false, {
+    version: "1.2.0",
+    status: "failed",
+    message: "安装失败",
+    writtenAt: 100,
+  });
+  h.options.active = false;
+  h.options.setNotice = (notice) => notices.push(notice);
+  // 单独构造初始 active=false 的用例，确保初始挂载不发请求。
+  const hooks = [], effects = [];
+  let cursor = 0, reportCalls = 0;
+  const options = {
+    active: false, embedded: true, configLoaded: true, codeyUpdatePolicy: "stable",
+    isBusy: false, setBusy() {}, setNotice(notice) { notices.push(notice); }, setConfirmation() {}, beforeInstall: async () => {},
+  };
+  const react = {
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in hooks)) hooks[index] = initial;
+      return [hooks[index], next => { hooks[index] = typeof next === "function" ? next(hooks[index]) : next; }];
+    },
+    useRef(initial) { return react.useState({ current: initial })[0]; },
+    useCallback(callback) { return react.useState(callback)[0]; },
+    useEffect(effect, deps) {
+      const index = cursor++, previous = hooks[index];
+      if (previous && deps.every((value, i) => Object.is(value, previous.deps[i]))) return;
+      effects.push(() => { previous?.cleanup?.(); hooks[index] = { deps, cleanup: effect() }; });
+    },
+  };
+  const win = Object.assign(new EventTarget(), {
+    setTimeout: () => 1, clearTimeout() {},
+    sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  });
+  const exports = {};
+  new Function("require", "exports", "window", compiled)(name => {
+    if (name === "react") return react;
+    if (name === "./api") return { invoke: (command) => { if (command === "update_install_report") { reportCalls += 1; return Promise.resolve({ version: "1.2.0", status: "failed", message: "安装失败", writtenAt: 100 }); } return Promise.resolve({}); } };
+    if (name === "./appUtils") return { withTimeout: p => p, errorText: String };
+    if (name === "./formatters") return { formatBytes: String };
+    throw new Error(`Unexpected import ${name}`);
+  }, exports, win);
+  const render = () => { cursor = 0; exports.useAppUpdates(options); effects.splice(0).forEach(fn => fn()); };
+  render();
+  await settle();
+  assert.equal(reportCalls, 0);
+  assert.equal(notices.length, 0);
+  options.active = true;
+  render();
+  await settle();
+  assert.equal(reportCalls, 1);
+  assert.equal(notices.length, 1);
+  options.active = false;
+  render();
+  options.active = true;
+  render();
+  await settle();
+  assert.equal(reportCalls, 1, "再次打开设置页不重复读取安装报告");
+});

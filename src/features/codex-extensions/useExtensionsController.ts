@@ -40,6 +40,7 @@ export function useExtensionsController(
   const writeEpoch = useRef(0);
   const locked = useRef<object | null>(null);
   const mounted = useRef(true);
+  const prevRefreshRef = useRef<typeof refresh | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -75,10 +76,14 @@ export function useExtensionsController(
     [request, scope],
   );
   useEffect(() => {
-    setInventory(null);
-    setCheck(null);
+    const scopeChanged = prevRefreshRef.current !== null && prevRefreshRef.current !== refresh;
+    prevRefreshRef.current = refresh;
+    if (scopeChanged) {
+      setInventory(null);
+      setCheck(null);
+      setChecks({});
+    }
     setNotice("");
-    setChecks({});
     setBusy(false);
     setBusyAction("");
     setBusyResourceId("");

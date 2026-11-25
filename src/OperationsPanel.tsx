@@ -71,6 +71,7 @@ type OperationsRuntimeStatus = Pick<
 >;
 
 type OperationsPanelProps = {
+  active?: boolean;
   fastContextToolsStatus: FastContextToolsStatus;
   status: OperationsRuntimeStatus;
   busy: string | null;
@@ -631,4 +632,18 @@ function OperationsPanelComponent({
   );
 }
 
-export const OperationsPanel = memo(OperationsPanelComponent);
+export const OperationsPanel = memo(OperationsPanelComponent, (prev, next) => {
+  if (prev.active === false && next.active === false) return true;
+  if (prev.active !== next.active) return false;
+  return (
+    prev.fastContextToolsStatus === next.fastContextToolsStatus &&
+    prev.status === next.status &&
+    prev.busy === next.busy &&
+    prev.isBusy === next.isBusy &&
+    prev.pluginMarketplaceStatus === next.pluginMarketplaceStatus &&
+    prev.onRepairPluginMarketplace === next.onRepairPluginMarketplace &&
+    prev.onPrepareComputerUse === next.onPrepareComputerUse &&
+    prev.computerUseNotice === next.computerUseNotice &&
+    prev.configRepairNotice === next.configRepairNotice
+  );
+});
