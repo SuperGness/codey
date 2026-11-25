@@ -65,7 +65,7 @@ function loadInjection({
   menuItems,
   outerMenuItems,
   mouseEvent = FakeMouseEvent,
-  directArchiveButton = false,
+  directArchiveButton = true,
   withPinButton = false,
 } = {}) {
   const body = new FakeElement("body");
@@ -295,7 +295,7 @@ test("injects the sidebar delete icon and opens the official permanent delete en
   assert.ok(deleteButton);
   assert.deepEqual(runtime.actionBar.children, [
     exportButton,
-    runtime.archiveTooltip,
+    runtime.archiveButton,
     deleteButton,
   ]);
   assert.equal(deleteButton.getAttribute("aria-label"), "永久删除");

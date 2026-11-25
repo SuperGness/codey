@@ -4320,11 +4320,10 @@
       ? mutation.target
       : mutation.target?.parentElement;
     if (!(target instanceof HTMLElement)) return false;
-    const cached = cache.get(target);
-    if (cached !== undefined) return cached;
-    const insideTurn = Boolean(target.closest?.(canonicalConversationTurnSelector));
-    cache.set(target, insideTurn);
-    return insideTurn;
+    if (cache.has(target)) return Boolean(cache.get(target));
+    const conversationTurn = target.closest?.(canonicalConversationTurnSelector) || null;
+    cache.set(target, conversationTurn);
+    return Boolean(conversationTurn);
   };
   const handleSessionToolMutations = (
     mutations,
@@ -4450,7 +4449,10 @@
       const processedNodes = codeyTimed(
         "codey-inject.sessionToolMutations",
         taskCount,
-        () => handleSessionToolMutationsImpl(accepted.map((task) => task.mutation)),
+        () => handleSessionToolMutationsImpl(
+          accepted.map((task) => task.mutation),
+          turnTargetCache,
+        ),
       );
       const stats = nextSessionMutationStats();
       recordSessionMutationStats({
@@ -4472,7 +4474,7 @@
       ) scheduleDeferredMutationFlush();
     }
   };
-  const handleSessionToolMutationsImpl = (mutations) => {
+  const handleSessionToolMutationsImpl = (mutations, turnTargetCache = null) => {
     if (disposed) return 0;
     let processedNodes = 0;
     let sawNonTurnMutation = false;
@@ -4486,8 +4488,11 @@
       }
       const cached = targetContextCache.get(target);
       if (cached) return cached;
+      const conversationTurn = turnTargetCache?.has(target)
+        ? turnTargetCache.get(target)
+        : (target.closest?.(canonicalConversationTurnSelector) || null);
       const context = {
-        conversationTurn: target.closest?.(canonicalConversationTurnSelector) || null,
+        conversationTurn,
         threadRow: target.closest?.(sidebarThreadRowSelector) || null,
       };
       targetContextCache.set(target, context);

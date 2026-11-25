@@ -160,7 +160,7 @@ test("renderer core loads session tools after idle time or sidebar use", async (
     /flushThreadUpdatedAtFetch[\s\S]*queryWithin\(document, "\[data-app-action-sidebar-thread-row\]"\)/,
   );
   const sessionObserverBody = sessionTools.match(
-    /const handleSessionToolMutationsImpl = \(mutations\) => \{([\s\S]*?)\n  \};\n  const sessionToolMutationOptions/,
+    /const handleSessionToolMutationsImpl = \(mutations[^)]*\) => \{([\s\S]*?)\n  \};\n  const sessionToolMutationOptions/,
   )?.[1] ?? "";
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /reconcileStaleCompletedTask/);

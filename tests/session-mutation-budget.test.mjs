@@ -291,12 +291,12 @@ test("deferred identities keep new work and evict stale work one task at a time"
   });
   runtime.load();
   const targets = ["same-old", "same-middle", "same-new", "other-a", "other-b"]
-    .map((turnKey) => {
-      const target = new FakeElement("div", { "data-turn-key": turnKey });
-      target.turnClosestCalls = 0;
+    .map((threadId) => {
+      const target = new FakeElement("div", { "data-app-action-sidebar-thread-id": threadId });
+      target.threadClosestCalls = 0;
       const closest = target.closest.bind(target);
       target.closest = (selector) => {
-        if (selector === "[data-turn-key]") target.turnClosestCalls += 1;
+        if (selector === "[data-app-action-sidebar-thread-row]") target.threadClosestCalls += 1;
         return closest(selector);
       };
       return target;
@@ -306,7 +306,7 @@ test("deferred identities keep new work and evict stale work one task at a time"
   })));
 
   drainDeferredMutations(runtime);
-  assert.deepEqual(targets.map((target) => target.turnClosestCalls), [1, 0, 1, 1, 1]);
+  assert.deepEqual(targets.map((target) => target.threadClosestCalls), [1, 0, 1, 1, 1]);
   const stats = runtime.window.__codeyObserverStats["codey-inject.sessionToolMutations"];
   assert.equal(stats.pending, 0);
   assert.equal(stats.pendingNodes, 0);
