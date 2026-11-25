@@ -1469,10 +1469,21 @@ mod tests {
         let db = rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
         db.execute_batch(
             "CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT, rollout_path TEXT);
-            INSERT INTO threads VALUES ('old', 'route/saved', 'openai', 'old.jsonl');
+            INSERT INTO threads VALUES ('old', 'native/saved', 'openai', 'old.jsonl');
+            INSERT INTO threads VALUES ('native', 'native/saved', 'openai', NULL);
+            INSERT INTO threads VALUES ('conflict', 'native/saved', 'openai', NULL);
             INSERT INTO threads VALUES ('routed', 'route/saved', 'codey_router_remote', NULL);",
         )
         .unwrap();
+        let sqlite_dir = home.path().join("sqlite");
+        std::fs::create_dir(&sqlite_dir).unwrap();
+        rusqlite::Connection::open(sqlite_dir.join("codex-dev.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE threads (id TEXT, model_provider TEXT);
+                 INSERT INTO threads VALUES ('conflict', 'codey_router');",
+            )
+            .unwrap();
         std::fs::write(home.path().join("old.jsonl"), concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"old\",\"model_provider\":\"codey_router\"}}\n",
             "{\"type\":\"turn_context\",\"payload\":{\"model\":\"route/saved\",\"effort\":\"high\"}}\n",
@@ -1486,17 +1497,86 @@ mod tests {
                 toml_edit::Value::from(catalog.to_str().unwrap())
             ),
         ];
-        for (id, input_model, expected_model) in [
-            ("old", None, None),
-            ("old", Some("route/default"), None),
-            ("old", Some("org/native-model"), Some("org/native-model")),
-            ("routed", None, Some("route/saved")),
+        for (id, input, provider, model, config_override) in [
+            ("old", serde_json::json!({}), None, None, None),
+            (
+                "old",
+                serde_json::json!({"model":"route/default"}),
+                None,
+                None,
+                None,
+            ),
+            (
+                "old",
+                serde_json::json!({"model":"org/native-model"}),
+                Some("openai"),
+                Some("org/native-model"),
+                None,
+            ),
+            (
+                "routed",
+                serde_json::json!({}),
+                Some("codey_router_remote"),
+                Some("route/saved"),
+                None,
+            ),
+            (
+                "native",
+                serde_json::json!({"config":{"model_reasoning_effort":"high"}}),
+                Some("openai"),
+                Some("native/saved"),
+                Some(("model_reasoning_effort", "high")),
+            ),
+            (
+                "old",
+                serde_json::json!({"config":{"model":"org/native-model"}}),
+                Some("openai"),
+                None,
+                Some(("model", "org/native-model")),
+            ),
+            (
+                "old",
+                serde_json::json!({"config":{"model":"route/default","model_reasoning_effort":"high"}}),
+                None,
+                None,
+                None,
+            ),
+            (
+                "missing",
+                serde_json::json!({"model":"route/saved","config":{"model":"route/saved","model_reasoning_effort":"high"}}),
+                None,
+                None,
+                None,
+            ),
+            (
+                "conflict",
+                serde_json::json!({"model":"route/saved","config":{"model_reasoning_effort":"high"}}),
+                None,
+                None,
+                None,
+            ),
+            (
+                "old",
+                serde_json::json!({"path":"other.jsonl","model":"route/saved"}),
+                None,
+                None,
+                None,
+            ),
+            (
+                "old",
+                serde_json::json!({"history":[],"model":"route/saved"}),
+                None,
+                None,
+                None,
+            ),
         ] {
-            let request = serde_json::json!({"method":"thread/resume","params":{
-                "threadId":id, "model":input_model, "modelProvider":"codey_router",
-                "config":{"model_provider":"codey_router", "model_providers.codey_router.name":"override",
-                    "features.hooks":false}
-            }});
+            let mut params = input;
+            params["threadId"] = id.into();
+            params["modelProvider"] = "untrusted".into();
+            params["config"]["model_provider"] = "untrusted".into();
+            params["config"]["model_providers.codey_router.name"] = "override".into();
+            params["config"]["features.hooks"] = false.into();
+            let request = serde_json::json!({"method":"thread/resume","params":params});
             let mut output = Vec::new();
             route_local_app_server_input(
                 request.to_string().as_bytes(),
@@ -1506,35 +1586,29 @@ mod tests {
             )
             .unwrap();
             let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
-            assert!(result["params"].get("modelProvider").is_none());
-            assert_eq!(result["params"]["model"].as_str(), expected_model);
-            assert_eq!(
-                result["params"]["config"],
-                serde_json::json!({"features.hooks":false})
-            );
+            assert_eq!(result["params"]["modelProvider"].as_str(), provider);
+            assert_eq!(result["params"]["model"].as_str(), model);
+            let mut config = serde_json::json!({"features.hooks":false});
+            if let Some((key, value)) = config_override {
+                config[key] = value.into();
+            }
+            assert_eq!(result["params"]["config"], config);
+            assert_eq!(result["params"].get("path"), params.get("path"));
+            assert_eq!(result["params"].get("history"), params.get("history"));
         }
     }
 
     #[test]
     fn resume_model_alias_resolution_never_guesses_between_routes() {
         let home = tempfile::tempdir().unwrap();
-        let db = rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
-        db.execute_batch(
-            "CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT);
-            INSERT INTO threads VALUES ('saved', 'shared', 'codey_router');",
-        )
-        .unwrap();
         let catalog = home.path().join("catalog.json");
         std::fs::write(&catalog, serde_json::json!({"models":[{"slug":"a/shared"},{"slug":"b/shared"},{"slug":"a/unique"}]}).to_string()).unwrap();
         let overrides = vec![format!(
             "model_catalog_json={}",
             toml_edit::Value::from(catalog.to_str().unwrap())
         )];
-        assert_eq!(
-            restored_resume_model(home.path(), "saved", &overrides).unwrap(),
-            None
-        );
         for (model, provider, expected) in [
+            ("shared", "codey_router", None),
             ("shared", "b", Some("b/shared")),
             ("a/shared", "b", Some("a/shared")),
             ("unique", "codey_router", Some("a/unique")),
@@ -1763,7 +1837,9 @@ mod tests {
                     "params": { "threadId": "old-thread", "model": "route-second/gpt-6-astra",
                         "config": { "service_tier": "fast", "artifact.session": "keep" } }
             });
-            if method != "thread/resume" {
+            if method == "thread/resume" {
+                expected["params"].as_object_mut().unwrap().remove("model");
+            } else {
                 expected["params"]["modelProvider"] = "codey_router".into();
             }
             assert_eq!(routed, expected);
@@ -1998,7 +2074,7 @@ mod tests {
     }
 
     #[test]
-    fn model_less_history_requests_keep_the_model_and_only_forks_set_a_provider() {
+    fn unindexed_resumes_omit_empty_model_overrides_and_forks_keep_their_input() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("catalog.json");
         std::fs::write(
@@ -2046,7 +2122,11 @@ mod tests {
                         .unwrap();
                         let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
                         if method == "thread/resume" {
-                            params.as_object_mut().unwrap().remove("modelProvider");
+                            let params = params.as_object_mut().unwrap();
+                            params.remove("modelProvider");
+                            if params.get("model").is_some_and(|model| !model.is_null()) {
+                                params.remove("model");
+                            }
                         } else {
                             params["modelProvider"] = "codey_router".into();
                         }

@@ -237,8 +237,9 @@ pub(crate) fn remember_settings(
 #[derive(Default)]
 struct IndexedSessionModel {
     provider: Option<String>,
+    conflicting_providers: bool,
     model: Option<(String, Option<String>)>,
-    rollout: Option<std::path::PathBuf>,
+    rollout: Option<PathBuf>,
 }
 
 fn read_index(home: &Path, thread_id: &str) -> Result<IndexedSessionModel> {
@@ -271,8 +272,12 @@ fn read_index(home: &Path, thread_id: &str) -> Result<IndexedSessionModel> {
             })
             .optional()?;
         if let Some((model, saved_provider, saved_rollout)) = row {
-            if index.provider.is_none() {
-                index.provider = saved_provider.clone().filter(|p| !p.trim().is_empty());
+            if let Some(provider) = saved_provider.as_ref().filter(|p| !p.trim().is_empty()) {
+                if let Some(indexed) = &index.provider {
+                    index.conflicting_providers |= indexed != provider;
+                } else {
+                    index.provider = Some(provider.clone());
+                }
             }
             if index.model.is_none() {
                 index.model = model
@@ -285,36 +290,47 @@ fn read_index(home: &Path, thread_id: &str) -> Result<IndexedSessionModel> {
     Ok(index)
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
-pub(crate) fn indexed_provider(home: &Path, thread_id: &str) -> Result<Option<String>> {
-    validate_thread_id(thread_id)?;
-    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
-    Ok(read_index(&home, thread_id)?.provider)
+pub(crate) struct SessionModelReader<'a> {
+    home: PathBuf,
+    thread_id: &'a str,
+    index: IndexedSessionModel,
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
-pub(crate) fn read_routed_resume_model(home: &Path, thread_id: &str) -> Result<Option<Value>> {
-    validate_thread_id(thread_id)?;
-    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
-    let index = read_index(&home, thread_id)?;
-    if !index
-        .provider
-        .as_deref()
-        .is_some_and(crate::local_router::is_router_provider)
-    {
-        return Ok(None);
+impl<'a> SessionModelReader<'a> {
+    pub(crate) fn open(home: &Path, thread_id: &'a str) -> Result<Self> {
+        validate_thread_id(thread_id)?;
+        let home = home.canonicalize().context("找不到 Codex 数据目录")?;
+        let index = read_index(&home, thread_id)?;
+        Ok(Self {
+            home,
+            thread_id,
+            index,
+        })
     }
-    read_saved_model(&home, thread_id, index.model, index.rollout).map(Some)
+
+    pub(crate) fn provider(&self) -> Option<&str> {
+        self.index
+            .provider
+            .as_deref()
+            .filter(|_| !self.index.conflicting_providers)
+    }
+
+    pub(crate) fn read_model(&self) -> Result<Value> {
+        read_saved_model(
+            &self.home,
+            self.thread_id,
+            self.index.model.clone(),
+            self.index.rollout.clone(),
+        )
+    }
 }
 
 pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
-    validate_thread_id(thread_id)?;
-    let home = home.canonicalize().context("找不到 Codex 数据目录")?;
-    let index = read_index(&home, thread_id)?;
-    let mut response = read_saved_model(&home, thread_id, index.model, index.rollout)?;
+    let session = SessionModelReader::open(home, thread_id)?;
+    let mut response = session.read_model()?;
     // Paginated resume uses the indexed binding, not the provider from the
     // last turn (or from the original rollout header).
-    if let Some(provider) = index.provider {
+    if let Some(provider) = session.provider() {
         response["indexedModelProvider"] = provider.into();
     }
     Ok(response)
@@ -324,7 +340,7 @@ fn read_saved_model(
     home: &Path,
     thread_id: &str,
     saved_model: Option<(String, Option<String>)>,
-    rollout: Option<std::path::PathBuf>,
+    rollout: Option<PathBuf>,
 ) -> Result<Value> {
     let confirmed = confirmed_model(home, thread_id)?;
     // 恢复会话会刷新数据库中的模型；最后一轮记录才是实际使用的模型。
