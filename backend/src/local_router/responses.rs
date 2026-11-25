@@ -121,7 +121,7 @@ impl RouterServer {
             write_static_response(
                 &mut stream,
                 "text/javascript; charset=utf-8",
-                crate::cdp::SETTINGS_OVERLAY_SCRIPT.as_bytes(),
+                REQUEST_LOG_SCRIPT.as_bytes(),
             )
             .await?;
             return Ok(());

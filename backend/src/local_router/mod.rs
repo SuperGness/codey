@@ -159,6 +159,7 @@ const RESPONSES_WEBSOCKET_PATHS: [&str; 2] = ["/v1/responses", "/responses"];
 const REQUEST_LOG_PAGE_PATH: &str = "/codey/request-logs";
 const REQUEST_LOG_SCRIPT_PATH: &str = "/codey/request-logs.js";
 const REQUEST_LOG_ICON_PATH: &str = "/codey/request-logs-icon.png";
+const REQUEST_LOG_SCRIPT: &str = include_str!("../../../dist-overlay/codey-request-logs.js");
 const REQUEST_LOG_ICON: &[u8] = include_bytes!("../../icons/favicon.png");
 const REQUEST_LOG_PAGE: &str = r#"<!doctype html>
 <html lang="zh-CN">

@@ -13,6 +13,7 @@ fn main() {
         "../scripts/build-overlay.mjs",
         "../scripts/build-output.mjs",
         "../public",
+        "../dist-overlay/codey-request-logs.js",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -23,10 +24,16 @@ fn main() {
     // 仍会触发重新编译。
     println!("cargo:rerun-if-env-changed=CODEY_SKIP_OVERLAY_BUILD");
     if std::env::var_os("CODEY_SKIP_OVERLAY_BUILD").is_some_and(|value| value == "1") {
-        assert!(
-            Path::new("../dist-overlay/codey-overlay.js").is_file(),
-            "CODEY_SKIP_OVERLAY_BUILD=1 但 dist-overlay/codey-overlay.js 不存在，请先运行 pnpm run vite:build"
-        );
+        for asset in [
+            "../dist-overlay/codey-overlay.js",
+            "../dist-overlay/codey-request-logs.js",
+        ] {
+            assert!(
+                Path::new(asset).is_file(),
+                "CODEY_SKIP_OVERLAY_BUILD=1 但 {} 不存在，请先运行 pnpm run vite:build",
+                asset.trim_start_matches("../")
+            );
+        }
     } else {
         let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
         match Command::new(npm)

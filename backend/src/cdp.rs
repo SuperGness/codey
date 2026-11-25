@@ -60,8 +60,7 @@ const SECURITY_WARNING_SHIELD_SCRIPT: &str =
 const QUOTA_NOTICE_DISMISS_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/quota-notice-dismiss.js");
 const QUOTA_UNLOCK_SCRIPT: &str = include_str!("../../dist-overlay/inject/quota-unlock.js");
-pub(crate) const SETTINGS_OVERLAY_SCRIPT: &str =
-    include_str!("../../dist-overlay/codey-overlay.js");
+const SETTINGS_OVERLAY_SCRIPT: &str = include_str!("../../dist-overlay/codey-overlay.js");
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");

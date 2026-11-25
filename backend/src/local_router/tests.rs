@@ -15136,7 +15136,10 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
         .await
         .unwrap();
     assert_eq!(script.status(), reqwest::StatusCode::OK);
-    assert!(script.text().await.unwrap().contains(REQUEST_LOG_PAGE_PATH));
+    let script_text = script.text().await.unwrap();
+    assert!(script_text.contains("codey-request-log-token"));
+    assert!(script_text.contains("/codey/api/"));
+    assert!(!script_text.contains("codey-overlay-modal-container"));
     assert_eq!(
         endpoint.request_log_url(None),
         format!("{gateway_root}{REQUEST_LOG_PAGE_PATH}#{}", endpoint.token)

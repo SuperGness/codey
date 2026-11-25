@@ -7,10 +7,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 
 if (process.env.CODEY_SKIP_OVERLAY_BUILD === "1") {
-  if (!existsSync(join(root, "dist-overlay", "codey-overlay.js"))) {
-    throw new Error(
-      "CODEY_SKIP_OVERLAY_BUILD=1 但 dist-overlay/codey-overlay.js 不存在，请先运行 pnpm run vite:build",
-    );
+  for (const file of ["codey-overlay.js", "codey-request-logs.js"]) {
+    if (!existsSync(join(root, "dist-overlay", file))) {
+      throw new Error(
+        `CODEY_SKIP_OVERLAY_BUILD=1 但 dist-overlay/${file} 不存在，请先运行 pnpm run vite:build`,
+      );
+    }
   }
 } else {
   const overlay = spawnSync(

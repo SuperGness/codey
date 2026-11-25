@@ -55,8 +55,8 @@ test("request logs follow the system theme and changes even with legacy theme pa
 });
 
 test("removing the request log token from the URL preserves query parameters on reload", async () => {
-  const overlay = await readSource("src/overlay.tsx");
-  const source = overlay.match(/function installBrowserBridge\(\) \{[\s\S]*?\n\}/)?.[0];
+  const entry = await readSource("src/request-logs-entry.tsx");
+  const source = entry.match(/function installBrowserBridge\(\) \{[\s\S]*?\n\}/)?.[0];
   assert.ok(source);
   const compiled = ts.transpileModule(source, {}).outputText;
   const tokenKey = "test-request-log-token";
