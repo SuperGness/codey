@@ -900,16 +900,88 @@ pub(super) async fn remove_official_account(
     Ok(merge(payload, json!({ "status": "ok" })))
 }
 
+fn official_account_provider_prefix() -> String {
+    format!("{}-", crate::config::DERIVED_OFFICIAL_PROFILE_ID)
+}
+
+fn provider_id_is_derived_official_account(provider_id: &str) -> bool {
+    let prefix = official_account_provider_prefix();
+    provider_id
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
+        && provider_id.len() > prefix.len()
+}
+
+fn account_provider_ids_contains(account_provider_ids: &HashSet<String>, provider_id: &str) -> bool {
+    account_provider_ids.contains(provider_id)
+        || account_provider_ids
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(provider_id))
+}
+
+/// 收集配置中出现过的全部派生官方账号 Provider ID（含线路、映射表与模型引用），
+/// 用于校验磁盘文件存在性及清理已删除账号残留。
+pub(super) fn known_official_account_provider_ids(config: &CodeyConfig) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    let mut record = |candidate: &str| {
+        let candidate = candidate.trim();
+        if provider_id_is_derived_official_account(candidate)
+            && seen.insert(candidate.to_ascii_lowercase())
+        {
+            ids.push(candidate.to_string());
+        }
+    };
+    for profile in &config.profiles {
+        if profile.official_account {
+            record(profile.provider_id());
+        }
+    }
+    for provider_id in config
+        .upstream_speed_tiers_by_provider
+        .keys()
+        .chain(config.selected_models_by_provider.keys())
+        .chain(config.model_context_by_provider.keys())
+        .chain(config.model_reasoning_efforts_by_provider.keys())
+        .chain(config.manual_third_party_models_by_provider.keys())
+        .chain(config.declared_official_models_by_provider.keys())
+        .chain(config.upstream_models_by_provider.keys())
+    {
+        record(provider_id);
+    }
+    for model in [
+        config.default_model.as_str(),
+        config.misc_model.as_str(),
+        config.subagent_model.as_str(),
+    ]
+    .into_iter()
+    .chain(
+        config
+            .subagent_roles
+            .values()
+            .map(|selection| selection.model.as_str()),
+    ) {
+        if let Some((provider_id, _)) = model.trim().split_once('/') {
+            record(provider_id);
+        }
+    }
+    ids
+}
+
 pub(super) fn include_existing_account_files(
     store: &OfficialAccountStore,
     mut provider_ids: HashSet<String>,
     known_provider_ids: &[String],
 ) -> anyhow::Result<HashSet<String>> {
-    let prefix = format!("{}-", crate::config::DERIVED_OFFICIAL_PROFILE_ID);
+    let prefix = official_account_provider_prefix();
     // 账号列表会跳过损坏记录；文件仍在时不能把解析失败当作账号已删除。
     for provider_id in known_provider_ids {
-        if !provider_ids.contains(provider_id)
-            && let Some(account_id) = provider_id.strip_prefix(&prefix)
+        if !account_provider_ids_contains(&provider_ids, provider_id)
+            && provider_id
+                .get(..prefix.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
+            && let Some(account_id) = provider_id.get(prefix.len()..)
+            && !account_id.is_empty()
             && store.account_path(account_id).try_exists()?
         {
             provider_ids.insert(provider_id.clone());
@@ -918,21 +990,201 @@ pub(super) fn include_existing_account_files(
     Ok(provider_ids)
 }
 
-/// 失效账号仍保留同步历史；只有账号记录已删除时才清除对应声明。
-pub(super) fn prune_deleted_account_speed_tiers(
+fn is_deleted_official_account_provider(
+    config: &CodeyConfig,
+    account_provider_ids: &HashSet<String>,
+    provider_id: &str,
+) -> bool {
+    provider_id_is_derived_official_account(provider_id)
+        && !account_provider_ids_contains(account_provider_ids, provider_id)
+        && !config.profiles.iter().any(|profile| {
+            !profile.official_account && profile.provider_id().eq_ignore_ascii_case(provider_id)
+        })
+}
+
+/// 失效账号仍保留同步历史；只有账号记录已删除时才清除对应路线状态，并返回已删除的 Provider ID。
+pub(super) fn prune_deleted_account_state(
     config: &mut CodeyConfig,
     account_provider_ids: &HashSet<String>,
-) {
-    let prefix = format!("{}-", crate::config::DERIVED_OFFICIAL_PROFILE_ID);
+) -> Vec<String> {
+    let deleted = known_official_account_provider_ids(config)
+        .into_iter()
+        .filter(|provider_id| {
+            is_deleted_official_account_provider(config, account_provider_ids, provider_id)
+        })
+        .collect::<Vec<_>>();
+    let keep = |provider_id: &String| {
+        !deleted
+            .iter()
+            .any(|deleted_id| deleted_id.eq_ignore_ascii_case(provider_id))
+    };
     config
         .upstream_speed_tiers_by_provider
-        .retain(|provider_id, _| {
-            !provider_id.starts_with(&prefix)
-                || account_provider_ids.contains(provider_id)
-                || config.profiles.iter().any(|profile| {
-                    !profile.official_account && profile.provider_id() == provider_id
-                })
-        });
+        .retain(|provider_id, _| keep(provider_id));
+    config
+        .selected_models_by_provider
+        .retain(|provider_id, _| keep(provider_id));
+    config
+        .model_context_by_provider
+        .retain(|provider_id, _| keep(provider_id));
+    config
+        .model_reasoning_efforts_by_provider
+        .retain(|provider_id, _| keep(provider_id));
+    config
+        .manual_third_party_models_by_provider
+        .retain(|provider_id, _| keep(provider_id));
+    config
+        .declared_official_models_by_provider
+        .retain(|provider_id, _| keep(provider_id));
+    config
+        .upstream_models_by_provider
+        .retain(|provider_id, _| keep(provider_id));
+    deleted
+}
+
+/// 在官方账号被删除或暂时下线后，清理已删除账号的状态并回退失效的默认/子代理/杂事模型引用，
+/// 避免运行期目录刷新后子代理仍绑定到已不存在的官方账号模型。
+pub(super) async fn reconcile_official_route_changes_async(
+    previous: &CodeyConfig,
+    next: &mut CodeyConfig,
+    account_provider_ids: &HashSet<String>,
+    home: &std::path::Path,
+) {
+    let mut deleted = prune_deleted_account_state(next, account_provider_ids);
+    for provider_id in known_official_account_provider_ids(previous) {
+        if is_deleted_official_account_provider(next, account_provider_ids, &provider_id)
+            && !deleted
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&provider_id))
+        {
+            deleted.push(provider_id);
+        }
+    }
+    let dropped_unavailable = previous
+        .profiles
+        .iter()
+        .filter(|profile| profile.official_account)
+        .map(|profile| profile.provider_id().to_string())
+        .filter(|provider_id| {
+            !next
+                .profiles
+                .iter()
+                .any(|profile| profile.provider_id().eq_ignore_ascii_case(provider_id))
+                && !deleted
+                    .iter()
+                    .any(|deleted_id| deleted_id.eq_ignore_ascii_case(provider_id))
+        })
+        .collect::<Vec<_>>();
+    if !next.local_router_enabled || (deleted.is_empty() && dropped_unavailable.is_empty()) {
+        return;
+    }
+    for provider_id in &deleted {
+        next.reconcile_after_route_removal(provider_id);
+    }
+    for provider_id in &dropped_unavailable {
+        next.reconcile_unavailable_route_references(provider_id);
+    }
+    *next = next.clone().normalize();
+    if next.subagent_optimization && next.subagent_roles != previous.subagent_roles {
+        let probe_config = next.clone();
+        let probe_home = home.to_path_buf();
+        let model_state = tokio::task::spawn_blocking(move || {
+            super::models::current_model_state_at(&probe_config, &probe_home)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok);
+        if let Some(model_state) = model_state {
+            reconcile_updated_subagent_roles_with_model_state(
+                previous,
+                next,
+                &model_state,
+            );
+        }
+    }
+}
+
+fn reconcile_updated_subagent_roles_with_model_state(
+    previous: &CodeyConfig,
+    next: &mut CodeyConfig,
+    model_state: &crate::model_catalog::ModelSelectionState,
+) {
+    let targets = next.runtime_model_targets();
+    let active_provider = next.current_provider_id().unwrap_or_default().to_string();
+    let target_for_slug = |slug: &str| {
+        targets
+            .iter()
+            .find(|target| {
+                target.provider_id == active_provider
+                    && crate::model_id::equal(&target.upstream_model, slug)
+            })
+            .or_else(|| {
+                targets
+                    .iter()
+                    .find(|target| crate::model_id::equal(&target.upstream_model, slug))
+            })
+            .map(|target| target.alias.clone())
+    };
+    let has_supported_official = model_state
+        .official_models
+        .iter()
+        .any(|model| model.supported);
+    if has_supported_official {
+        let supported_fallback = model_state
+            .available_model(&model_state.default_model)
+            .and_then(&target_for_slug)
+            .or_else(|| {
+                model_state
+                    .first_available_model()
+                    .and_then(&target_for_slug)
+            });
+        if let Some(supported_fallback) = supported_fallback {
+            for (role, selection) in &mut next.subagent_roles {
+                let changed = previous
+                    .subagent_roles
+                    .get(role)
+                    .is_none_or(|prev| prev.model != selection.model);
+                if !changed {
+                    continue;
+                }
+                let is_unsupported_official = targets
+                    .iter()
+                    .find(|target| crate::model_id::equal(&target.alias, &selection.model))
+                    .is_some_and(|target| {
+                        target.official
+                            && target.provider_id == active_provider
+                            && !model_state.official_models.iter().any(|model| {
+                                model.supported
+                                    && crate::model_id::equal(&model.slug, &target.upstream_model)
+                            })
+                    });
+                if is_unsupported_official {
+                    selection.model = supported_fallback.clone();
+                }
+            }
+            if let Some(default_role) = next.subagent_roles.get(crate::config::SUBAGENT_ROLE_DEFAULT)
+            {
+                next.subagent_model.clone_from(&default_role.model);
+            }
+        }
+    }
+    crate::subagent_policy::reconcile_with_model_state(next, Some(model_state));
+    // `reconcile_with_model_state` 回退到 `model_state` 时返回未带线路前缀的模型名，
+    // 多线路存在同名模型时在这里绑定到当前活动线路，避免保留歧义的裸模型名。
+    for selection in next.subagent_roles.values_mut() {
+        let has_route_alias = targets
+            .iter()
+            .any(|target| crate::model_id::equal(&target.alias, &selection.model));
+        if !has_route_alias && let Some(alias) = target_for_slug(&selection.model) {
+            selection.model = alias;
+        }
+    }
+    if let Some(default_role) = next.subagent_roles.get(crate::config::SUBAGENT_ROLE_DEFAULT) {
+        next.subagent_model.clone_from(&default_role.model);
+        next.subagent_reasoning_effort
+            .clone_from(&default_role.reasoning_effort);
+    }
+    *next = next.clone().normalize();
 }
 
 /// 删除后按当前账号库清理线路，避免并发导入或重试时删除其他账号的状态。
@@ -942,11 +1194,7 @@ pub(super) async fn drop_derived_official_routes(
 ) -> Result<(), String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
-    let known_provider_ids = previous
-        .upstream_speed_tiers_by_provider
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let known_provider_ids = known_official_account_provider_ids(&previous);
     let store = state.official_accounts();
     let account_provider_ids = tokio::task::spawn_blocking(move || {
         let (records, _) = store.route_snapshot()?;
@@ -963,7 +1211,12 @@ pub(super) async fn drop_derived_official_routes(
     let keeps_official_route = |profile: &crate::config::ProviderProfile| {
         profile.official_account_id.as_deref().map_or_else(
             || !account_provider_ids.is_empty(),
-            |id| account_provider_ids.contains(&crate::config::official_profile_id(id)),
+            |id| {
+                account_provider_ids_contains(
+                    &account_provider_ids,
+                    &crate::config::official_profile_id(id),
+                )
+            },
         )
     };
     if previous
@@ -971,6 +1224,7 @@ pub(super) async fn drop_derived_official_routes(
         .iter()
         .any(|profile| profile.official_account && !keeps_official_route(profile))
     {
+        next.remember_model_aliases();
         let remaining = previous
             .profiles
             .iter()
@@ -980,7 +1234,8 @@ pub(super) async fn drop_derived_official_routes(
         next.apply_launch_official_profiles(remaining);
         next = next.normalize();
     }
-    prune_deleted_account_speed_tiers(&mut next, &account_provider_ids);
+    reconcile_official_route_changes_async(&previous, &mut next, &account_provider_ids, home)
+        .await;
     if !super::persisted_config_changed(&previous, &next) {
         return Ok(());
     }

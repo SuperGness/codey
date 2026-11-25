@@ -127,7 +127,10 @@ async fn apply(state: &Arc<AppState>, config: &CodeyConfig, reconcile: bool) -> 
         );
     }
     let logs = hot_reload_runtime_request_log_locked(state, config).await;
+    let has_routable_subagent_models =
+        !config.local_router_enabled || !config.runtime_model_targets().is_empty();
     let subagents = if config.subagent_optimization
+        && has_routable_subagent_models
         && (reconcile || !runtime.applied_subagent_config().await.matches(config))
     {
         hot_reload_runtime_subagent_config_locked(state, config).await
@@ -158,7 +161,8 @@ async fn apply(state: &Arc<AppState>, config: &CodeyConfig, reconcile: bool) -> 
     let models = runtime.applied_model_config().await;
     let subagents = runtime.applied_subagent_config().await;
     if !models.matches(config)
-        || ((runtime.applied_config.subagent_optimization || config.subagent_optimization)
+        || (has_routable_subagent_models
+            && (runtime.applied_config.subagent_optimization || config.subagent_optimization)
             && !subagents.matches(config))
     {
         return json!({"state":"failed","error":"配置已保存，但当前 Codex 实例尚未完成热更新；可重新应用配置"});

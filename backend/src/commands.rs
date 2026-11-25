@@ -898,11 +898,7 @@ async fn commit_official_launch_routes(
 ) -> Result<(), String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
-    let known_provider_ids = previous
-        .upstream_speed_tiers_by_provider
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let known_provider_ids = official_accounts::known_official_account_provider_ids(&previous);
     let current_accounts = state.official_accounts();
     let probe_home = home.clone();
     let (official_launch, account_provider_ids) = tokio::task::spawn_blocking(move || {
@@ -922,7 +918,7 @@ async fn commit_official_launch_routes(
     if !previous.local_router_enabled {
         let mut next =
             read_only_config_for_official_probe(previous.clone(), official_launch.status);
-        official_accounts::prune_deleted_account_speed_tiers(&mut next, &account_provider_ids);
+        official_accounts::prune_deleted_account_state(&mut next, &account_provider_ids);
         if persisted_config_changed(&previous, &next) {
             next.settings_revision = previous.settings_revision.saturating_add(1);
             next = save_config_to_store(state, next).await?;
@@ -931,7 +927,13 @@ async fn commit_official_launch_routes(
         return Ok(());
     }
     let mut next = route_config_for_official_probe(&previous, official_launch)?;
-    official_accounts::prune_deleted_account_speed_tiers(&mut next, &account_provider_ids);
+    official_accounts::reconcile_official_route_changes_async(
+        &previous,
+        &mut next,
+        &account_provider_ids,
+        &home,
+    )
+    .await;
     // 派生时会按第三方线路占用的短名称挤开官方线路的短名称，把结果写回
     // 账号记录，账号面板显示的短名称才和线路列表、模型前缀保持一致。
     if let Err(error) =
@@ -992,6 +994,7 @@ fn route_config_for_official_probe(
     let mut next = previous.clone();
     match official_status {
         OfficialAccountProfileStatus::Available(_) => {
+            next.remember_model_aliases();
             next.apply_launch_official_profiles(official_profiles);
             next.initial_route_import_completed = true;
             next = next.normalize();
@@ -1008,6 +1011,7 @@ fn route_config_for_official_probe(
         }
         OfficialAccountProfileStatus::Unknown { reason, .. } => {
             if should_attempt_official_launch_when_auth_unknown(previous) {
+                next.remember_model_aliases();
                 next.apply_launch_official_profiles(official_profiles);
                 next.initial_route_import_completed = true;
                 next = next.normalize();
@@ -1103,6 +1107,7 @@ fn apply_unavailable_official_probe(
         }
         // 登录不可用时只保留存储账号的线路，其余派生线路（含已删除账号留下的
         // 记录）一并清空，避免本地路由继续暴露不可用的官方线路。
+        next.remember_model_aliases();
         next.apply_launch_official_profiles(if keeps_account_routes {
             official_profiles
         } else {

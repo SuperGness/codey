@@ -1528,14 +1528,33 @@ impl CodeyConfig {
     }
 
     pub(crate) fn reconcile_after_route_removal(&mut self, removed_provider_id: &str) {
+        self.reconcile_route_removal_references(removed_provider_id, true);
+    }
+
+    /// 官方账号暂时失效或登录不可用而从当前线路列表下线时，回退默认模型与
+    /// 子代理模型以保证运行期热更新和启动有效，但保留杂事模型与线路状态以便恢复。
+    pub(crate) fn reconcile_unavailable_route_references(&mut self, removed_provider_id: &str) {
+        self.reconcile_route_removal_references(removed_provider_id, false);
+    }
+
+    fn reconcile_route_removal_references(
+        &mut self,
+        removed_provider_id: &str,
+        clear_misc_model: bool,
+    ) {
         self.normalize_global_default_model();
         self.normalize_subagent_model_references();
-        // 显式删除线路时移除杂事模型选择；临时停用线路则保留选择以便恢复。
-        if model_references_provider(&self.misc_model, removed_provider_id) {
+        // 显式删除线路时移除杂事模型选择；临时停用或失效线路则保留选择以便恢复。
+        if clear_misc_model && model_references_provider(&self.misc_model, removed_provider_id) {
             self.misc_model.clear();
         }
         self.normalize_misc_model();
-        let targets = self.configured_model_targets();
+        let runtime_targets = self.runtime_model_targets();
+        let targets = if runtime_targets.is_empty() {
+            self.configured_model_targets()
+        } else {
+            runtime_targets
+        };
         let fallback_alias = targets
             .iter()
             .find(|target| model_id::equal(&target.alias, &self.default_model))
@@ -1545,17 +1564,19 @@ impl CodeyConfig {
         if model_references_provider(&self.default_model, removed_provider_id) {
             self.default_model = fallback_alias.clone().unwrap_or_default();
         }
-        for selection in self.subagent_roles.values_mut() {
-            if model_references_provider(&selection.model, removed_provider_id) {
-                selection.model = fallback_alias
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_SUBAGENT_MODEL.to_string());
+        if self.local_router_enabled {
+            for selection in self.subagent_roles.values_mut() {
+                if model_references_provider(&selection.model, removed_provider_id) {
+                    selection.model = fallback_alias
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_SUBAGENT_MODEL.to_string());
+                }
             }
-        }
-        if let Some(default_role) = self.subagent_roles.get(SUBAGENT_ROLE_DEFAULT) {
-            self.subagent_model.clone_from(&default_role.model);
-            self.subagent_reasoning_effort
-                .clone_from(&default_role.reasoning_effort);
+            if let Some(default_role) = self.subagent_roles.get(SUBAGENT_ROLE_DEFAULT) {
+                self.subagent_model.clone_from(&default_role.model);
+                self.subagent_reasoning_effort
+                    .clone_from(&default_role.reasoning_effort);
+            }
         }
     }
 }

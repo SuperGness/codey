@@ -1649,6 +1649,148 @@ async fn official_route_removal_save_failure_rolls_back_catalog_and_retries_afte
 }
 
 #[tokio::test]
+async fn official_account_removal_reconciles_subagent_roles_and_validates_against_catalog() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let state = official_speed_test_state(home, &["one", "two"]).await;
+    let one_provider = crate::config::official_profile_id("one");
+    let two_provider = crate::config::official_profile_id("two");
+    let stale_provider = crate::config::official_profile_id("already-deleted");
+    {
+        let mut config = state.config.write().await;
+        config.subagent_optimization = true;
+        config.default_model = format!("{one_provider}/gpt-6-astra");
+        config.misc_model = format!("{one_provider}/gpt-6-astra");
+        config
+            .selected_models_by_provider
+            .entry(one_provider.clone())
+            .or_default()
+            .push("gpt-6.2-sol".into());
+        config
+            .upstream_models_by_provider
+            .entry(one_provider.clone())
+            .or_default()
+            .push("gpt-6.2-sol".into());
+        config
+            .subagent_roles
+            .get_mut("codey_reviewer")
+            .unwrap()
+            .model = format!("{one_provider}/gpt-6.2-sol");
+        config
+            .subagent_roles
+            .get_mut("codey_worker")
+            .unwrap()
+            .model = format!("{one_provider}/gpt-6-astra");
+        config
+            .subagent_roles
+            .get_mut("codey_explorer")
+            .unwrap()
+            .model = format!("{stale_provider}/gpt-6.2-sol");
+        *config = config.clone().normalize();
+    }
+    let store = state.official_accounts();
+    store.remove_with_codex_login("one", home).unwrap();
+    official_accounts::drop_derived_official_routes(&state, home)
+        .await
+        .unwrap();
+
+    let after_drop = state.config.read().await.clone();
+    assert!(after_drop.misc_model.is_empty());
+    assert!(!after_drop.default_model.starts_with(&format!("{one_provider}/")));
+    assert!(!after_drop.selected_models_by_provider.contains_key(&one_provider));
+    assert!(!after_drop.upstream_models_by_provider.contains_key(&one_provider));
+    assert!(
+        !after_drop
+            .upstream_speed_tiers_by_provider
+            .contains_key(&one_provider)
+    );
+    let targets = after_drop.runtime_model_targets();
+    for (role, selection) in &after_drop.subagent_roles {
+        assert!(
+            !selection.model.starts_with(&format!("{one_provider}/"))
+                && !selection.model.starts_with(&format!("{stale_provider}/")),
+            "role {role} still references deleted account: {}",
+            selection.model
+        );
+        let target = targets
+            .iter()
+            .find(|target| crate::model_id::equal(&target.alias, &selection.model))
+            .unwrap_or_else(|| panic!("role {role} target missing: {}", selection.model));
+        let catalog_slug = after_drop.runtime_catalog_id_for_target(target);
+        assert!(
+            !disk_catalog_model(home, &catalog_slug).is_null(),
+            "role {role} slug {catalog_slug} missing from disk catalog"
+        );
+    }
+
+    // 再经由 commit_official_launch_routes（默认账号删除补位/启动同步路径）移除第二个账号。
+    {
+        let mut config = state.config.write().await;
+        config
+            .subagent_roles
+            .get_mut("codey_reviewer")
+            .unwrap()
+            .model = format!("{two_provider}/gpt-6.2-sol");
+        config.misc_model = format!("{two_provider}/gpt-6-astra");
+    }
+    store.remove_with_codex_login("two", home).unwrap();
+    let probe = crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+    commit_official_launch_routes(&state, probe, home.to_path_buf())
+        .await
+        .unwrap();
+
+    let after_commit = state.config.read().await.clone();
+    assert!(after_commit.misc_model.is_empty());
+    assert_eq!(after_commit.default_model, "relay/gpt-6-astra");
+    assert!(!after_commit.selected_models_by_provider.contains_key(&two_provider));
+    assert_eq!(
+        after_commit.subagent_roles["codey_reviewer"].model,
+        "relay/gpt-6-astra"
+    );
+    assert!(!disk_catalog_model(home, "relay/gpt-6-astra").is_null());
+}
+
+#[tokio::test]
+async fn invalid_official_account_reconciles_subagent_roles_while_preserving_account_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let state = official_speed_test_state(home, &["one", "two"]).await;
+    let one_provider = crate::config::official_profile_id("one");
+    {
+        let mut config = state.config.write().await;
+        config.subagent_optimization = true;
+        config.misc_model = format!("{one_provider}/gpt-6-astra");
+        config
+            .subagent_roles
+            .get_mut("codey_reviewer")
+            .unwrap()
+            .model = format!("{one_provider}/gpt-6.2-sol");
+        *config = config.clone().normalize();
+    }
+    let store = state.official_accounts();
+    let mut invalid = store.get("one").unwrap().unwrap();
+    invalid.mark_invalid("expired");
+    store.upsert(&invalid).unwrap();
+
+    let probe = crate::codex_provider::OfficialAccountLaunch::resolve(home, &store).unwrap();
+    commit_official_launch_routes(&state, probe, home.to_path_buf())
+        .await
+        .unwrap();
+
+    let next = state.config.read().await.clone();
+    assert!(next.upstream_speed_tiers_by_provider.contains_key(&one_provider));
+    assert!(next.selected_models_by_provider.contains_key(&one_provider));
+    assert_eq!(next.misc_model, format!("{one_provider}/gpt-6-astra"));
+    assert!(
+        !next.subagent_roles["codey_reviewer"]
+            .model
+            .starts_with(&format!("{one_provider}/")),
+        "invalid account route remained bound to subagent: {}",
+        next.subagent_roles["codey_reviewer"].model
+    );
+}
+
+#[tokio::test]
 async fn official_account_export_rejects_a_missing_account() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
