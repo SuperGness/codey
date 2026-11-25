@@ -638,10 +638,10 @@ fn rewrite_resume_params(
     }) {
         params.remove("model");
     }
-    if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut) {
-        if provider.is_none() || config.get("model").is_some_and(is_launcher_model) {
-            config.remove("model");
-        }
+    if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut)
+        && (provider.is_none() || config.get("model").is_some_and(is_launcher_model))
+    {
+        config.remove("model");
     }
 
     let config = params.get("config").and_then(Value::as_object);
