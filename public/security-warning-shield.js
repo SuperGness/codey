@@ -23,28 +23,29 @@
   const titlePatterns = [
     /full access is on/i,
     /完(?:全|整)访问权限.*(?:已开启|开启中|已打开)/,
-    /enable ultra with full access/i,
-    /是否启用\s*ultra\s*搭配完整访问权限/i,
+    /(?:use|enable) ultra with full access/i,
+    /是否(?:使用|启用)\s*ultra\s*搭配完(?:整|全)访问权限/i,
   ];
   const ultraTitlePatterns = [
-    /enable ultra with full access/i,
-    /是否启用\s*ultra\s*搭配完整访问权限/i,
+    /(?:use|enable) ultra with full access/i,
+    /是否(?:使用|启用)\s*ultra\s*搭配完(?:整|全)访问权限/i,
   ];
   const ultraActionPatterns = [
     /^use full access$/i,
     /^enable full access$/i,
-    /^使用完整访问权限$/,
+    /^使用完(?:整|全)访问权限$/,
   ];
   const riskPatterns = [
     /without your permission/i,
     /without your approval/i,
+    /without asking/i,
     /risk of data loss/i,
     /prompt injection/i,
     /未经(?:你|您)(?:的)?(?:许可|批准)/,
     /数据丢失/,
     /提示词?注入/,
-    /with ultra and full access enabled/i,
-    /开启\s*ultra\s*和完整访问权限后/i,
+    /with ultra and full access (?:on|enabled)/i,
+    /开启\s*ultra\s*(?:和|与)完(?:整|全)访问权限后/i,
   ];
   const conversationTurnSelector = "[data-turn-key]";
   const warningSurfaceSelector = [

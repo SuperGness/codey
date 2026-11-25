@@ -283,6 +283,21 @@ test("enabled shield continues past the Ultra full-access confirmation", async (
   assert.equal(runtime.window.__codeySecurityWarningShield.dismissWarnings(), 0);
 });
 
+test("enabled shield continues past the Codex 26.1120 English Ultra full-access confirmation", async () => {
+  const runtime = createRuntime({ hideFullAccessWarning: true });
+  const warning = runtime.body.appendChild(new FakeElement(
+    "section",
+    "Use Ultra with Full access? With Ultra and Full access on, ChatGPT can use extended reasoning while running commands, using the internet, and editing files anywhere on your computer without asking.",
+  ));
+  const fullAccessButton = warning.appendChild(new FakeElement("button", "Use Full access"));
+  const cancelButton = warning.appendChild(new FakeElement("button", "Cancel"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(fullAccessButton.clicks, 1);
+  assert.equal(cancelButton.clicks, 0);
+  assert.equal(warning.isConnected, false);
+});
+
 test("a warning label that renders after insertion is still dismissed", async () => {
   const runtime = createRuntime({ hideFullAccessWarning: true });
   const warning = runtime.body.appendChild(new FakeElement(
