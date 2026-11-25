@@ -949,7 +949,7 @@ function ModelSectionComponent({
               <div className="catalog-aggregate-title-wrap">
                 <div className="catalog-aggregate-title">
                   <strong>{routeConfigReadOnly ? "当前线路模型" : "供应商与模型"}</strong>
-                  <Badge variant="info">
+                  <Badge variant="secondary">
                     {visibleProfiles.length} 条线路 · {totalModelCount} 个模型
                   </Badge>
                 </div>
@@ -1060,11 +1060,11 @@ function ModelSectionComponent({
                               {pendingRouteToggle?.id === profile.id && <Badge variant="secondary">保存中…</Badge>}
                               {disabled ? <Badge variant="destructive">已禁用</Badge> : (
                                 <>
-                                  <Badge variant="info">{group?.models.length || 0} 模型</Badge>
+                                  <Badge variant="secondary">{group?.models.length || 0} 模型</Badge>
                                   {!routeConfigReadOnly && !isOfficial && !group?.models.length && (
                                     <Badge variant="secondary">待配置模型</Badge>
                                   )}
-                                  {(isOfficial || profile.supportsWebsockets) && <Badge variant="brand">WS</Badge>}
+                                  {(isOfficial || profile.supportsWebsockets) && <Badge variant="outline">WS</Badge>}
                                   <Tooltip content={compaction.tooltip}>
                                     <span className="inline-flex">
                                       <Badge variant={compaction.badgeVariant} title={compaction.tooltip}>

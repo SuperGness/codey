@@ -456,9 +456,9 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
             {[0, 1].map((row) => (
               <div
                 key={row}
-                className="flex items-center gap-3.5 rounded-2xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-4"
+                className="flex items-center gap-3.5 rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-card)] p-4"
               >
-                <div className="size-10 shrink-0 rounded-full bg-default/50" />
+                <div className="size-9 shrink-0 rounded-lg bg-default/50" />
                 <div className="flex-1 space-y-2">
                   <div className="h-3.5 w-1/4 rounded bg-default/50" />
                   <div className="h-2.5 w-3/5 rounded bg-default/30" />
@@ -467,12 +467,12 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
             ))}
           </div>
         ) : !known && !loading ? (
-          <div className="flex flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-6 py-14 text-center">
-            <div className="mb-3 flex size-12 items-center justify-center rounded-full bg-[var(--codey-red-soft)] text-[var(--codey-red)]">
-              <IconAlertTriangle size={22} stroke={1.7} aria-hidden="true" />
+          <div className="flex flex-col items-center justify-center rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-panel)] px-6 py-12 text-center">
+            <div className="mb-3 flex size-10 items-center justify-center rounded-lg border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] text-[var(--codey-red)]">
+              <IconAlertTriangle size={20} stroke={1.7} aria-hidden="true" />
             </div>
-            <h4 className="m-0 text-[16px] font-extrabold text-foreground">无法读取插件列表</h4>
-            <p className="mb-3 mt-1 max-w-sm text-[13px] text-muted leading-relaxed">
+            <h4 className="m-0 text-[14.5px] font-semibold text-foreground">无法读取插件列表</h4>
+            <p className="mb-3 mt-1 max-w-sm text-[12.5px] text-muted leading-relaxed">
               请检查本地服务状态后重试读取插件目录。
             </p>
             <Button
@@ -484,14 +484,14 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
               重新读取
             </Button>
           </div>
-        ) : known && !loading && <div className="flex flex-col items-center justify-center rounded-[18px] bg-[var(--codey-panel)] px-6 py-16 text-center">
-          <div className="mb-3.5 flex size-12 items-center justify-center rounded-full bg-[var(--codey-surface-sunken)] text-foreground">
-            <IconPuzzle size={24} stroke={1.5} />
+        ) : known && !loading && <div className="flex flex-col items-center justify-center rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-panel)] px-6 py-14 text-center">
+          <div className="mb-3 flex size-10 items-center justify-center rounded-lg border border-[var(--codey-border)] bg-[var(--codey-surface)] text-foreground">
+            <IconPuzzle size={20} stroke={1.6} />
           </div>
           {searchQuery || statusFilter !== "all" ? (
             <>
-              <h4 className="m-0 text-[17px] font-extrabold text-foreground">未找到匹配的插件</h4>
-              <p className="mb-3 mt-1 text-[13.5px] text-muted">
+              <h4 className="m-0 text-[14.5px] font-semibold text-foreground">未找到匹配的插件</h4>
+              <p className="mb-3 mt-1 text-[12.5px] text-muted">
                 {searchQuery
                   ? `没有符合「${searchQuery}」的插件，请尝试其他关键词。`
                   : `当前没有${statusFilter === "enabled" ? "已启用" : "未启用"}的插件。`}
@@ -509,8 +509,8 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
             </>
           ) : (
             <>
-              <h4 className="m-0 text-[17px] font-extrabold text-foreground">尚未安装任何插件</h4>
-              <p className="mb-0 mt-1 max-w-sm text-[13.5px] text-muted leading-relaxed">
+              <h4 className="m-0 text-[14.5px] font-semibold text-foreground">尚未安装任何插件</h4>
+              <p className="mb-0 mt-1 max-w-sm text-[12.5px] text-muted leading-relaxed">
                 在上方选择或拖入 .codey-plugin 插件包，扩展环境适配、模型代理拦截与自定增强功能。
               </p>
             </>
@@ -530,20 +530,20 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div
-                        className={`flex size-10 shrink-0 items-center justify-center rounded-full transition-colors ${
+                        className={`flex size-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
                           plugin.enabled
-                            ? "bg-[var(--codey-text)] text-[var(--codey-surface)]"
-                            : "bg-[var(--codey-surface-sunken)] text-muted"
+                            ? "border-[var(--codey-border-strong)] bg-[var(--codey-surface-sunken)] text-foreground"
+                            : "border-[var(--codey-border)] bg-[var(--codey-surface-sunken)] text-muted"
                         }`}
                       >
-                        <IconPuzzle size={18} stroke={1.85} aria-hidden="true" />
+                        <IconPuzzle size={17} stroke={1.75} aria-hidden="true" />
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <h4 className="m-0 truncate text-[15px] font-bold text-foreground">
+                          <h4 className="m-0 truncate text-[13.5px] font-semibold text-foreground">
                             {plugin.name}
                           </h4>
-                          <span className="inline-flex items-center rounded-full bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] font-medium text-muted">
+                          <span className="inline-flex items-center rounded-md bg-[var(--codey-surface-sunken)] px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">
                             v{plugin.version}
                           </span>
                         </div>
@@ -616,17 +616,17 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   </div>
 
                   {plugin.description && (
-                    <p className="mb-0 mt-1.5 line-clamp-2 text-[14px] text-foreground leading-relaxed sm:ml-[52px]">
+                    <p className="mb-0 mt-1.5 line-clamp-2 text-[13px] text-muted leading-relaxed sm:ml-[48px]">
                       {plugin.description}
                     </p>
                   )}
 
                   {plugin.capabilities && plugin.capabilities.length > 0 && (
-                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-[52px]">
+                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-[48px]">
                       {plugin.capabilities.map((cap) => (
                         <span
                           key={cap}
-                          className="inline-flex items-center rounded-full border border-[var(--codey-border-strong)] px-2.5 py-0.5 font-mono text-[11.5px] text-muted"
+                          className="inline-flex items-center rounded-md border border-[var(--codey-border)] bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] text-muted"
                         >
                           {cap}
                         </span>
@@ -635,19 +635,19 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   )}
 
                   {plugin.restartRequired && (
-                    <div className="mt-3 rounded-2xl bg-[var(--codey-amber-soft)] px-3.5 py-2.5 text-[13px] text-[var(--codey-amber)] sm:ml-[52px]">
+                    <div className="mt-3 rounded-lg border border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] px-3 py-2 text-[12.5px] text-[var(--codey-amber)] sm:ml-[48px]">
                       需要重启 Codey 或停用后重新启用，以应用版本更新或配置变更。
                     </div>
                   )}
 
                   {plugin.lastError && (
-                    <div role="alert" className="mt-3 rounded-2xl bg-[var(--codey-red-soft)] px-3.5 py-2.5 text-[13px] text-[var(--codey-red)] sm:ml-[52px]">
+                    <div role="alert" className="mt-3 rounded-lg border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-3 py-2 text-[12.5px] text-[var(--codey-red)] sm:ml-[48px]">
                       {plugin.lastError}
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-[52px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-[48px]">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="whitespace-nowrap text-[12.5px] text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
                       日志 {plugin.logSizeBytes == null ? "大小未知" : formatBytes(plugin.logSizeBytes)}

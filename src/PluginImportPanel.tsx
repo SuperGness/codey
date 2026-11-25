@@ -136,35 +136,35 @@ export function PluginImportPanel({
       {preview ? (
         <div className="plugin-import-preview">
           <div className="flex items-center gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[var(--codey-text)] text-[var(--codey-surface)]">
-              <IconPuzzle size={18} stroke={1.85} aria-hidden="true" />
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-[var(--codey-border-strong)] bg-[var(--codey-surface-sunken)] text-foreground">
+              <IconPuzzle size={17} stroke={1.75} aria-hidden="true" />
             </span>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="truncate text-[15px] font-bold text-foreground">{preview.manifest.name}</span>
-                <span className="rounded-full bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] text-muted">
+                <span className="truncate text-[13.5px] font-semibold text-foreground">{preview.manifest.name}</span>
+                <span className="rounded-md bg-[var(--codey-surface-sunken)] px-1.5 py-0.5 font-mono text-[11px] text-muted">
                   {upgrading ? `${upgrading.version} → ${preview.manifest.version}` : `v${preview.manifest.version}`}
                 </span>
-                <span className="rounded-full bg-[var(--codey-blue-soft)] px-2 py-0.5 text-[11.5px] font-semibold text-[var(--codey-blue)]">
+                <span className="rounded-md bg-[var(--codey-blue-soft)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--codey-blue)]">
                   {duplicate ? "已安装" : upgrading ? "升级" : "新安装"}
                 </span>
               </div>
-              <p className="mb-0 mt-0.5 truncate font-mono text-[12.5px] text-muted">{preview.manifest.id}</p>
+              <p className="mb-0 mt-0.5 truncate font-mono text-[12px] text-muted">{preview.manifest.id}</p>
             </div>
           </div>
 
           {preview.manifest.description ? (
-            <p className="m-0 text-[14px] leading-relaxed text-foreground sm:pl-[52px]">{preview.manifest.description}</p>
+            <p className="m-0 text-[13px] leading-relaxed text-muted sm:pl-[48px]">{preview.manifest.description}</p>
           ) : null}
 
-          <div className="space-y-1.5 text-[13px] sm:pl-[52px]">
+          <div className="space-y-1.5 text-[12.5px] sm:pl-[48px]">
             <div className="font-semibold text-foreground">声明能力</div>
             {capabilities.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {capabilities.map((capability) => (
                   <span
                     key={capability}
-                    className="inline-flex items-center rounded-full border border-[var(--codey-border-strong)] px-2.5 py-0.5 font-mono text-[11.5px] text-muted"
+                    className="inline-flex items-center rounded-md border border-[var(--codey-border)] bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] text-muted"
                   >
                     {capability}
                   </span>
@@ -186,7 +186,7 @@ export function PluginImportPanel({
             ) : null}
           </div>
 
-          <div className="plugin-import-note is-warning sm:ml-[52px]">
+          <div className="plugin-import-note is-warning sm:ml-[48px]">
             <IconAlertTriangle className="mt-0.5 shrink-0" size={15} aria-hidden="true" />
             <p className="m-0">原生插件与 Codey 同进程运行，具有相同系统权限。请确认来源安全。</p>
           </div>

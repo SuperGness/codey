@@ -722,7 +722,7 @@ function OfficialAccountsPanelComponent({
               <span>手动输入</span>
             </Button>
           </Tooltip>
-          <Button variant="brand-outline" size="xs" disabled={disabled} loading={pending === "login"} onClick={() => void startLogin()}>
+          <Button variant="default" size="xs" disabled={disabled} loading={pending === "login"} onClick={() => void startLogin()}>
             <IconPlus size={13} aria-hidden="true" />
             <span>添加账号</span>
           </Button>

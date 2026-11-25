@@ -19,14 +19,14 @@
   margin-right: 4px;
 }
 
-/* 运行状态：浅灰大圆角面板，三列以竖线分隔。 */
+/* 运行状态：收敛圆角面板，三列以细竖线分隔。 */
 .operations-status-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
   margin-bottom: 0;
   border: 1px solid var(--codey-border);
-  border-radius: 16px;
+  border-radius: 10px;
   background: var(--codey-panel);
   overflow: hidden;
 }
@@ -38,8 +38,8 @@
   min-width: 0;
   flex-direction: column;
   justify-content: flex-start;
-  gap: 6px;
-  padding: 16px 18px 14px;
+  gap: 5px;
+  padding: 13px 15px 12px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -47,7 +47,7 @@
   text-align: left;
   cursor: pointer;
   overflow: hidden;
-  transition: background-color 150ms ease, box-shadow 150ms ease;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
 }
 
 .status-strip-item + .status-strip-item {
@@ -75,21 +75,21 @@
 .status-strip-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
 }
 
 .status-strip-icon {
   flex: none;
-  color: var(--tone);
+  color: var(--codey-muted);
 }
 
 .status-strip-head strong {
   min-width: 0;
   overflow: hidden;
   color: var(--codey-text);
-  font-size: 15px;
-  font-weight: 800;
+  font-size: 13.5px;
+  font-weight: 600;
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -103,17 +103,17 @@
   margin-left: auto;
   padding: 0;
   border: 0;
-  border-radius: 999px;
+  border-radius: 5px;
   background: transparent;
   color: var(--tone);
-  font-size: 12.5px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1.4;
 }
 
 .status-strip-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: currentColor;
 }
@@ -122,7 +122,7 @@
   display: -webkit-box;
   overflow: hidden;
   color: var(--codey-muted);
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -132,13 +132,14 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--codey-blue);
-  font-size: 13px;
+  color: var(--codey-muted);
+  font-size: 12px;
   font-weight: 500;
+  transition: color 140ms ease;
 }
 
 .status-strip-toggle svg {
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 160ms ease;
 }
 
 .status-strip-item.is-expanded .status-strip-toggle svg {
@@ -147,7 +148,7 @@
 
 .status-strip-item:hover .status-strip-toggle,
 .status-strip-item.is-expanded .status-strip-toggle {
-  color: var(--codey-blue);
+  color: var(--codey-text);
 }
 
 @container settings-content (max-width: 640px) {
@@ -165,12 +166,12 @@
 }
 
 .operations-expanded-tray {
-  margin-top: 12px;
+  margin-top: 10px;
   padding: 14px 16px;
   border: 1px solid var(--codey-border);
-  border-radius: 18px;
+  border-radius: 10px;
   background: var(--codey-card);
-  animation: codey-panel-enter 170ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: codey-panel-enter 150ms ease-out;
 }
 
 .operations-expanded-card {
@@ -195,11 +196,11 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--codey-border-subtle);
+  border-radius: 8px;
   background: var(--codey-panel);
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--codey-text-soft);
 }
 
@@ -208,7 +209,7 @@
   width: 26px;
   height: 26px;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--codey-surface-sunken);
   color: var(--codey-muted);
   flex-shrink: 0;
@@ -264,15 +265,15 @@
 .injection-mode-heading h4 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 13.5px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
   line-height: 1.4;
 }
 
 .injection-mode-description {
   margin: 4px 0 0;
   color: var(--codey-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -304,8 +305,8 @@
 .injection-status-header h4 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 13.5px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .injection-status-list {
@@ -317,22 +318,22 @@
 
 .injection-status-row {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
-  min-height: 46px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: 12px;
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 1px solid var(--codey-border-subtle);
+  border-radius: 8px;
   background: var(--codey-panel);
 }
 
 .injection-script-icon {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--codey-green-soft);
   color: var(--codey-green);
 }

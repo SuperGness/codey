@@ -98,7 +98,7 @@ export interface ButtonProps extends Omit<HeroButtonProps, "variant" | "size" | 
 const buttonAppearance: Record<Exclude<ButtonVariant, "link" | "filled">, { variant: HeroButtonVariant; className?: string }> = {
   default: { variant: "primary" },
   light: { variant: "secondary" },
-  "brand-outline": { variant: "outline", className: "border-accent text-accent" },
+  "brand-outline": { variant: "outline", className: "border-[var(--codey-blue-border)] text-[var(--codey-blue)] hover:bg-[var(--codey-blue-soft)]" },
   warning: { variant: "primary", className: "bg-warning text-warning-foreground hover:bg-warning/90" },
   destructive: { variant: "danger" },
   "destructive-light": { variant: "danger-soft" },
@@ -220,7 +220,7 @@ export function PasswordInput({ visibility, onVisibilityChange, rightSection, di
           isDisabled={disabled}
           aria-label={visible ? "隐藏密码" : "显示密码"}
           aria-pressed={visible}
-          className="size-7 min-w-7 rounded-full text-muted md:size-7"
+          className="size-7 min-w-7 rounded-md text-muted md:size-7"
           onPress={() => setVisible(!visible)}
         >
           {visible ? <IconEyeOff size={16} aria-hidden="true" /> : <IconEye size={16} aria-hidden="true" />}
@@ -317,18 +317,18 @@ export function NumberInput({
     >
       <HeroNumberField.Group
         className={cn(
-          "rounded-full border border-transparent bg-[var(--field-background)] transition-colors hover:border-[var(--codey-border-strong)] focus-within:border-[var(--codey-blue)] focus-within:bg-[var(--codey-surface)]",
+          "rounded-lg border border-[var(--field-border)] bg-[var(--field-background)] transition-colors hover:border-[var(--field-border-hover)] focus-within:border-[var(--codey-blue)]",
           isSm ? "h-[25px]" : "h-7"
         )}
       >
-        <HeroNumberField.DecrementButton className="rounded-full hover:bg-[var(--codey-press)] transition-colors" />
+        <HeroNumberField.DecrementButton className="rounded-md hover:bg-[var(--codey-hover)] transition-colors" />
         <HeroNumberField.Input
           className={cn(
             "bg-transparent text-center font-medium tabular-nums",
             isSm ? "text-[11.5px]" : "text-xs"
           )}
         />
-        <HeroNumberField.IncrementButton className="rounded-full hover:bg-[var(--codey-press)] transition-colors" />
+        <HeroNumberField.IncrementButton className="rounded-md hover:bg-[var(--codey-hover)] transition-colors" />
       </HeroNumberField.Group>
     </HeroNumberField>
   );
@@ -570,7 +570,7 @@ export function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLD
 }
 export function DialogTitle({ id, className, ...props }: React.ComponentProps<typeof Modal.Heading>) {
   const labels = React.useContext(DialogLabelContext);
-  return <Modal.Heading {...props} id={id ?? labels?.titleId} className={cn("text-[20px] font-extrabold tracking-[-0.01em] text-foreground", className)} />;
+  return <Modal.Heading {...props} id={id ?? labels?.titleId} className={cn("text-[16px] font-semibold tracking-[-0.01em] text-foreground", className)} />;
 }
 export function DialogDescription({ id, className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
   const labels = React.useContext(DialogLabelContext);
