@@ -3097,7 +3097,17 @@ mod tests {
         bind_source(&router, &source, &model);
         let prepare =
             json!({"threadId":"parent","targetProviderId":target,"targetModel":"target-model"});
-        assert_eq!(router.portable_compaction("prepare", &json!({"threadId":"missing","targetProviderId":target,"targetModel":"target-model"})).unwrap()["required"], false);
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            router
+                .portable_compaction_from_home(
+                    "prepare",
+                    &json!({"threadId":"missing","targetProviderId":target,"targetModel":"target-model"}),
+                    home.path(),
+                )
+                .unwrap()["required"],
+            false
+        );
         assert_eq!(
             router
                 .portable_compaction(
