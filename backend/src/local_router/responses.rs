@@ -66,7 +66,7 @@ impl RouterServer {
             write_json_response(&mut stream, 200, &json!({"status":"ok"})).await?;
             return Ok(());
         }
-        // 与本地路由使用同一地址和令牌。没有令牌不会统计，也不会启动共享 app-server。
+        // 与本地路由使用同一地址和令牌。没有令牌不会统计。
         if pending.request.method == "POST"
             && pending.request.path == crate::appserver_call::HTTP_PATH
         {

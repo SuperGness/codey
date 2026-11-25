@@ -11,8 +11,6 @@
 //! 无凭据的 `http://127.0.0.1:<port>`，凭据只在中继侧注入上游，也不再
 //! 随环境变量泄漏给 Codex 的子进程。
 
-use std::sync::RwLock;
-
 /// 保存时经 `config::validate_codex_launch_proxy` 校验；手工编辑出的无效
 /// 值在启动解析处仍会失败，不会带着半个代理配置拉起 Codex。
 #[derive(Clone, Debug)]
@@ -50,10 +48,6 @@ impl LaunchProxyPlan {
         }
     }
 }
-
-/// 本次 Codey 启动的运行时所使用的代理。Codey 自己拉起的共享 app-server
-/// 也继承这份环境；配置保存后仍要到下次启动才刷新。
-static ACTIVE: RwLock<Option<CodexLaunchProxy>> = RwLock::new(None);
 
 impl CodexLaunchProxy {
     pub(crate) fn resolve(value: &str) -> anyhow::Result<Option<LaunchProxyPlan>> {
@@ -151,48 +145,6 @@ fn proxy_environment(url: &str) -> Vec<(String, String)> {
     environment
 }
 
-/// 记录本次 Codey 启动的运行时代理；只对 Codey 拉起的进程生效。
-pub(crate) fn set_active(proxy: Option<CodexLaunchProxy>) {
-    *ACTIVE
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = proxy;
-}
-
-/// Codey 自己拉起的共享 app-server 继承同一份启动代理环境。共享实例
-/// 按需创建，可能早于本次 Codex 启动，因此活动值为空时回读已保存的配置，
-/// 并按同一条路径启动认证中继——凭据只由中继注入上游，不写进子进程环境。
-pub(crate) async fn shared_app_server_environment() -> Vec<(String, String)> {
-    resolve_shared_environment(|| {
-        crate::config::ConfigStore::default()
-            .load()
-            .map(|config| config.codex_launch_proxy)
-            .unwrap_or_default()
-    })
-    .await
-}
-
-async fn resolve_shared_environment(saved: impl FnOnce() -> String) -> Vec<(String, String)> {
-    if let Some(proxy) = ACTIVE
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-    {
-        return proxy.environment();
-    }
-    match CodexLaunchProxy::resolve(&saved()) {
-        Ok(Some(LaunchProxyPlan::Direct { proxy, .. })) => proxy.environment(),
-        // 带凭据的地址必须经中继：把原始地址写进环境变量等于把凭据交给该
-        // app-server 及其全部子进程。中继起不来时宁可不注入代理变量。
-        Ok(Some(LaunchProxyPlan::Relayed(upstream))) => {
-            match crate::launch_proxy_relay::ensure_running(&upstream).await {
-                Ok(port) => CodexLaunchProxy::relayed(port).environment(),
-                Err(_) => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
-    }
-}
-
 /// 保留已有绕过规则并追加回环地址。本地路由、CDP 和 CLI 握手终结在
 /// Codey 的回环监听上，这一跳必须留在代理之外。
 pub(crate) fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
@@ -219,9 +171,6 @@ pub(crate) fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // 修改进程级活动代理的测试必须串行执行，避免相互清空状态。
-    static ACTIVE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn resolve_direct(value: &str) -> CodexLaunchProxy {
         match CodexLaunchProxy::resolve(value).unwrap().unwrap() {
@@ -346,45 +295,5 @@ mod tests {
             "[::1],localhost,127.0.0.1"
         );
         assert_eq!(merge_loopback_no_proxy(None), "127.0.0.1,localhost,::1");
-    }
-
-    #[tokio::test]
-    async fn shared_app_server_environment_follows_active_then_saved_proxy() {
-        let _guard = ACTIVE_TEST_LOCK.lock().await;
-        let saved = || "http://127.0.0.1:7890".to_string();
-        set_active(None);
-        assert!(resolve_shared_environment(String::new).await.is_empty());
-        // 无活动值（例如共享实例先于 Codex 启动创建）回读已保存配置。
-        let environment = resolve_shared_environment(saved).await;
-        assert!(
-            environment
-                .iter()
-                .any(|(key, value)| key == "HTTPS_PROXY" && value == "http://127.0.0.1:7890")
-        );
-        // 活动值优先：本次启动已解析的代理覆盖磁盘上的旧配置。
-        set_active(Some(resolve_direct("socks5://127.0.0.1:1080")));
-        let environment = resolve_shared_environment(saved).await;
-        assert!(
-            environment
-                .iter()
-                .any(|(key, value)| key == "HTTPS_PROXY" && value == "socks5://127.0.0.1:1080")
-        );
-        set_active(None);
-    }
-
-    #[tokio::test]
-    async fn shared_app_server_environment_never_exposes_credentials() {
-        let _guard = ACTIVE_TEST_LOCK.lock().await;
-        set_active(None);
-        let environment =
-            resolve_shared_environment(|| "http://user:pass@127.0.0.1:9".to_string()).await;
-        // 上游不可达时中继起不来：宁可不注入代理变量，也不把凭据交给该
-        // app-server 及其子进程。
-        assert!(
-            environment
-                .iter()
-                .all(|(_, value)| !value.contains("user:pass")),
-            "{environment:?}"
-        );
     }
 }

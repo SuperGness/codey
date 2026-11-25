@@ -370,7 +370,7 @@ fn runtime_disk_provider_replaces_chatgpt_resume_shim() {
 
 #[test]
 fn runtime_disk_provider_leaves_a_user_owned_codey_router_untouched() {
-    for id in local_router::OWNED_ROUTER_PROVIDER_IDS {
+    for id in local_router::ROUTER_PROVIDER_IDS {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("codex-home");
         fs::create_dir_all(&home).unwrap();

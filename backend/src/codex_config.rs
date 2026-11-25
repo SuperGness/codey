@@ -430,7 +430,7 @@ fn apply_isolated_runtime_router_config(
     if local_router.is_some() && user_owned_router_provider_occupies_id(&persistent) {
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
-            local_router::OWNED_ROUTER_PROVIDER_IDS.join("、")
+            local_router::ROUTER_PROVIDER_ID
         );
     }
     // Codex resolves this path from the app-server working directory, which is
@@ -1359,10 +1359,8 @@ fn restore_persistent_router_resume_shim_if_owned(home: &Path) -> Result<bool> {
         return Ok(false);
     }
     let mut document = snapshot.document().clone();
-    let codey_router_owned = local_router::OWNED_ROUTER_PROVIDER_IDS.iter().any(|id| {
-        document_provider_table(&document, id)
-            .is_some_and(codey_router_provider_table_is_codey_owned)
-    });
+    let codey_router_owned = document_provider_table(&document, local_router::ROUTER_PROVIDER_ID)
+        .is_some_and(codey_router_provider_table_is_codey_owned);
     if !codey_router_owned || !ensure_persistent_router_resume_shim(&mut document)? {
         return Ok(false);
     }
@@ -1614,11 +1612,9 @@ pub(crate) fn prepare_runtime_router_disk_provider_at(
 }
 
 pub(crate) fn user_owned_router_provider_occupies_id(document: &DocumentMut) -> bool {
-    local_router::OWNED_ROUTER_PROVIDER_IDS.iter().any(|id| {
-        document_provider_item(document, id).is_some_and(|item| {
-            item.as_table_like()
-                .is_none_or(|provider| !codey_router_provider_table_is_codey_owned(provider))
-        })
+    document_provider_item(document, local_router::ROUTER_PROVIDER_ID).is_some_and(|item| {
+        item.as_table_like()
+            .is_none_or(|provider| !codey_router_provider_table_is_codey_owned(provider))
     })
 }
 

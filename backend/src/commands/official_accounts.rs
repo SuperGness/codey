@@ -108,40 +108,6 @@ pub(super) async fn invoke(
             Ok(account_id) => remove_official_account_siwc(state, account_id).await,
             Err(error) => Err(error),
         },
-        "save_official_account_route_settings" => match (
-            string_argument(args, "accountId"),
-            optional_argument::<String>(args, "routeName"),
-            optional_argument::<String>(args, "routeShortName"),
-            optional_argument::<String>(args, "upstreamProxy"),
-            optional_argument::<String>(args, "baseUrl"),
-            optional_argument::<u32>(args, "maxConcurrency"),
-        ) {
-            (
-                Ok(account_id),
-                Ok(route_name),
-                Ok(route_short_name),
-                Ok(upstream_proxy),
-                Ok(base_url),
-                Ok(max_concurrency),
-            ) => {
-                save_official_account_route_settings(
-                    state,
-                    account_id,
-                    route_name.unwrap_or_default(),
-                    route_short_name.unwrap_or_default(),
-                    upstream_proxy.unwrap_or_default(),
-                    base_url.unwrap_or_default(),
-                    max_concurrency,
-                )
-                .await
-            }
-            (Err(error), _, _, _, _, _)
-            | (_, Err(error), _, _, _, _)
-            | (_, _, Err(error), _, _, _)
-            | (_, _, _, Err(error), _, _)
-            | (_, _, _, _, Err(error), _)
-            | (_, _, _, _, _, Err(error)) => Err(error),
-        },
         _ => Err(format!("未知 Codey API 命令：{command}")),
     }
 }
@@ -912,7 +878,10 @@ fn provider_id_is_derived_official_account(provider_id: &str) -> bool {
         && provider_id.len() > prefix.len()
 }
 
-fn account_provider_ids_contains(account_provider_ids: &HashSet<String>, provider_id: &str) -> bool {
+fn account_provider_ids_contains(
+    account_provider_ids: &HashSet<String>,
+    provider_id: &str,
+) -> bool {
     account_provider_ids.contains(provider_id)
         || account_provider_ids
             .iter()
@@ -1095,11 +1064,7 @@ pub(super) async fn reconcile_official_route_changes_async(
         .ok()
         .and_then(Result::ok);
         if let Some(model_state) = model_state {
-            reconcile_updated_subagent_roles_with_model_state(
-                previous,
-                next,
-                &model_state,
-            );
+            reconcile_updated_subagent_roles_with_model_state(previous, next, &model_state);
         }
     }
 }
@@ -1162,7 +1127,9 @@ fn reconcile_updated_subagent_roles_with_model_state(
                     selection.model = supported_fallback.clone();
                 }
             }
-            if let Some(default_role) = next.subagent_roles.get(crate::config::SUBAGENT_ROLE_DEFAULT)
+            if let Some(default_role) = next
+                .subagent_roles
+                .get(crate::config::SUBAGENT_ROLE_DEFAULT)
             {
                 next.subagent_model.clone_from(&default_role.model);
             }
@@ -1179,7 +1146,10 @@ fn reconcile_updated_subagent_roles_with_model_state(
             selection.model = alias;
         }
     }
-    if let Some(default_role) = next.subagent_roles.get(crate::config::SUBAGENT_ROLE_DEFAULT) {
+    if let Some(default_role) = next
+        .subagent_roles
+        .get(crate::config::SUBAGENT_ROLE_DEFAULT)
+    {
         next.subagent_model.clone_from(&default_role.model);
         next.subagent_reasoning_effort
             .clone_from(&default_role.reasoning_effort);
@@ -1234,8 +1204,7 @@ pub(super) async fn drop_derived_official_routes(
         next.apply_launch_official_profiles(remaining);
         next = next.normalize();
     }
-    reconcile_official_route_changes_async(&previous, &mut next, &account_provider_ids, home)
-        .await;
+    reconcile_official_route_changes_async(&previous, &mut next, &account_provider_ids, home).await;
     if !super::persisted_config_changed(&previous, &next) {
         return Ok(());
     }
@@ -1246,38 +1215,6 @@ pub(super) async fn drop_derived_official_routes(
         super::models::save_config_with_route_speed_changes(state, &previous, next, home).await?;
     *state.config.write().await = next;
     Ok(())
-}
-
-/// Saves the route name, short name, gateway and upstream proxy of one
-/// official account and re-derives every official route, so the edited
-/// account shows its new name without becoming the default.
-pub(super) async fn save_official_account_route_settings(
-    state: &Arc<AppState>,
-    account_id: String,
-    route_name: String,
-    route_short_name: String,
-    upstream_proxy: String,
-    base_url: String,
-    max_concurrency: Option<u32>,
-) -> Result<Value, String> {
-    // 与模型设置共用提交锁；账号文件锁只在同步写入期间持有。
-    let config_write_guard = state.config_write_lock.lock().await;
-    let account_id = write_official_account_route_settings(
-        state,
-        account_id,
-        route_name,
-        route_short_name,
-        upstream_proxy,
-        base_url,
-        max_concurrency,
-    )
-    .await?;
-    drop(config_write_guard);
-    let payload = refresh_official_route_after_account_change(state).await?;
-    Ok(merge(
-        payload,
-        json!({ "status": "ok", "accountId": account_id }),
-    ))
 }
 
 /// Writes one account's route overrides without re-deriving routes. Callers

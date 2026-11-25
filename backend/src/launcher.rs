@@ -346,7 +346,7 @@ fn validate_router_provider(home: &std::path::Path) -> Result<()> {
         // compatible with the live loopback table installed later.
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
-            crate::local_router::OWNED_ROUTER_PROVIDER_IDS.join("、")
+            crate::local_router::ROUTER_PROVIDER_ID
         );
     }
     Ok(())
@@ -2161,7 +2161,6 @@ async fn spawn_and_inject_runtime(
             .await);
         }
     };
-    crate::launch_proxy::set_active(launch_proxy);
     let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
     let maintenance = MaintenanceStatus {
         session_status: storage.session_maintenance.status,

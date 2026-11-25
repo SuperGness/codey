@@ -21,9 +21,6 @@ pub(crate) async fn handle(body: &[u8]) -> (u16, Value) {
             if !codey_plugin_sdk::appserver::allowed_method(&method) {
                 return rejected("app-server 方法无效");
             }
-            // SharedClient 已随空方法白名单移除；暂保留引用以通过跨模块隔离检查，
-            // 供 integrator 合并后一并清理 `launch_proxy::shared_app_server_environment`。
-            let _ = crate::launch_proxy::shared_app_server_environment().await;
             rejected("app-server 方法暂不可用")
         }
     }
