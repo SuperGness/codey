@@ -4,14 +4,23 @@ import test from "node:test";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const root = new URL("../", import.meta.url);
-const [urlValidation, formatters, appUtils, runtimeStatusSnapshot, tokenUnits] =
-  await Promise.all([
-    loadTypeScriptModule(new URL("src/urlValidation.ts", root)),
-    loadTypeScriptModule(new URL("src/formatters.ts", root)),
-    loadTypeScriptModule(new URL("src/appUtils.ts", root)),
-    loadTypeScriptModule(new URL("src/runtimeStatusSnapshot.ts", root)),
-    loadTypeScriptModule(new URL("src/tokenUnits.ts", root)),
-  ]);
+const [
+  urlValidation,
+  formatters,
+  appUtils,
+  runtimeStatusSnapshot,
+  tokenUnits,
+  runtimeStatusPresentation,
+  overlayConstants,
+] = await Promise.all([
+  loadTypeScriptModule(new URL("src/urlValidation.ts", root)),
+  loadTypeScriptModule(new URL("src/formatters.ts", root)),
+  loadTypeScriptModule(new URL("src/appUtils.ts", root)),
+  loadTypeScriptModule(new URL("src/runtimeStatusSnapshot.ts", root)),
+  loadTypeScriptModule(new URL("src/tokenUnits.ts", root)),
+  loadTypeScriptModule(new URL("src/runtimeStatusPresentation.ts", root)),
+  loadTypeScriptModule(new URL("src/overlay.constants.ts", root)),
+]);
 
 test("token budgets convert between whole tokens and K text", () => {
   const { formatTokenK, parseTokenK } = tokenUnits;
@@ -111,4 +120,36 @@ test("reconcileRuntimeStatus keeps referential identity for unchanged nested sec
     maintenance: { scanned: 2, items: [1, 2] },
   });
   assert.notEqual(changedMaintenance.maintenance, current.maintenance);
+});
+
+test("summarizeInjectionScripts flags failed internal scripts without counting them as user-visible failures", () => {
+  const failedSummary = runtimeStatusPresentation.summarizeInjectionScripts([
+    {
+      id: "windows-internal-failure",
+      name: "Windows 内部保护",
+      source: "builtin",
+      visibility: "internal",
+      status: "failed",
+    },
+  ]);
+  assert.equal(failedSummary.internalInjectionError, true);
+  assert.equal(failedSummary.failedInjectionScriptCount, 0);
+});
+
+test("buildEnabledOptimizationFeatures reports active embedded FastCtx tools", () => {
+  const [fastctxFeature] = runtimeStatusPresentation.buildEnabledOptimizationFeatures(
+    { running: true, fastContextToolsActive: true },
+    { userConfigured: false, detectionFailed: false },
+  );
+  assert.equal(fastctxFeature.id, "fastctx-context-tools");
+  assert.equal(fastctxFeature.name, "FastCtx 上下文加速");
+  assert.equal(
+    fastctxFeature.detail,
+    "Codey 内置 FastCtx 已随当前运行实例加载",
+  );
+});
+
+test("settings overlay z-index constants use the maximum 32-bit signed integer", () => {
+  assert.equal(overlayConstants.SETTINGS_OVERLAY_Z_INDEX, 2_147_483_647);
+  assert.equal(overlayConstants.SETTINGS_OVERLAY_Z_INDEX_CSS, "2147483647");
 });
