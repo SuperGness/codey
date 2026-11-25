@@ -919,17 +919,17 @@ async fn on_request_paused(
             session,
         );
     };
-    if context.startup_animation {
-        if let Some(asset) = startup::asset_response(url, &params) {
-            if let Err(error) = connection
-                .call("Fetch.fulfillRequest", asset, session)
-                .await
-            {
-                log_patch_skip(url, format!("startup asset: {error:#}"));
-                pass_through();
-            }
-            return;
+    if context.startup_animation
+        && let Some(asset) = startup::asset_response(url, &params)
+    {
+        if let Err(error) = connection
+            .call("Fetch.fulfillRequest", asset, session)
+            .await
+        {
+            log_patch_skip(url, format!("startup asset: {error:#}"));
+            pass_through();
         }
+        return;
     }
     if context.disable_pet
         && let Some(pet) = pet_sprite_id(url)

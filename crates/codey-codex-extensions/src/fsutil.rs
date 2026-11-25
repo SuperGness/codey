@@ -123,17 +123,13 @@ pub fn safe_path(path: &Path) -> Result<()> {
 pub fn is_symlink_target(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                return true;
-            }
+            let is_symlink = meta.file_type().is_symlink();
             #[cfg(windows)]
-            {
+            let is_symlink = {
                 use std::os::windows::fs::MetadataExt;
-                if meta.file_attributes() & 0x400 != 0 {
-                    return true;
-                }
-            }
-            false
+                is_symlink || meta.file_attributes() & 0x400 != 0
+            };
+            is_symlink
         }
         Err(_) => false,
     }
