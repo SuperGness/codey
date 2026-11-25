@@ -7,20 +7,19 @@ const patchSource = await readFile(
   new URL("../backend/src/renderer_asset_patch.js", import.meta.url),
   "utf8",
 );
-const assetUrl = "app://-/assets/app-primary-memory-test.js";
+const assetUrl = "app://-/assets/async/76344.88a5c21495.js";
 const quotaFixture = [
-  "function render(model,host,quotaBlocked,otherDisabled){",
-  "const zt={settings:{model}},bt=host,XP=quotaBlocked,X=value=>value;",
-  "const dn={},Ib=()=>({}),G=null,Ht=false,Tv=()=>null;",
-  "let{agentMode:fn,permissionProfileId:pn,shouldSendPermissionOverrides:mn}=Ib(dn),",
-  "hn=X(null),gn=G!=null&&(Ht||(zt.settings.model===`gpt-reserve`?hn!==G.model:zt.settings.model!==G.model)),",
-  "_n=Tv(),vn=X(bt===`local`&&XP),yn=null;",
-  "const submission={activeCollaborationMode:zt,agentMode:fn,resolvedHostId:bt,useAsbDirect:false};",
-  "let Zn=otherDisabled||gn||vn,Qn;",
-  "const view={submitDisabled:Zn,onSubmitLocal:null};",
-  "return view.submitDisabled;",
+  "function render(model,host,quotaReason){",
+  "let nK=host,ty=false,nQ=quotaReason;",
+  "const{activeMode:n8,modelSettings:n9}={activeMode:{settings:{model}},modelSettings:null};",
+  "let{agentMode:ov}={agentMode:\"default\"};",
+  "const submission={activeCollaborationMode:n8,agentMode:ov,resolvedHostId:nK,useAsbDirect:false};",
+  "let oF=void 0!==ty&&ty&&\"caller-disabled\";",
+  "let e2=[oF,nQ].filter(Boolean);let oJ=e2.join(\",\");",
+  "const view={submitDisabledReasons:oJ,onSubmitLocal:null};",
+  "return view.submitDisabledReasons;",
   "}",
-  "// codexComposerAdapter.CodexComposerAdapter.interruptThreadError",
+  "// CodexComposerAdapter",
   "",
 ].join("\n");
 

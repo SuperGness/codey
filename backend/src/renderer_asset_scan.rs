@@ -571,7 +571,6 @@ mod tests {
         let app_dir = temp.path().join("Codex.app");
         let matcher_a = PatchAnchorMatcher::for_script(
             r#"/*codey-renderer-patch-rules*/[{"allOf":["totalASTLRUCacheSize:","poolSize:","workerFactory:"]}]/*end-codey-renderer-patch-rules*/"#,
-            false,
         )
         .unwrap();
         let first = load_or_scan_with_matcher(&app_dir, &cache, &matcher_a).unwrap();
@@ -582,7 +581,6 @@ mod tests {
 
         let matcher_b = PatchAnchorMatcher::for_script(
             r#"/*codey-renderer-patch-rules*/[{"allOf":["totalASTLRUCacheSize:"]}]/*end-codey-renderer-patch-rules*/"#,
-            false,
         )
         .unwrap();
         let third = load_or_scan_with_matcher(&app_dir, &cache, &matcher_b).unwrap();

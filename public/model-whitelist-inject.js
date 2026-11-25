@@ -4156,9 +4156,6 @@
     const client = { hostId: "local" };
     const send = async (method, value, request) => {
       let actual = window.__codeyAppServerRequestClients?.get?.("local");
-      if (!actual && typeof window.__codeyLoadCodexRequestClientFromModule === "function") {
-        try { actual = await window.__codeyLoadCodexRequestClientFromModule(); } catch {}
-      }
       request.check();
       if (!actual) {
         if (typeof window.__codeyLoadCodexRequestClient !== "function") {
@@ -4304,20 +4301,6 @@
     requestGatePending = Promise.resolve().then(async () => {
       const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
       if (knownClient) return installRequestClientGate(knownClient);
-      // 模块级快路径：DI scope/registry 在 chunk 求值与 app 初始化后即可达，
-      // 实测约 3.5s 就能拿到 requestClient，比 React 遍历早 ~3s；未就绪或
-      // 结构缺失时抛错回落到既有路径。
-      if (typeof window.__codeyLoadCodexRequestClientFromModule === "function") {
-        try {
-          const client = await window.__codeyLoadCodexRequestClientFromModule();
-          if (disposed) throw new Error("模型请求校验已重新加载");
-          const installed = installRequestClientGate(client);
-          window.__codeyModelRequestModuleGateInstalled = true;
-          return installed;
-        } catch (error) {
-          if (disposed) throw error;
-        }
-      }
       if (typeof window.__codeyLoadCodexRequestClient !== "function"
         && typeof window.__codexSessionDeleteBridge === "function") {
         await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });

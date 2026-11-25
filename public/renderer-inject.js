@@ -11,7 +11,6 @@
   const backendHealthPath = "/backend/health";
   const accountUsagePath = "/account/usage";
   const buttonId = "codey-settings-button";
-  const buttonMeasureId = "codey-settings-button-measure";
   const accountUsageId = "codey-account-usage";
   const styleId = "codey-core-injected-style";
   const updateAvailableEvent = "codey-update-availability-changed";
@@ -91,18 +90,15 @@
     "has-data-[state=open]:opacity-100",
   ];
   const openWithinButtonAncestorClass = "has-[button[data-state=open]]:opacity-100";
-  const openWithinDirectCardClass = "card-ineZLT";
   const openWithinDynamicAncestorClasses = new Set(openWithinAncestorClasses);
   const openWithinDynamicButtonAncestorClasses = new Set([
     openWithinButtonAncestorClass,
   ]);
-  const openWithinDynamicDirectClasses = new Set([openWithinDirectCardClass]);
+  const openWithinDynamicDirectClasses = new Set();
   const openWithinHashedCardClassPattern = /^card-[A-Za-z0-9_-]{4,}$/;
   const boundStylesheetLinks = new WeakSet();
-  const openStateCssAriaAndDataStateHasPattern =
-    /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
   const openStateCssDataStateHasPattern =
-    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+    /:has\(\s*(?::is\(\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
   const openStateElements = new Set();
   const syncedOpenContainers = new Set();
 
@@ -141,13 +137,10 @@
          Codey 入口按同一套数值对齐，保证与相邻原生按钮同色同尺寸。 */
       #${buttonId} { --codey-icon-size: 16px; --codey-icon-color: currentColor; -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 12.5px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
       #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
-      #${buttonId}[data-codey-native-slot="true"], #${buttonMeasureId} { box-sizing: border-box; flex: 0 0 auto; width: 28px; height: 28px; margin: 0; color: inherit; }
-      #${buttonId}[data-codey-native-slot="true"] .codey-settings-icon { width: 16px; height: 16px; }
       #${buttonId}[data-codey-rail-slot="true"] { --codey-icon-size: 20px; box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 36px; margin: 0; border-radius: 12.5px; color: color-mix(in srgb, CanvasText 52%, transparent); }
       #${buttonId}[data-codey-rail-slot="true"] .codey-settings-icon { width: 20px; height: 20px; }
       #${buttonId}[data-codey-rail-slot="true"]:hover { color: CanvasText; }
       #${buttonId}[data-codey-rail-slot="true"]::after { top: 4px; right: 4px; }
-      #${buttonMeasureId} { display: inline-block; pointer-events: none; }
       #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
@@ -1159,31 +1152,6 @@
       }, null)?.control || null;
     if (!rightmostControl) return { header, target: header };
 
-    // Newer shells measure an invisible copy of each action row. Participate
-    // in that measurement so panel headers reserve the complete action width.
-    const slot = rightmostControl.closest('[data-test-id="header-shell-slot"]');
-    if (slot?.parentElement === header) {
-      const measureHost = [...slot.children].find((child) => child.getAttribute("aria-hidden") === "true");
-      const visibleHost = [...slot.children].find((child) => child !== measureHost && child.contains(rightmostControl));
-      const measureRow = measureHost?.firstElementChild;
-      const actionRow = visibleHost?.firstElementChild;
-      if (measureRow && actionRow && visibleMountRect(actionRow)) {
-        return { header, target: actionRow, measureRow, nativeSlot: true };
-      }
-      // Some shells measure the live content directly, without a hidden copy.
-      // There the slot holds one measured host, and the action row sits inside it.
-      const liveHost = slot.children.length === 1 ? slot.firstElementChild : null;
-      const liveRowCandidate = liveHost?.firstElementChild;
-      const liveRow = liveRowCandidate
-        && liveRowCandidate !== rightmostControl
-        && liveRowCandidate.contains(rightmostControl)
-        ? liveRowCandidate
-        : liveHost;
-      if (!measureHost && liveRow?.contains(rightmostControl) && visibleMountRect(liveRow)) {
-        return { header, target: liveRow, nativeSlot: true };
-      }
-    }
-
     let headerChild = rightmostControl;
     while (headerChild.parentElement && headerChild.parentElement !== header) {
       headerChild = headerChild.parentElement;
@@ -1246,16 +1214,6 @@
     }
     // 页面先渲染顶部、后渲染侧栏时，已挂载的顶部入口也需要迁移。
     if (document.querySelector(navigationRailSelector)) return false;
-    if (button.dataset.codeyNativeSlot === "true") {
-      const measure = document.getElementById(buttonMeasureId);
-      return parent === button.__codeyActionRow
-        && button.nextElementSibling === null
-        && !!parent.closest('[data-test-id="header-shell-slot"]')
-        && (!button.__codeyMeasureRow || (
-          measure?.parentElement === button.__codeyMeasureRow
-          && measure?.isConnected === true
-        ));
-    }
     const validParent = parent.matches?.(headerSelector);
     const anchored = button.dataset.codeyHeaderActions !== "true"
       || (
@@ -1270,11 +1228,10 @@
     const existingButton = document.getElementById(buttonId);
     if (mountedButtonIsUsable(existingButton)) return;
     const railMount = findRailFooterMount();
-    // 仅无图标栏的旧版布局使用顶部入口，侧栏重建期间等待它恢复。
+    // 仅无图标栏的窗口（如独立对话窗）使用顶部入口，侧栏重建期间等待它恢复。
     const mount = railMount || (!navigationRailSeen ? findHeaderMount() : null);
     if (!mount) {
       existingButton?.remove?.();
-      document.getElementById(buttonMeasureId)?.remove();
       return;
     }
     let button = existingButton;
@@ -1298,10 +1255,6 @@
     if (railMount) {
       button.dataset.codeyRailSlot = "true";
       delete button.dataset.codeyHeaderActions;
-      delete button.dataset.codeyNativeSlot;
-      document.getElementById(buttonMeasureId)?.remove();
-      button.__codeyActionRow = null;
-      button.__codeyMeasureRow = null;
       button.__codeyHeaderAnchor = null;
       button.__codeyRailStack = mount.target;
       button.__codeyRailAnchor = mount.before;
@@ -1320,35 +1273,11 @@
     } else {
       delete button.dataset.codeyHeaderActions;
     }
-    if (mount.nativeSlot) {
-      button.dataset.codeyNativeSlot = "true";
-      let measure = document.getElementById(buttonMeasureId);
-      if (mount.measureRow && !measure) {
-        measure = document.createElement("span");
-        measure.id = buttonMeasureId;
-        measure.setAttribute("aria-hidden", "true");
-      }
-      if (mount.measureRow) {
-        if (measure.parentElement !== mount.measureRow) mount.measureRow.appendChild(measure);
-      } else {
-        measure?.remove();
-      }
-      button.__codeyActionRow = mount.target;
-      button.__codeyMeasureRow = mount.measureRow || null;
-    } else {
-      delete button.dataset.codeyNativeSlot;
-      document.getElementById(buttonMeasureId)?.remove();
-      button.__codeyActionRow = null;
-      button.__codeyMeasureRow = null;
-    }
     if (mount.before) {
       if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
         mount.target.insertBefore(button, mount.before);
       }
-    } else if (
-      button.parentElement !== mount.target
-      || (mount.nativeSlot && button.nextElementSibling !== null)
-    ) {
+    } else if (button.parentElement !== mount.target) {
       mount.target.appendChild(button);
     }
     button.__codeyHeaderAnchor = mount.before || null;
@@ -1530,7 +1459,6 @@
       if (
         node instanceof HTMLElement
         && node.id !== buttonId
-        && node.id !== buttonMeasureId
         && node.id !== accountUsageId
       ) {
         return true;
@@ -1808,12 +1736,10 @@
     if (typeof cssText !== "string" || !cssText.includes("data-state")) {
       return cssText;
     }
-    const rewritten = cssText
-      .replace(
-        openStateCssAriaAndDataStateHasPattern,
-        `:is(:has([aria-expanded=true]),[${openWithinAttribute}])`,
-      )
-      .replace(openStateCssDataStateHasPattern, `[${openWithinAttribute}]`);
+    const rewritten = cssText.replace(
+      openStateCssDataStateHasPattern,
+      `[${openWithinAttribute}]`,
+    );
     harvestOpenWithinClassesFromText(rewritten);
     return rewritten;
   };

@@ -2,44 +2,36 @@
   window.__codeyPetControlShieldCleanup?.();
 
   const enabled = ["__CODEY_SLIM_PET__"][0] === "true";
-  // Codex renamed the pet entry points to mini; keys below cover the current
-  // mini naming, the older pets naming, and the ChatGPT-side pet manager, so
-  // any supported client build keeps the shield active.
   const petControlIds = new Set([
     "settings.mini.show",
     "settings.mini.hide",
     "settings.nav.miniAndPets",
+    "settings.overview.pets",
     "settings.personalization.mini.wake",
     "settings.personalization.mini.tuckAway",
+    "settings.appshots.alwaysSendToMini.label",
+    "settings.appshots.alwaysSendToMini.description",
+    "settings.appshots.destination.automatic.description.mini",
     "codex.profileFooter.showMini",
     "codex.profileFooter.hideMini",
+    "codex.profileFooter.showPet",
+    "codex.profileFooter.hidePet",
     "codex.command.showMiniOverlay",
     "codex.command.hideMiniOverlay",
     "codex.command.wakeMiniOverlay",
     "codex.commandDescription.showMiniOverlay",
     "codex.commandDescription.tuckAwayMiniOverlay",
+    "codex.commandMenu.miniPetSearchAlias",
     "codex.localConversation.remoteHostedPip.sendToPet",
-    "settings.appearance.pets",
-    "settings.personalization.pets",
-    "settings.pets",
-    "settings.nav.pets",
-    "settings.section.pets",
-    "settings.personalization.pets.openPet",
-    "settings.personalization.pets.tuckAwayPet",
-    "codex.profileFooter.showPet",
-    "codex.profileFooter.hidePet",
-    "codex.command.openPetOverlay",
-    "codex.command.tuckAwayPetOverlay",
   ]);
   const petControlIdPrefixes = [
     "settings.mini.",
     "settings.nav.mini",
-    "settings.personalization.mini.",
-    "settings.chatGpt.personalization.pet.",
-    "settings.appearance.pets.",
     "settings.nav.pets.",
-    "settings.personalization.pets.",
-    "settings.section.pets.",
+    "settings.personalization.mini.",
+    "settings.personalization.avatars.",
+    "settings.appshots.alwaysSendToMini.",
+    "settings.chatGpt.personalization.pet.",
     "settings.pets.",
   ];
   // Exact-match only: matching "mini" as a substring would also hide model

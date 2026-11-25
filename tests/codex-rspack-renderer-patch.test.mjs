@@ -59,7 +59,7 @@ test("rspack request client keeps route, identity and model result gates in one 
   const { logs, patch } = await installPatch();
   const source = [
     'class C{async sendRequest(e,t,n){if(null==this.dispatchMessage)throw Error("AppServerRequestClient is missing a message dispatcher");return this.enqueueRequest(e,t,n)}',
-    'enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.("mcp-request",{request:t,hostId:this.hostId,retainResponse:void 0,source:n?.source,timeoutMs:n?.timeoutMs,widget:n?.widget})},i=null){let a=1;log("mcp_request_enqueued");let{request:o,promise:l}=this.createRequest(e,t,n,i);r(o);return l}',
+    'enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.("mcp-request",{request:t,hostId:this.hostId,retainResponse:void 0,source:n?.source,timeoutMs:n?.timeoutMs,widget:n?.widget})},i=null,a){if(a?.aborted)return Promise.reject(new DOMException("App-server request cancelled","AbortError"));let s=1;log("mcp_request_enqueued");let{request:o,promise:l}=this.createRequest(e,t,n,i);r(o);return l}',
     'onResult(e,t){let r=this.requestPromises.get(e);r.resolve(t),this.emitRequestLifecycleEvent({type:"completed",hostId:this.hostId,method:r.method,id:e})}}',
   ].join("");
   const patched = patch(source);
@@ -70,11 +70,23 @@ test("rspack request client keeps route, identity and model result gates in one 
     "globalThis.__codeyModelRequestSourceGateInstalled=true",
   ]) assert.ok(patched.includes(marker), marker);
   assert.equal(patch(patched), null, "the patch is idempotent");
-  Function(patched);
+  // Pre-aborted requests reject before running route preflight.
+  let guardCalled = false;
+  globalThis.__codeyModelWhitelistPatch = {
+    guardOutgoingRequest: () => { guardCalled = true; return null; },
+  };
+  const C = Function("log", `${patched};return C`)(() => {});
+  const client = new C();
+  client.hostId = "local";
+  await assert.rejects(
+    client.enqueueRequest("model/list", {}, undefined, undefined, null, { aborted: true }),
+    /cancelled/,
+  );
+  assert.equal(guardCalled, false);
   assert.deepEqual(logs, []);
 });
 
-test("rspack hosted manager marker and completed thread reconciliation follow reversed null checks", async () => {
+test("rspack hosted manager marker follows reversed null checks", async () => {
   const { logs, patch } = await installPatch();
   const hosted = 'function E(e){let O=v.appServices.appServerManagers;if(null==O)throw Error("Desktop host did not provide its AppServerManager service");return O.dup()}';
   const hostedPatched = patch(hosted);
@@ -85,16 +97,6 @@ test("rspack hosted manager marker and completed thread reconciliation follow re
   assert.equal(connect({ appServices: { appServerManagers: { dup: () => "dup" } } })(), "dup");
   assert.equal(globalThis.__codeyAppServerManagerHosted, true);
   delete globalThis.__codeyAppServerManagerHosted;
-
-  const manager = [
-    "class M{getHostId(){return\"local\"}getConversation(e){return this.threadStore.getConversation(e)}getStreamRole(e){}updateConversationState(e,t){}getConversationStreamRevision(e){}",
-    "clear(){this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(1)}",
-    "getHasInProgressLocalConversation({exceptConversationId:e}={}){for(let t of this.threadStore.getRecentConversationIds()){if(t===e)continue;let n=this.conversations.get(t);if(null!=n&&el(n))return!0}return!1}}",
-  ].join("");
-  const managerPatched = patch(manager);
-  assert.match(managerPatched, /async codeyReconcileCompletedConversation\(/);
-  assert.match(managerPatched, /&&el\(__codeyConversation\)&&/, "the native in-progress predicate is reused");
-  Function(managerPatched);
   assert.deepEqual(logs, []);
 });
 
@@ -116,16 +118,19 @@ test("rspack service tier gates grant tiers declared by the model catalog", asyn
   assert.deepEqual(logs, []);
 });
 
-test("rspack Ultra reasoning gate accepts module-member feature ids", async () => {
+test("rspack Ultra reasoning gate unlocks custom providers from computed local flag", async () => {
   const { logs, patch } = await installPatch();
-  const source = 'const q=({includeUltraReasoningEffort:l,isCustomModelProvider:i,limit:u,modelCatalogPath:c},{get:v,queryClient:I})=>{let k=null!=c,O=l&&v(b.JW,"1186680773");return{queryKey:[k],ultra:O}};';
+  const source = 'const q=({hostId:l,includeUltraReasoningEffort:r=!0,limit:i,teamCatalog:d},{get:h,queryClient:g})=>{let E=(0,p.cc)(l,d),W=r&&h(M.JW,"1186680773");return{queryKey:[l],select:()=>({includeUltraReasoningEffort:W,isCustomModelProvider:E})}};';
   const patched = patch(source);
-  assert.match(patched, /O=l&&\(i\|\|v\(b\.JW,"1186680773"\)\)/);
-  const query = Function("b", `${patched};return q`)({ JW: "gate" });
+  assert.match(patched, /W=r&&\(E\|\|h\(M\.JW,"1186680773"\)\)/);
+  const query = Function("p", "M", `${patched};return q`)(
+    { cc: (_host, custom) => Boolean(custom) },
+    { JW: "gate" },
+  );
   const get = () => false;
-  assert.equal(query({ includeUltraReasoningEffort: true, isCustomModelProvider: true }, { get }).ultra, true);
-  assert.equal(query({ includeUltraReasoningEffort: true, isCustomModelProvider: false }, { get }).ultra, false);
-  assert.equal(query({ includeUltraReasoningEffort: false, isCustomModelProvider: true }, { get }).ultra, false);
+  assert.equal(query({ hostId: "local", includeUltraReasoningEffort: true, teamCatalog: true }, { get }).select().includeUltraReasoningEffort, true);
+  assert.equal(query({ hostId: "local", includeUltraReasoningEffort: true, teamCatalog: false }, { get }).select().includeUltraReasoningEffort, false);
+  assert.equal(query({ hostId: "local", includeUltraReasoningEffort: false, teamCatalog: true }, { get }).select().includeUltraReasoningEffort, false);
   assert.deepEqual(logs, []);
 });
 
@@ -151,22 +156,7 @@ test("rspack telemetry patches skip heartbeat snapshots and interaction sampling
   assert.deepEqual(logs, []);
 });
 
-test("rspack checkout prewarm and avatar overlay prewarm stay off until shown", async () => {
-  const { logs, patch } = await installPatch({ disablePet: true });
-  const pricing = 'function ue(K,Z,q,et,Q,ee,j,P,y){let m;m=!(0,P.$t)()&&"chatgpt"===K&&!Z&&null!=q&&!et&&Q?.structure==="personal"&&(0,y.XM)(ee,j,{disableExposureLog:!0}).get("use_embedded_checkout",!1)?function({currentPlan:e,url:t}){return new URL(t).href}:null;return{forcePricingRefreshInBackground:!0,search:m}}';
-  const credit = 'function U(H,F){let c,g,u={useLayoutEffect(){}};if((0,u.useLayoutEffect)(c,g),!H&&(!F||!({get:()=>F}).get("use_embedded_credit_checkout",!1)))return null;return{isPrewarm:!H}}';
-  const patched = patch(`${pricing}${credit}`);
-  const pricingHook = Function(`${patched};return ue`)();
-  const eligible = ["chatgpt", false, {}, false, { structure: "personal" }, null, null, { $t: () => false }, { XM: () => ({ get: () => true }) }];
-  assert.equal(pricingHook(...eligible).search, null, "no hidden pricing page is preloaded");
-  const creditHook = Function(`${patched};return U`)();
-  assert.equal(creditHook(false, true), null, "no hidden credit page is mounted");
-  assert.deepEqual({ ...creditHook(true, true) }, { isPrewarm: false }, "a presented credit page still loads");
 
-  const runtime = '(0,u.useEffect)(()=>{l||t0.O1.dispatchMessage("electron-avatar-overlay-restore-ready",{onDemandEnabled:k,shouldPrewarmAvatarOverlay:t&&eP})},[k,t,l,eP]);';
-  assert.match(patch(runtime), /\{onDemandEnabled:k,shouldPrewarmAvatarOverlay:!1\}/);
-  assert.deepEqual(logs, []);
-});
 
 test("rspack draft defaults patch the split factory and every settings hook chunk", async () => {
   const { logs, patch } = await installPatch();
@@ -200,11 +190,6 @@ test("rspack draft defaults patch the split factory and every settings hook chun
 test("unrelated rspack chunks are skipped by the patch anchors", async () => {
   const { logs, patch } = await installPatch();
   assert.equal(patch('export const __rspack_esm_id=1;export const __webpack_modules__={a(e,t){t.A="icon"}};'), null);
-  assert.equal(
-    patch('(0,u.useEffect)(()=>{l||t0.O1.dispatchMessage("electron-avatar-overlay-restore-ready",{onDemandEnabled:k,shouldPrewarmAvatarOverlay:t&&eP})},[k,t,l,eP]);'),
-    null,
-    "pet-only anchors stay inactive when pet slimming is disabled",
-  );
   assert.deepEqual(logs, []);
 });
 
@@ -213,7 +198,6 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
   const mainCss = [
     ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=open]) *){opacity:1}",
     ".group-has-\\[\\[data-state\\=open\\]\\]\\/project-source\\:opacity-100:is(:where(.group\\/project-source):has([data-state=open]) *){opacity:1}",
-    ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=true],[data-state=open]) *){opacity:1}",
     ".has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:has([data-state=open]){opacity:1}",
     ".has-\\[button\\[data-state\\=open\\]\\]\\:opacity-100:has(:is(button[data-state=open])){opacity:1}",
   ].join("");
@@ -222,10 +206,6 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
   assert.doesNotMatch(patchedMain, /:has\([^)]*data-state/);
   assert.match(patchedMain, /:where\(\.group\)\[data-codey-open-within\]/);
   assert.match(patchedMain, /:where\(\.group\\\/project-source\)\[data-codey-open-within\]/);
-  assert.match(
-    patchedMain,
-    /:where\(\.group\):is\(:has\(\[aria-expanded=true\]\),\[data-codey-open-within\]\)/,
-  );
   assert.match(patchedMain, /\.has-\\\[\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
   assert.match(patchedMain, /\.has-\\\[button\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
   assert.match(patchedMain, /:root\{--codey-css-open-state-has-patched:1\}/);
@@ -233,15 +213,6 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
     patch(patchedMain, "app://-/assets/async/e77f816560c6.css"),
     null,
     "patched stylesheet is idempotent",
-  );
-
-  const cardCss = ":where(.card-ineZLT):has(>[data-state=open]),:where(.card-ineZLT>*):has(>[data-state=open]){opacity:1!important}";
-  const patchedCard = patch(cardCss, "app://-/assets/async/166572aa20c2.css");
-  assert.ok(patchedCard);
-  assert.doesNotMatch(patchedCard, /:has\([^)]*data-state/);
-  assert.match(
-    patchedCard,
-    /:where\(\.card-ineZLT\)\[data-codey-open-within\],:where\(\.card-ineZLT>\*\)\[data-codey-open-within\]/,
   );
 
   assert.equal(
@@ -334,18 +305,68 @@ test("rspack performance gates cap pierre workers and skip orbit preload, route 
   );
   assert.equal(prefetchCalls, 0);
 
-  // 4. Sentry LoAF + longtask observer: neither PerformanceObserver nor nZ("longtask") runs, while sibling steps still execute.
-  const sentryUrl = "app://-/assets/async/907538.0572f09d40.js";
-  const sentrySource = 'function setup(){let ran=[],u=true,l=true,w={PerformanceObserver:class{constructor(){ran.push("po")}observe(){ran.push("observe")}}},PerformanceObserver={supportedEntryTypes:["long-animation-frame"]},e7="op";nZ=(kind)=>{ran.push(kind)};return o&&n7()&&eC()&&nZ("element"),u&&w.PerformanceObserver&&PerformanceObserver.supportedEntryTypes&&PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")?new PerformanceObserver(e=>{let t=tk();if(t)for(let n of e.getEntries()){n6(t,0,0,{attributes:{[e7]:"auto.ui.browser.metrics"}})}}).observe({type:"long-animation-frame",buffered:!0}):l&&nZ("longtask",({entries:e})=>{let t=tk();if(!t)return;let{op:n,start_timestamp:r}=tA(t);for(let i of e){let a=i.duration;n6(t,0,a,{name:"Main UI thread blocked",op:"ui.long-task",attributes:{[e7]:"auto.ui.browser.metrics"}})}}),_&&ran.push("after"),ran}';
-  const patchedSentry = patch(sentrySource, sentryUrl);
-  assert.ok(patchedSentry?.includes("/*codey-sentry-loaf-skip*/"));
-  assert.equal(patch(patchedSentry, sentryUrl), null);
-  const sentryRan = Function("o", "_", "n7", "eC", "tk", "tA", "n6", `${patchedSentry};return setup()`)(
-    true, true, () => true, () => true, () => null, () => ({}), () => {},
+  // 4. Orbit navigation startup prefetch: effect body becomes a no-op while preserving hook slots.
+  const orbitNavSource = 'function e_(){ea.x.prefetch(),function(){for(let e of(O.B.prefetch(),["general-settings","appearance","keyboard-shortcuts"]))(0,en.OU)(e).catch(()=>void 0);Promise.all([t.e(1)]).then(t.bind(t,"njHN")).catch(()=>void 0)}()}function run(eU,l,c,b,n,V){let O,H;let eZ=(0,l._U)(c.G,{name:"orbit.navigation"})?.isCapable;eU[18]!==eZ?(O=()=>{eZ&&(b.$O.prefetch(),n.e(271496).then(n.bind(n,"gjBn")).catch(()=>void 0),(0,V.Wy)().catch(()=>void 0))},H=[eZ],eU[18]=eZ,eU[19]=O,eU[20]=H):(O=eU[19],H=eU[20]);O();return H}';
+  const patchedOrbitNav = patch(orbitNavSource, "app://-/assets/async/554595.c9f05dac4c.js");
+  assert.ok(patchedOrbitNav?.includes("/*codey-orbit-nav-prefetch-skip*/"));
+  assert.ok(patchedOrbitNav?.includes("/*codey-startup-prefetch-skip*/"));
+  assert.equal(patch(patchedOrbitNav, "app://-/assets/async/554595.c9f05dac4c.js"), null);
+  let orbitNavCalls = 0;
+  const orbitDeps = Function(`${patchedOrbitNav};return run`)()(
+    Array(25).fill(Symbol.for("react.memo_cache_sentinel")),
+    { _U: () => ({ isCapable: true }) },
+    { G: {} },
+    { $O: { prefetch() { orbitNavCalls += 1; } } },
+    { e() { orbitNavCalls += 1; return Promise.resolve(); }, bind() {} },
+    { Wy: async () => { orbitNavCalls += 1; } },
   );
-  assert.deepEqual(sentryRan, ["element", "after"]);
+  assert.equal(orbitNavCalls, 0);
+  assert.deepEqual(orbitDeps, [true]);
 
-  // 5. Interaction LoAF + longtask observers: ensureObserver returns false cleanly.
+  // 5. Frame gap / event observer (jgoj): Z() returns inert handle without starting rAF or PerformanceObserver.
+  const frameGapUrl = "app://-/assets/async/366996.9782070574.js";
+  const frameGapSource = 'let i,r,o,a=new Set;function s(e,t){return new PerformanceObserver(t)}function l(e){for(let t of e)if(t instanceof PerformanceEventTiming&&t.interactionId>0)return}function c(){}function u(){r=requestAnimationFrame(u)}const mod={R:s,Z:function(e){return 0===a.size&&(i=s("event",l),document.addEventListener("visibilitychange",u),u()),a.add(e),{eventsSupported:null!=i,stop:()=>{a.has(e)&&(null!=i&&l(i.takeRecords()),a.delete(e),0===a.size&&(i?.disconnect(),i=void 0,document.removeEventListener("visibilitychange",u),c()))}}}};const cfg={durationThreshold:16};';
+  const patchedFrameGap = patch(frameGapSource, frameGapUrl);
+  assert.ok(patchedFrameGap?.includes("/*codey-frame-gap-observer-skip*/"));
+  assert.equal(patch(patchedFrameGap, frameGapUrl), null);
+  let rafCalls = 0;
+  let poCalls = 0;
+  const frameGapMod = Function("PerformanceObserver", "requestAnimationFrame", "document", `${patchedFrameGap};return mod`)(
+    class { constructor() { poCalls += 1; } },
+    () => { rafCalls += 1; return 1; },
+    { addEventListener() { rafCalls += 1; }, removeEventListener() {} },
+  );
+  const handle = frameGapMod.Z({ event() {}, frame() {} });
+  assert.equal(handle.eventsSupported, false);
+  assert.doesNotThrow(() => handle.stop());
+  assert.equal(rafCalls, 0);
+  assert.equal(poCalls, 0);
+
+  // 6. Startup event observer (HPUJ): skips 30s 16ms PerformanceObserver while preserving deadline lifecycle.
+  const startupEventSource = 'class Startup{constructor(){this.interactions={supported:!1};try{"u">typeof PerformanceObserver&&PerformanceObserver.supportedEntryTypes?.includes("event")&&(this.eventObserver=new PerformanceObserver(e=>this.addEvents(e.getEntries())),this.eventObserver.observe({type:"event",buffered:!0,durationThreshold:16}),this.interactions.supported=!0)}catch{this.eventObserver?.disconnect(),this.eventObserver=void 0}this.deadline=1}}';
+  const patchedStartupEvent = patch(startupEventSource, frameGapUrl);
+  assert.ok(patchedStartupEvent?.includes("/*codey-startup-event-observer-skip*/"));
+  assert.equal(patch(patchedStartupEvent, frameGapUrl), null);
+  let startupPoCalls = 0;
+  const Startup = Function("PerformanceObserver", `${patchedStartupEvent};return Startup`)(
+    Object.assign(class { constructor() { startupPoCalls += 1; } observe() {} }, { supportedEntryTypes: ["event"] }),
+  );
+  const startup = new Startup();
+  assert.equal(startup.deadline, 1);
+  assert.equal(startup.interactions.supported, false);
+  assert.equal(startupPoCalls, 0);
+
+  // 7. Windows Sentry EventLoopBlockRenderer hang detection: skips 500ms IPC heartbeat integration.
+  const hangUrl = "app://-/assets/async/49792.d8d33ace73.js";
+  const hangSource = 'function init(e,added){let n;e.rendererHangDetectionEnabled&&function(i){added.push(i.name)}((n=500,{name:"EventLoopBlockRenderer",setup(){}}))}';
+  const patchedHang = patch(hangSource, hangUrl);
+  assert.ok(patchedHang?.includes("/*codey-hang-detection-skip*/"));
+  assert.equal(patch(patchedHang, hangUrl), null);
+  const addedIntegrations = [];
+  Function(`${patchedHang};return init`)()({ rendererHangDetectionEnabled: true }, addedIntegrations);
+  assert.deepEqual(addedIntegrations, []);
+
+  // 8. Interaction LoAF + longtask observers: ensureObserver returns false cleanly.
   const interactionUrl = "app://-/assets/async/956370.aff5cce818.js";
   const interactionSource = 'class Tracker{start(){let n=this.ensureObserver("longtask"),i=this.ensureObserver("long-animation-frame");return{longAnimationFrameSupported:i,longTaskSupported:n}}ensureObserver(e){try{if(!this.isSupported(e))return!1}catch{return!1}if(null!=("longtask"===e?this.longTaskObserver:this.longAnimationFrameObserver))return!0;try{let t="longtask"===e?this.longTaskEntries:this.longAnimationFrameEntries,n=this.createObserver(e,e=>{t.push(...e)});return n.observe({buffered:!0,type:e}),"longtask"===e?this.longTaskObserver=n:this.longAnimationFrameObserver=n,!0}catch{return!1}}}';
   const patchedInteraction = patch(interactionSource, interactionUrl);
@@ -359,13 +380,13 @@ test("rspack performance gates cap pierre workers and skip orbit preload, route 
   assert.deepEqual(tracker.start(), { longAnimationFrameSupported: false, longTaskSupported: false });
   assert.equal(createdObservers, 0);
 
-  // 6. Codex pages pending observation sampler: 10s interval & doc listeners skipped, sendHeartbeat preserved.
+  // 9. Codex pages pending observation sampler: 10s interval & doc listeners skipped, sendHeartbeat preserved.
   const pagesSource = 'function startObs(s,e,C){let r,n,l=()=>{},u=()=>{},d=()=>{};return n=C,s.add(n),1===s.size&&(r=setInterval(()=>{for(let e of[...s])e.sample()},1e4),document.addEventListener("visibilitychange",l),document.addEventListener("freeze",u),window.addEventListener("pagehide",d,!0)),e.count("codex_pages",`${p}_started`)}function afterObs(){return {p_pending_age_ms:"pending_age_ms",m:"_pending_observations"}}';
   const pagesWithHeartbeat = `${pagesSource}class Sync{sendHeartbeat=()=>{this.metrics.count("codex_pages","edit_pending_observations",{},0)}}`;
-  const patchedPages = patch(pagesWithHeartbeat, sentryUrl);
+  const patchedPages = patch(pagesWithHeartbeat, hangUrl);
   assert.ok(patchedPages?.includes("/*codey-pending-observations-sampler-skip*/"));
   assert.match(patchedPages, /sendHeartbeat=\(\)=>\{this\.metrics\.count/);
-  assert.equal(patch(patchedPages, sentryUrl), null);
+  assert.equal(patch(patchedPages, hangUrl), null);
   let intervals = 0;
   let listeners = 0;
   const events = [];

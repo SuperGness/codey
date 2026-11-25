@@ -36,20 +36,6 @@ use cache::{CACHE_DIR_NAME, CachedAsset, PatchCache, StoredPatch};
 
 /// 补丁脚本注入页面后暴露的纯函数入口：`(url, source) => patched | null`。
 const RENDERER_ASSET_PATCH_SCRIPT: &str = include_str!("renderer_asset_patch.js");
-/// 需要改写的脚本名前缀，与页面侧 isCodexRendererAssetUrl 的名单保持一致。
-const PATCHABLE_ASSET_PREFIXES: [&str; 9] = [
-    "app-initial",
-    "app-primary",
-    "app-shared",
-    "codex-composer-adapter",
-    "initialize-app-host-services",
-    "renderer-app-server-managers",
-    "send-follow-up-message",
-    "start-turn",
-    "webview-page",
-];
-/// 仅在关闭宠物时改写的脚本：设置页预览资源，以及决定是否预热隐藏浮窗的运行时。
-const PET_ASSET_PREFIXES: [&str; 2] = ["pets-settings", "app-runtime"];
 /// CDP Fetch 的通配符不支持字符类；数字 chunk 先宽匹配，再在请求处理时严格筛选。
 const NUMERIC_ASSET_URL_PATTERN: &str = "app://*/assets/?*.js*";
 /// 带内容哈希的样式表资源；扫描未完成时宽匹配，请求处理时按哈希名严格筛选。
@@ -80,12 +66,9 @@ fn service_slot() -> &'static Mutex<Option<ServiceHandle>> {
     SERVICE.get_or_init(|| Mutex::new(None))
 }
 
-/// 补丁脚本注入页面用的完整脚本：先放选项全局，再定义入口。
-pub(crate) fn renderer_asset_patch_document_script(disable_pet: bool) -> String {
-    let options = json!({ "disablePet": disable_pet });
-    format!(
-        "globalThis.__CODEY_RENDERER_PATCH_OPTIONS__ = {options};\n{RENDERER_ASSET_PATCH_SCRIPT}"
-    )
+/// 补丁脚本注入页面用的完整脚本。
+pub(crate) fn renderer_asset_patch_document_script() -> &'static str {
+    RENDERER_ASSET_PATCH_SCRIPT
 }
 
 struct ServiceHandle {
@@ -201,7 +184,7 @@ struct ServiceContext {
 
 impl ServiceContext {
     fn new(disable_pet: bool, cache_dir: PathBuf) -> Self {
-        let install_script: Arc<str> = Arc::from(renderer_asset_patch_document_script(disable_pet));
+        let install_script: Arc<str> = Arc::from(renderer_asset_patch_document_script());
         Self {
             cache: PatchCache::new(cache_dir, &install_script),
             install_script,
@@ -210,7 +193,7 @@ impl ServiceContext {
             codex_home: None,
             selected_pet: tokio::sync::Mutex::new(None),
             pending_scan: Mutex::new(None),
-            matcher: PatchAnchorMatcher::for_script(RENDERER_ASSET_PATCH_SCRIPT, disable_pet)
+            matcher: PatchAnchorMatcher::for_script(RENDERER_ASSET_PATCH_SCRIPT)
                 .expect("renderer_asset_patch.js 内置复合前置规则表无效"),
             pages: Mutex::new(HashMap::new()),
             permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_PATCHES),
@@ -311,31 +294,17 @@ fn default_cache_dir() -> PathBuf {
     codey_runtime_core::paths::default_app_state_dir().join(CACHE_DIR_NAME)
 }
 
-/// 只在请求阶段拦截名单内的脚本；未命中缓存的请求再要求暂停在响应阶段。
-/// 数字 chunk 有扫描结果时只拦截候选地址，否则按通配地址拦截再在正文上预筛。
+/// 只在请求阶段拦截可改写的数字 chunk 与带哈希样式表；有扫描结果时只拦截精确候选地址，
+/// 否则按通配地址拦截再在正文上预筛。开启宠物精简时额外拦截宠物精灵图。
 fn fetch_patterns(
     disable_pet: bool,
     scan: Option<&crate::renderer_asset_scan::AssetScan>,
 ) -> Value {
-    let pet: &[&str] = if disable_pet {
-        &PET_ASSET_PREFIXES
-    } else {
-        &[]
-    };
-    let mut patterns: Vec<Value> = PATCHABLE_ASSET_PREFIXES
-        .iter()
-        .chain(pet)
-        .map(|prefix| {
-            json!({
-                "urlPattern": format!("app://*/assets/{prefix}*"),
-                "resourceType": "Script",
-                "requestStage": "Request",
-            })
-        })
-        .collect();
-    match scan {
-        Some(scan) => {
-            patterns.extend(scan.candidates.iter().map(|path| {
+    let mut patterns: Vec<Value> = match scan {
+        Some(scan) => scan
+            .candidates
+            .iter()
+            .map(|path| {
                 let resource_type = if path.ends_with(".css") {
                     "Stylesheet"
                 } else {
@@ -346,21 +315,21 @@ fn fetch_patterns(
                     "resourceType": resource_type,
                     "requestStage": "Request",
                 })
-            }));
-        }
-        None => {
-            patterns.push(json!({
+            })
+            .collect(),
+        None => vec![
+            json!({
                 "urlPattern": NUMERIC_ASSET_URL_PATTERN,
                 "resourceType": "Script",
                 "requestStage": "Request",
-            }));
-            patterns.push(json!({
+            }),
+            json!({
                 "urlPattern": CSS_ASSET_URL_PATTERN,
                 "resourceType": "Stylesheet",
                 "requestStage": "Request",
-            }));
-        }
-    }
+            }),
+        ],
+    };
     if disable_pet {
         // Codex 以图片元素解码精灵图。
         patterns.push(json!({
@@ -443,9 +412,8 @@ async fn selected_pet_id(context: &ServiceContext) -> String {
     }
 }
 
-/// 识别可改写的脚本 URL。语义文件名沿用旧版规则；数字 chunk 只接受根资源目录
-/// 或 async 子目录下、数字 id 点 8 至 32 位十六进制哈希的 JavaScript。
-fn is_patchable_asset_url(url: &str, disable_pet: bool) -> bool {
+/// 识别可改写的资产 URL：根资源目录或 async 子目录下带内容哈希的数字 chunk JS 与样式表。
+fn is_patchable_asset_url(url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
         return false;
     };
@@ -453,16 +421,13 @@ fn is_patchable_asset_url(url: &str, disable_pet: bool) -> bool {
         return false;
     }
     let path = url.path();
-    if let Some(name) = path.strip_prefix("/assets/async/") {
-        return numeric_asset_name(name) || css_asset_name(name);
-    }
-    let Some(name) = path.strip_prefix("/assets/") else {
+    let Some(name) = path
+        .strip_prefix("/assets/async/")
+        .or_else(|| path.strip_prefix("/assets/"))
+    else {
         return false;
     };
-    numeric_asset_name(name)
-        || css_asset_name(name)
-        || named_asset_name(name, &PATCHABLE_ASSET_PREFIXES)
-        || (disable_pet && named_asset_name(name, &PET_ASSET_PREFIXES))
+    numeric_asset_name(name) || css_asset_name(name)
 }
 
 pub(crate) fn numeric_asset_name(name: &str) -> bool {
@@ -492,19 +457,6 @@ pub(crate) fn css_asset_name(name: &str) -> bool {
             (8..=32).contains(&segment.len())
                 && segment.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
-}
-
-fn named_asset_name(name: &str, prefixes: &[&str]) -> bool {
-    let Some(stem) = [".js", ".mjs", ".cjs"]
-        .iter()
-        .find_map(|extension| name.strip_suffix(extension))
-    else {
-        return false;
-    };
-    prefixes.iter().any(|prefix| {
-        stem.strip_prefix(prefix)
-            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(['~', '-']))
-    })
 }
 
 type CommandResult = Result<Value, String>;
@@ -921,7 +873,7 @@ async fn on_request_paused(
         }
         return;
     }
-    if !is_patchable_asset_url(url, context.disable_pet) {
+    if !is_patchable_asset_url(url) {
         pass_through();
         return;
     }

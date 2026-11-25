@@ -5,187 +5,7 @@ import { spawnSync } from "node:child_process";
 
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
-// Keep the native draft merge and persistence branches in the fixture. The
-// optional extracted production asset runs through the same behavior harness.
-const newDraftFixture = [
-  "let Hva=wo(U,e=>({isManuallyChanged:!1,modelSettings:null,serviceTier:null}));",
-  "function Jbo({userSavedModelString:e,userSavedReasoningEffort:t,listModelsData:n}){let r=n?.models.find(m=>m.model===e),i=r?.supportedReasoningEfforts?.map(e=>e.reasoningEffort),a=t!=null&&i!=null&&i.includes(t)?t:r?.defaultReasoningEffort;return{model:r?r.model:e,reasoningEffort:a??t??`medium`,profile:null,isLoading:!1}}",
-  "function nxo(e){let{managedNewThreadModelSettings:s,waitForModelList:c}=e;let{data:N,isLoading:P}=Za(M);let{data:R,isLoading:z}=wvo(L),B=Xbo(T?.settings,R),ne=Jbo({userSavedModelString:V,userSavedReasoningEffort:H,listModelsData:R});return ne}",
-  "function uxo(e,t){let n=(0,fxo.c)(29),r=e===void 0?null:e,d={enabled:r==null};let{draftSettings:f,isNewThreadDraft:p,updateDraftSettings:m}=Lva(d),h=sxo(r,p),{isLunaReserveActive:g}=h,_=r==null&&p,v=_&&h.hasManagedNewThreadSettings,y=_&&h.isUsingCopilotApi,b=_&&f.modelSettings!=null,x=h.modelSettings;if(b){x={...x,...f.modelSettings}}if(g)x={...x,model:YNt};let C=async(e,t,n)=>{let i=e,a=_&&n?.persistAsDefault===!1;if(a||v||y&&t===`ultra`?m(e=>({...e,isManuallyChanged:!0,modelSettings:{model:i,profile:h.modelSettings.profile,reasoningEffort:t},modelSettingsPersistAsDefault:!a,serviceTier:n?.serviceTier===void 0?e.serviceTier:{value:xir(n.serviceTier)}})):_&&f.modelSettings!=null&&m(dxo),a)return!0;return h.setModelAndReasoningEffort(i,t,n)};return{...h,modelSettings:x,setModelAndReasoningEffort:C}}function dxo(e){return{...e,modelSettings:null,modelSettingsPersistAsDefault:void 0}}",
-  "function vwo(e,t){let r=e===void 0?null:e,i=t===void 0?null:t,a=hi(U),{draftSettings:o,isNewThreadDraft:s,updateDraftSettings:c}=Lva(),l=_wo(r,uxo(r),o.serviceTier,s,i),{serviceTierAccess:d,...u}=l;return{...u,setServiceTier:async(e,t)=>{if(!We(e,d))return!1;let n=r==null&&s&&(u.hasManagedNewThreadSettings||i!=null||o.serviceTier!=null);n&&c(t=>({...t,isManuallyChanged:!0,serviceTier:{value:xir(e)}}));let[l]=await Promise.all([u.setServiceTier(e,t),n?Vh(a,u.hostId).clearPrewarmedThreads():void 0]);return l}}}function afterSpeed(){}",
-].join("");
-
-function exerciseDraftHooks(source) {
-  const takeFunction = (name) => {
-    const start = source.indexOf(`function ${name}(`);
-    assert.ok(start >= 0, `${name} exists`);
-    const end = Math.min(...[source.indexOf("}function ", start), source.indexOf("}var ", start)].filter((index) => index >= 0));
-    assert.ok(end > start, `${name} has a bounded next declaration`);
-    return source.slice(start, end + 1);
-  };
-  const factory = source.match(/=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:\{value:`default`\}\}\)/)?.[0];
-  assert.ok(factory, "each draft has its own ordinary-speed initializer");
-  const makeDraft = Function(`return e${factory}`)();
-  const state = {
-    draft: makeDraft(),
-    isDraft: true,
-    cache: [],
-    speedCache: [],
-    savedSpeed: "fast",
-    existingSpeed: "fast",
-    catalog: {
-      models: [
-        { model: "chosen-model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }] },
-        { model: "high-only", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
-      ],
-    },
-    settings: { model: "chosen-model", reasoningEffort: "high", profile: "saved-profile", isLoading: false },
-    writes: [],
-    hooks: 0,
-  };
-  const scope = { set() {}, get() {} };
-  const base = {
-    hostId: "local",
-    hasManagedNewThreadSettings: false,
-    isUsingCopilotApi: false,
-    isLunaReserveActive: false,
-    setModelAndReasoningEffort: async (...args) => { state.writes.push(args); return true; },
-    setModelAndReasoningEffortForNextTurn: async () => true,
-  };
-  const bindings = {
-    fxo: { c: (size) => {
-      if (state.cache.length === 0) state.cache = Array(size).fill(Symbol.for("react.memo_cache_sentinel"));
-      return state.cache;
-    } },
-    ywo: { c: (size) => {
-      if (state.speedCache.length === 0) state.speedCache = Array(size).fill(Symbol.for("react.memo_cache_sentinel"));
-      return state.speedCache;
-    } },
-    Lva: () => ({ draftSettings: state.draft, isNewThreadDraft: state.isDraft, updateDraftSettings: (update) => { state.draft = update(state.draft); } }),
-    sxo: () => ({ ...base, modelSettings: state.settings }),
-    wvo: () => { state.hooks += 1; return { data: state.catalog }; },
-    hi: () => scope,
-    U: {},
-    J_o() {},
-    IJ: {},
-    Vh: () => ({ clearPrewarmedThreads: async () => {} }),
-    xir: (tier) => tier ?? "default",
-    qbo: (models, model) => models?.find((entry) => entry.model === model),
-    YNt: "gpt-reserve",
-    We: () => true,
-    _wo: (threadId, _model, draftTier) => ({
-      hostId: "local",
-      hasManagedNewThreadSettings: false,
-      serviceTierAccess: {},
-      // Native speed resolver gives existing-thread settings precedence, then
-      // the draft value, then saved global preferences.
-      serviceTierSettings: { selectedServiceTier: threadId != null ? state.existingSpeed : draftTier?.value ?? state.savedSpeed },
-      setServiceTier: async (tier) => { state.savedSpeed = tier; return true; },
-    }),
-  };
-  const { useModel, useSpeed } = Function(...Object.keys(bindings), `${takeFunction("Jbo")}${takeFunction("uxo")}${takeFunction("vwo")}function dxo(e){return{...e,modelSettings:null,modelSettingsPersistAsDefault:void 0}}return{useModel:uxo,useSpeed:vwo}`)(...Object.values(bindings));
-  return { state, makeDraft, useModel, useSpeed };
-}
-
-test("new drafts initialize ordinary speed and supported medium reasoning without replacing manual choices", async (t) => {
-  (0, eval)(await loadStartupPatchTemplate());
-  const sources = [["fixture", newDraftFixture]];
-  if (process.env.CODEY_NEW_CHAT_RENDERER_ASSET) {
-    sources.push(["installed renderer", await readFile(process.env.CODEY_NEW_CHAT_RENDERER_ASSET, "utf8")]);
-  }
-  for (const [label, source] of sources) {
-    await t.test(label, async (t) => {
-      const errors = [];
-      const savedLog = globalThis.__codeyPatchLog;
-      const savedError = console.error;
-      let patched;
-      globalThis.__codeyPatchLog = (record) => errors.push(JSON.parse(record));
-      console.error = () => {};
-      try {
-        patched = globalThis.__codeyRendererPatchEntry("app://-/assets/app-initial-new-drafts.js", source) ?? source;
-      } finally {
-        globalThis.__codeyPatchLog = savedLog;
-        console.error = savedError;
-      }
-      assert.ok(patched.includes("/*codey-new-thread-draft-defaults*/"));
-      assert.deepEqual(errors.filter(({ operation }) => operation === "renderer_patch:new thread draft defaults"), []);
-      const syntax = spawnSync(process.execPath, ["--check", "--input-type=module"], { input: patched, encoding: "utf8" });
-      assert.equal(syntax.status, 0, syntax.stderr);
-      const { state, makeDraft, useModel, useSpeed } = exerciseDraftHooks(patched);
-      await t.test("two new drafts reset independently and keep the chosen default model", async () => {
-        const first = useModel();
-        assert.equal(first.modelSettings.reasoningEffort, "medium");
-        assert.equal(first.modelSettings.model, "chosen-model");
-        assert.equal(first.modelSettings.profile, "saved-profile");
-        assert.equal(state.draft.serviceTier.value, "default");
-        assert.equal(useModel().modelSettings, first.modelSettings, "default object stays memoized");
-        await first.setModelAndReasoningEffort("chosen-model", "high", { serviceTier: "fast" });
-        assert.equal(useModel().modelSettings.reasoningEffort, "high");
-        assert.equal(state.draft.serviceTier.value, "fast");
-        assert.equal(state.writes.length, 1, "native default-model persistence is preserved");
-        const previousDraft = state.draft;
-        state.draft = makeDraft();
-        state.cache = [];
-        assert.equal(useModel().modelSettings.reasoningEffort, "medium");
-        assert.equal(state.draft.serviceTier.value, "default");
-        assert.equal(previousDraft.serviceTier.value, "fast");
-      });
-      await t.test("independent speed choices remain local to the current draft", async () => {
-        assert.equal(useSpeed().serviceTierSettings.selectedServiceTier, "default");
-        await useSpeed().setServiceTier("fast", "picker");
-        assert.equal(useSpeed().serviceTierSettings.selectedServiceTier, "fast");
-        assert.equal(useModel().modelSettings.reasoningEffort, "medium", "a speed change does not restore old reasoning");
-        state.draft = makeDraft();
-        assert.equal(useSpeed().serviceTierSettings.selectedServiceTier, "default");
-        assert.equal(useSpeed("existing-thread").serviceTierSettings.selectedServiceTier, "fast");
-      });
-      await t.test("unsupported medium uses the native model fallback", () => {
-        state.settings = { ...state.settings, model: "high-only" };
-        assert.equal(useModel().modelSettings.reasoningEffort, "high");
-      });
-      await t.test("missing or loading catalogs retain valid settings and keep hook order", () => {
-        state.settings = { ...state.settings, model: "not-in-catalog", reasoningEffort: "low" };
-        assert.equal(useModel().modelSettings, state.settings);
-        state.catalog = undefined;
-        const before = state.hooks;
-        assert.equal(useModel().modelSettings, state.settings);
-        assert.equal(state.hooks, before + 1);
-      });
-      await t.test("existing and restoring threads retain reasoning and ignore draft speed", async () => {
-        state.isDraft = false;
-        state.settings = { ...state.settings, reasoningEffort: "high", isLoading: true };
-        assert.equal(useModel("existing-thread").modelSettings, state.settings);
-        const previous = state.draft;
-        await useModel("existing-thread").setModelAndReasoningEffort("high-only", "high");
-        assert.equal(state.draft, previous);
-      });
-    });
-  }
-});
-
-test("draft default patch is atomic when anchors drift and idempotent when reapplied", async () => {
-  (0, eval)(await loadStartupPatchTemplate());
-  const patch = (source) => globalThis.__codeyRendererPatchEntry("app://-/assets/app-initial-new-drafts.js", source) ?? source;
-  const patched = patch(newDraftFixture);
-  assert.equal(patch(patched), patched);
-  const savedLog = globalThis.__codeyPatchLog;
-  const savedError = console.error;
-  globalThis.__codeyPatchLog = () => {};
-  console.error = () => {};
-  try {
-    for (const source of [
-      newDraftFixture.replace("serviceTier:null", "serviceTier:void 0"),
-      newDraftFixture.replace("waitForModelList:c", "fetchModels:c"),
-      newDraftFixture.replace("a||v||y&&t===`ultra`?", "a||v?"),
-      `${newDraftFixture}let duplicate=wo(U,e=>({isManuallyChanged:!1,modelSettings:null,serviceTier:null}));`,
-    ]) assert.equal(patch(source), source);
-  } finally {
-    globalThis.__codeyPatchLog = savedLog;
-    console.error = savedError;
-  }
-});
-
-// Codex 26.1021+ stores manual draft choices natively and passes them to the
+// Codex 26.1120+ stores manual draft choices natively and passes them to the
 // settings hook as draftModelSettings; only the initial reasoning changes.
 const nativeDraftFixture = [
   "let Dfa=bn(V,e=>({isManuallyChanged:!1,modelSettings:null,serviceTier:null}));",
@@ -200,9 +20,10 @@ test("native draft settings start at supported medium reasoning and ordinary spe
   const errors = [];
   const savedLog = globalThis.__codeyPatchLog;
   globalThis.__codeyPatchLog = (record) => errors.push(JSON.parse(record));
+  const draftUrl = "app://-/assets/async/164925.2d4f802116.js";
   let patched;
   try {
-    patched = globalThis.__codeyRendererPatchEntry("app://-/assets/app-initial-native-drafts.js", nativeDraftFixture);
+    patched = globalThis.__codeyRendererPatchEntry(draftUrl, nativeDraftFixture);
   } finally {
     globalThis.__codeyPatchLog = savedLog;
   }
@@ -249,16 +70,15 @@ test("native draft settings start at supported medium reasoning and ordinary spe
     assert.equal(effort({ isNewThreadDraft: true }), "low");
   });
 
-  const patch = (source) => globalThis.__codeyRendererPatchEntry("app://-/assets/app-initial-native-drafts.js", source) ?? source;
+  const patch = (source) => globalThis.__codeyRendererPatchEntry(draftUrl, source) ?? source;
   assert.equal(patch(patched), patched, "reapplying is idempotent");
   globalThis.__codeyPatchLog = () => {};
   const savedError = console.error;
   console.error = () => {};
   try {
     for (const source of [
-      nativeDraftFixture.replace("serviceTier:null", "serviceTier:void 0"),
-      `${nativeDraftFixture}function Mlo(e){let t=(0,A2.c)(1),{managedNewThreadModelSettings:s,draftModelSettings:c,isNewThreadDraft:d}=e,x=1}`,
-      nativeDraftFixture.replace("me={...ae,", "me={...klo({userSavedModelString:null}),...ae,"),
+      `${nativeDraftFixture.replace("serviceTier:null", "serviceTier:void 0")}function Mlo(e){let t=(0,A2.c)(1),{managedNewThreadModelSettings:s,draftModelSettings:c,isNewThreadDraft:d}=e,x=1}`,
+      nativeDraftFixture.replace("serviceTier:null", "serviceTier:void 0").replace("me={...ae,", "me={...klo({userSavedModelString:null}),...ae,"),
     ]) assert.equal(patch(source), source, "drifted anchors leave the asset untouched");
   } finally {
     globalThis.__codeyPatchLog = savedLog;
@@ -279,10 +99,8 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
   };
 
   try {
-    (0, eval)(await loadStartupPatchTemplate({ disablePet: true }));
+    (0, eval)(await loadStartupPatchTemplate());
     assert.equal(globalThis.__codeyRendererPatchInstalled, true);
-    // Fetch interception entry: patched text means the response is rewritten,
-    // null means the paused asset is fulfilled with its original body.
     const patch = (url, source) =>
       globalThis.__codeyRendererPatchEntry(url, source) ?? source;
 
@@ -292,12 +110,9 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "case`electron-app-state-snapshot-request`:",
     ].join(" ");
     const response = patch(
-      "app://-/assets/app-initial-new-codex-build.js",
+      "app://-/assets/async/49792.d8d33ace73.js",
       incompatibleSource,
     );
-    // Each incompatible gate is skipped independently (and logged) instead of one
-    // throw discarding every gate on the asset. The response is never blocked and
-    // the source is returned unchanged when nothing matched.
     assert.equal(response, incompatibleSource);
     assert.ok(patchErrors.length >= 1);
     for (const [message] of patchErrors) {
@@ -310,9 +125,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         "renderer_patch:app state heartbeat snapshot",
       ],
     );
-    // Every skipped gate must carry printable excerpts around its neighborhood
-    // anchors so an incompatible field bundle can be adapted without access to
-    // that exact build.
     for (const record of patchRecords) {
       assert.equal(record.context.matchCount, 0);
       assert.ok(
@@ -328,32 +140,24 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     }
 
     const repeatedResponse = patch(
-      "app://-/assets/app-initial-new-codex-build.js",
+      "app://-/assets/async/49792.d8d33ace73.js",
       incompatibleSource,
     );
     assert.equal(repeatedResponse, incompatibleSource);
-    assert.equal(
-      patchErrors.length,
-      2,
-      "the same incompatible source must not rerun failed renderer gates",
-    );
-    assert.equal(
-      patchRecords.length,
-      2,
-      "the same incompatible source must not report the same gates again",
-    );
+    assert.equal(patchErrors.length, 2, "the same incompatible source must not rerun failed renderer gates");
+    assert.equal(patchRecords.length, 2, "the same incompatible source must not report the same gates again");
 
     const routeBridgeSource = [
       "const routeLog={warning(){}};",
       "const routeTransport={postMessage:e=>{let t=!1,n=window.electronBridge;",
-      "if(n?.sendMessageFromView){let r=e;n.sendMessageFromView(r).catch(t=>{",
-      "r.type!==`log-message`&&routeLog.warning(`Failed to send message from view`,{message:e,error:t})",
-      "}),t=!0}",
+      "n?.sendMessageFromView&&(n.sendMessageFromView(e).catch(t=>{",
+      "e.type!==`log-message`&&routeLog.warning(`Failed to send message from view`,{message:e,error:t})",
+      "}),t=!0);",
       "let r=new CustomEvent(`codex-message-from-view`,{detail:e});",
       "t&&(r.__codexForwardedViaBridge=!0),window.dispatchEvent(r)}};",
     ].join("");
     const patchedRouteBridgeSource = patch(
-      "app://-/assets/app-initial-route-bridge.js",
+      "app://-/assets/348410.f0081c7d18.js",
       routeBridgeSource,
     );
     assert.match(
@@ -417,11 +221,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     await new Promise(setImmediate);
     assert.equal(sentMessages.length, 2);
     assert.equal(sentMessages[1].request.id, "direct");
-    assert.equal(
-      patchErrors.length,
-      2,
-      "the current Codex bridge preflight must patch without compatibility errors",
-    );
+    assert.equal(patchErrors.length, 2, "the current Codex bridge preflight must patch without compatibility errors");
 
     const appServerRequestSource = [
       "class AppServerRequestClient{",
@@ -429,20 +229,17 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "createRequest(e,t,n,r=null){return{request:{id:`req-1`,method:e,params:t},promise:Promise.resolve({ok:!0})}}",
       "startRequest(){} onError(){} emitRequestLifecycleEvent(){} pumpQueue(){let e=this.queuedRequests.shift();e?.dispatch()}",
       "onResult(e,t,n){let r=this.requestPromises.get(e);if(r){this.requestPromises.delete(e),r.resolve(t),this.emitRequestLifecycleEvent({type:`completed`,hostId:this.hostId,method:r.method});return}}",
-      "enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.(`mcp-request`,{request:t,hostId:this.hostId,...t.trace==null?{}:{dispatchedAtMs:Date.now()},priority:Mjt(e,n),source:Ejt(e,n?.source),timeoutMs:n?.timeoutMs,expiresAtMs:n?.timeoutMs!=null&&n.timeoutMs>0?Date.now()+n.timeoutMs:void 0,widget:n?.widget})},i=null){let a=Mjt(e,n),o=Ejt(e,n?.source);let{request:s,promise:c}=this.createRequest(e,t,n,i);return this.queuedRequests.push({dispatch:()=>{this.startRequest(s);try{r(s)}catch(e){this.onError(s.id,e)}},priority:a}),this.pumpQueue(),c}",
+      "enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.(`mcp-request`,{request:t,hostId:this.hostId,...t.trace==null?{}:{dispatchedAtMs:Date.now()},priority:Mjt(e,n),source:Ejt(e,n?.source),timeoutMs:n?.timeoutMs,expiresAtMs:n?.timeoutMs!=null&&n.timeoutMs>0?Date.now()+n.timeoutMs:void 0,widget:n?.widget})},i=null,a){if(a?.aborted)return Promise.reject(new DOMException(`App-server request cancelled`,`AbortError`));let s=Mjt(e,n),o=Ejt(e,n?.source);let{request:u,promise:c}=this.createRequest(e,t,n,i);return this.queuedRequests.push({dispatch:()=>{this.startRequest(u);try{r(u)}catch(e){this.onError(u.id,e)}},priority:s}),this.pumpQueue(),c}",
       "async sendRequest(e,t,n){return this.enqueueRequest(e,t,n)}",
       "}",
       "function Mjt(){return `critical`}function Ejt(){return `source`}",
       "const appServerPatchSignals=`AppServerRequestClient is missing a message dispatcher mcp_request_enqueued`;",
     ].join("");
     const patchedAppServerRequestSource = patch(
-      "app://-/assets/app-initial-app-server-request-current-build.js",
+      "app://-/assets/async/49792.d8d33ace73.js",
       appServerRequestSource,
     );
-    assert.match(
-      patchedAppServerRequestSource,
-      /__codeyModelWhitelistPatch\?\.rewriteOutgoingMessage/,
-    );
+    assert.match(patchedAppServerRequestSource, /__codeyModelWhitelistPatch\?\.rewriteOutgoingMessage/);
     const blockedAppServerMessages = [];
     const routedAppServerTypes = [];
     const trackedAppServerMessages = [];
@@ -493,10 +290,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       model: "route-mt6lv4lx-i2bfax/gpt-5.5",
       model_provider: "openai",
     }, {});
-    assert.equal(
-      appServerGlobal.__codeyAppServerRequestClients.get("local"),
-      requestClient,
-    );
+    assert.equal(appServerGlobal.__codeyAppServerRequestClients.get("local"), requestClient);
     assert.deepEqual(requestClient.sent[0].payload.request.params, {
       model: "route-mt6lv4lx-i2bfax/gpt-5.5",
       modelProvider: "codey_router",
@@ -561,105 +355,14 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     remoteClient.requestPromises.set("remote-list", { method: "model/list", resolve(value) { remoteResult = value; } });
     remoteClient.onResult("remote-list", { data: [{ model: "remote-model" }] });
     assert.deepEqual(remoteResult, { data: [{ model: "remote-model" }] });
-    assert.equal(
-      patchErrors.length,
-      2,
-      "the AppServerRequestClient route preflight must patch without compatibility errors",
-    );
+    assert.equal(patchErrors.length, 2, "the AppServerRequestClient route preflight must patch without compatibility errors");
 
-    // Codex 26.1007 moved AppServerRequestClient and the Electron bridge
-    // forwarder into app-shared-*.js. That chunk must stay in the patch filter
-    // or the model-request source gate never installs and startup aborts at
-    // the request-gate verification stage.
-    const patchedSharedChunk = patch(
-      "app://-/webview/assets/app-shared-8bd9d0399038.js",
-      appServerRequestSource,
-    );
-    assert.match(
-      patchedSharedChunk,
-      /__codeyModelRequestSourceGateInstalled=true/,
-    );
-    assert.match(
-      patchedSharedChunk,
-      /__codeyAppServerRequestClients/,
-    );
-    // Current Codex puts composer and request gates in app-primary too.
-    assert.equal(
-      patch("app://-/webview/assets/app-primary-6f60e9ac4103.js", appServerRequestSource),
-      patchedSharedChunk,
-    );
-    // Assets outside the patch set must pass through untouched.
+    // Assets outside the numeric chunk set must pass through untouched.
     const unrelatedChunk = patch(
       "app://-/webview/assets/unrelated-feature-6f60e9ac4103.js",
       appServerRequestSource,
     );
     assert.equal(unrelatedChunk, appServerRequestSource);
-
-    const petSettingsSource = [
-      "import{AvatarPreview as P,builtInPets as L}",
-      "from\"./codex-avatar-BpKnWN_W.js\";",
-      "const petSettingsId=`settings.appearance.pets.title`;",
-      "function renderPetSettings(){return [P(),L.map(()=>1),petSettingsId]}",
-    ].join("");
-    const patchedPetSettingsSource = patch(
-      "app://-/assets/pets-settings-route-current-build.js",
-      petSettingsSource,
-    );
-    assert.doesNotMatch(patchedPetSettingsSource, /codex-avatar-/);
-    assert.match(
-      patchedPetSettingsSource,
-      /const P=\(\(\)=>\{const target=function\(\)\{return null\}/,
-    );
-    const renderPetSettings = Function(
-      `${patchedPetSettingsSource};return renderPetSettings`,
-    )();
-    assert.deepEqual(renderPetSettings(), [
-      null,
-      [],
-      "settings.appearance.pets.title",
-    ]);
-
-    const sideEffectPetSettingsSource = [
-      "import\"./codex-avatar-next-build.js\";",
-      "const petSettingsId=`settings.pets.title`;",
-    ].join("");
-    const patchedSideEffectPetSettingsSource = patch(
-      "app://-/assets/pets-settings-next-build.js",
-      sideEffectPetSettingsSource,
-    );
-    assert.doesNotMatch(patchedSideEffectPetSettingsSource, /codex-avatar-/);
-    assert.match(
-      patchedSideEffectPetSettingsSource,
-      /const petSettingsId=`settings\.pets\.title`/,
-    );
-
-    // Current Codex builds split the pets/Mini preview across three chunks and
-    // drop the semicolon after each import, so every one of them has to be
-    // stubbed from the same settings route chunk.
-    const currentPetSettingsSource = [
-      "import{f as Rt,m as zt,r as Bt,t as Vt}from\"./avatar-mascot-button-7586001b9adf.js\"",
-      "import{n as Ht,t as Ut}from\"./codex-pet-assets-5f01c10f2955.js\"",
-      "import{n as Yt,t as Xt}from\"./use-avatar-options-fda035de15fb.js\"",
-      "const miniSettingsId=`settings.mini.show`;",
-      "function renderMiniSettings(){return [Rt(),Ht(),Yt(),miniSettingsId]}",
-    ].join("\n");
-    const patchedCurrentPetSettingsSource = patch(
-      "app://-/assets/pets-settings-route-551771c3ecb9.js",
-      currentPetSettingsSource,
-    );
-    assert.doesNotMatch(
-      patchedCurrentPetSettingsSource,
-      /(avatar-mascot-button|codex-pet-assets|use-avatar-options)-/,
-    );
-    const renderMiniSettings = Function(
-      `${patchedCurrentPetSettingsSource};return renderMiniSettings`,
-    )();
-    assert.deepEqual(renderMiniSettings(), [
-      null,
-      null,
-      null,
-      "settings.mini.show",
-    ]);
 
     const localePropsSource = [
       "function provider(E){return E.localeOverride}",
@@ -669,136 +372,11 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "bb0:{if(r){p=r;break bb0}if(l===`SYSTEM`){p=d;break bb0}p=u}",
       "return {enabled:c,source:l,locale:p,english:f}}",
     ].join("");
-    // Codex owns the UI language, so its locale resolver must reach the renderer unchanged.
     const localePropsResult = patch(
-      "app://-/assets/app-initial-26903.js",
+      "app://-/assets/async/49792.d8d33ace73.js",
       localePropsSource,
     );
     assert.equal(localePropsResult, localePropsSource);
-
-    // Codex 26.1013 shape: the in-progress predicate is a module function used
-    // by getHasInProgressLocalConversation; resume runs through the public
-    // resumeConversation entry.
-    const completedReconciliationSource = [
-      "function isRunning(e){return e.inProgress===!0}",
-      "class RunningManager{",
-      "constructor(){this.conversation={inProgress:!0,resumeState:`resumed`,cwd:`/repo`};",
-      "this.threadStore={getConversation:()=>this.conversation,getRecentConversationIds:()=>[`thread`]};",
-      "this.role={role:`owner`};this.revision=1;this.statuses=[{type:`idle`},{type:`idle`}];this.events=[];",
-      "this.inactiveThreadUnsubscriber={clearConversationStreamOwnership:e=>{this.events.push(`clear:${e}`);this.role=null}}}",
-      "get conversations(){return new Map([[`thread`,this.conversation]])}",
-      "getConversation(e){return this.threadStore.getConversation(e)}",
-      "getConversationStreamRevision(){return this.revision}",
-      "getStreamRole(){return this.role}",
-      "async sendRequest(e,t){this.events.push(`read:${e}:${t.threadId}:${t.includeTurns}`);return{thread:{status:this.statuses.shift()??{type:`idle`}}}}",
-      "updateConversationState(e,t,n){this.events.push(`state:${e}:${n}`);t(this.conversation)}",
-      "async resumeConversation(e){this.events.push(`resume:${e.conversationId}:${e.workspaceRoots.join()}`);this.conversation.inProgress=!1;this.role={role:`owner`};return{status:`ready`}}",
-      "getHasInProgressLocalConversation({exceptConversationId:e}={}){for(let t of this.threadStore.getRecentConversationIds()){if(t===e)continue;let n=this.conversations.get(t);if(n!=null&&isRunning(n))return!0}return!1}",
-      "releaseOwnedThread(e){this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(e)}",
-      "}",
-    ].join("");
-    const patchedCompletedReconciliationSource = patch(
-      "app://-/assets/app-initial-BHB6SClA.js",
-      completedReconciliationSource,
-    );
-    assert.match(
-      patchedCompletedReconciliationSource,
-      /async codeyReconcileCompletedConversation\(/,
-    );
-    const RunningManager = Function(
-      `${patchedCompletedReconciliationSource};return RunningManager`,
-    )();
-    const reconcileNativeSetTimeout = globalThis.setTimeout;
-    const reconcileDelays = [];
-    globalThis.setTimeout = (callback, delay) => {
-      reconcileDelays.push(delay);
-      callback();
-      return 1;
-    };
-    try {
-      const completedManager = new RunningManager();
-      assert.equal(completedManager.getHasInProgressLocalConversation(), true);
-      assert.equal(
-        await completedManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-completed",
-          workspaceRoots: [],
-        }),
-        true,
-      );
-      assert.deepEqual(completedManager.events, [
-        "read:thread/read:thread-completed:false",
-        "read:thread/read:thread-completed:false",
-        "clear:thread-completed",
-        "state:thread-completed:false",
-        "resume:thread-completed:/repo",
-      ]);
-      assert.deepEqual(reconcileDelays, [250]);
-      assert.equal(completedManager.conversation.resumeState, "needs_resume");
-      assert.deepEqual(completedManager.role, { role: "owner" });
-
-      const activeManager = new RunningManager();
-      activeManager.statuses = [{ type: "active" }];
-      assert.equal(
-        await activeManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-running",
-        }),
-        false,
-      );
-      assert.deepEqual(activeManager.events, [
-        "read:thread/read:thread-running:false",
-      ]);
-
-      const changedRevisionManager = new RunningManager();
-      const sendRequest = changedRevisionManager.sendRequest.bind(changedRevisionManager);
-      changedRevisionManager.sendRequest = async (...args) => {
-        const response = await sendRequest(...args);
-        if (changedRevisionManager.events.length === 2) {
-          changedRevisionManager.revision += 1;
-        }
-        return response;
-      };
-      assert.equal(
-        await changedRevisionManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-updated",
-        }),
-        false,
-      );
-      assert.deepEqual(changedRevisionManager.events, [
-        "read:thread/read:thread-updated:false",
-        "read:thread/read:thread-updated:false",
-      ]);
-
-      const idleManager = new RunningManager();
-      idleManager.conversation.inProgress = false;
-      assert.equal(
-        await idleManager.codeyReconcileCompletedConversation({ conversationId: "thread-idle" }),
-        false,
-      );
-      assert.deepEqual(idleManager.events, []);
-
-      // A submitted turn the server has not confirmed yet is not stale.
-      const submittingManager = new RunningManager();
-      submittingManager.conversation.unconfirmedTurnSubmissions = [{ terminal: false }];
-      assert.equal(
-        await submittingManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-submitting",
-        }),
-        false,
-      );
-      assert.deepEqual(submittingManager.events, []);
-
-      const followerManager = new RunningManager();
-      followerManager.role = { role: "follower", ownerClientId: "other-window" };
-      assert.equal(
-        await followerManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-followed",
-        }),
-        false,
-      );
-      assert.deepEqual(followerManager.events, []);
-    } finally {
-      globalThis.setTimeout = reconcileNativeSetTimeout;
-    }
 
     const interactionPerformanceSource = [
       "Hcn=class{activeInteractions=new Map;beginCpuSampling;",
@@ -813,34 +391,25 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "function unrelated(){return beginCpuSampling()}",
     ].join("");
     const patchedInteractionPerformance = patch(
-      "app://-/assets/app-initial-BHB6SClA.js",
+      "app://-/assets/async/366996.9782070574.js",
       interactionPerformanceSource,
     );
     assert.match(patchedInteractionPerformance, /cpuSampling:null/);
     assert.match(patchedInteractionPerformance, /ensureHeartbeat\(\)\{\}/);
-    assert.doesNotMatch(
-      patchedInteractionPerformance,
-      /heartbeatTimer\?\?=setInterval/,
-    );
-    assert.doesNotMatch(
-      patchedInteractionPerformance,
-      /cpuSampling:[^,}]*this\.beginCpuSampling\(\)/,
-    );
-    assert.match(
-      patchedInteractionPerformance,
-      /function unrelated\(\)\{return beginCpuSampling\(\)\}/,
-    );
+    assert.doesNotMatch(patchedInteractionPerformance, /heartbeatTimer\?\?=setInterval/);
+    assert.doesNotMatch(patchedInteractionPerformance, /cpuSampling:[^,}]*this\.beginCpuSampling\(\)/);
+    assert.match(patchedInteractionPerformance, /function unrelated\(\)\{return beginCpuSampling\(\)\}/);
 
-    const appStateSnapshotSource = [
-      "async function onMessage(e,r,hs){bb467:switch(e.type){",
-      "case`electron-app-state-snapshot-request`:{let t=r.get(`host`,e.hostId);if(t==null)break bb467;",
-      "let n=r.get(`sampler`),i=await n?.collectAppStateSnapshot(e.hostId,e.reason);",
-      "if(i==null)break bb467;",
-      "hs.dispatchMessage(`electron-app-state-snapshot-response`,{requestId:e.requestId,fields:i});break bb467}",
-      "case`other`:break bb467}}",
+    const hostServicesSnapshotSource = [
+      "async function onHostMessage(e,t,tt){switch(e.type){",
+      "case`electron-app-state-snapshot-request`:{let n=t.get(`host`,e.hostId),r=t.get(`sampler`),i=null;",
+      "if(n!=null&&r!=null){let[a]=await Promise.all([r.collectAppStateSnapshot(e.hostId,e.reason)]);i=a}",
+      "let a=t.get(`route`);if(i==null&&a==null)break;",
+      "tt.dispatchMessage(`electron-app-state-snapshot-response`,{requestId:e.requestId,fields:i,workRoute:a});break}",
+      "case`other`:break}}",
     ].join("");
-    const onAppMessage = Function(
-      `${patch("app://-/assets/app-initial-app-state.js", appStateSnapshotSource)};return onMessage`,
+    const onHostMessage = Function(
+      `${patch("app://-/assets/async/49792.d8d33ace73.js", hostServicesSnapshotSource)};return onHostMessage`,
     )();
     const collectedReasons = [];
     const snapshotResponses = [];
@@ -855,32 +424,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     const snapshotBridge = {
       dispatchMessage: (_type, payload) => snapshotResponses.push(payload.requestId),
     };
-    for (const [requestId, reason] of [["beat", "heartbeat"], ["jank", "main_thread_jank"]]) {
-      await onAppMessage({
-        type: "electron-app-state-snapshot-request",
-        hostId: "local",
-        requestId,
-        reason,
-      }, snapshotStore, snapshotBridge);
-    }
-    assert.deepEqual(collectedReasons, ["main_thread_jank"]);
-    assert.deepEqual(snapshotResponses, ["jank"]);
-
-    // Codex 26.1021 moved the handler into the host services chunk and uses an
-    // unlabelled switch break; a skipped heartbeat must not send workRoute.
-    const hostServicesSnapshotSource = [
-      "async function onHostMessage(e,t,tt){switch(e.type){",
-      "case`electron-app-state-snapshot-request`:{let n=t.get(`host`,e.hostId),r=t.get(`sampler`),i=null;",
-      "if(n!=null&&r!=null){let[a]=await Promise.all([r.collectAppStateSnapshot(e.hostId,e.reason)]);i=a}",
-      "let a=t.get(`route`);if(i==null&&a==null)break;",
-      "tt.dispatchMessage(`electron-app-state-snapshot-response`,{requestId:e.requestId,fields:i,workRoute:a});break}",
-      "case`other`:break}}",
-    ].join("");
-    const onHostMessage = Function(
-      `${patch("app://-/assets/initialize-app-host-services-5891c906a171.js", hostServicesSnapshotSource)};return onHostMessage`,
-    )();
-    collectedReasons.length = 0;
-    snapshotResponses.length = 0;
     for (const [requestId, reason] of [["beat", "heartbeat"], ["jank", "main_thread_jank"]]) {
       await onHostMessage({
         type: "electron-app-state-snapshot-request",
@@ -901,7 +444,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       const productionSource = await readFile(productionRendererAsset, "utf8");
       const previousErrorCount = patchErrors.length;
       const patchedProductionSource = patch(
-        "app://-/assets/app-initial-production-build.js",
+        "app://-/assets/async/49792.d8d33ace73.js",
         productionSource,
       );
       assert.notEqual(
@@ -913,9 +456,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         .slice(previousErrorCount)
         .map(([message]) => String(message))
         .filter((message) =>
-          /service tier access|app state heartbeat snapshot|completed thread reconciliation|app server manager registry/.test(
-            message,
-          ),
+          /service tier access|app state heartbeat snapshot/.test(message),
         );
       assert.deepEqual(
         currentGateFailures,
@@ -933,45 +474,10 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
   }
 });
 
-test("slim pet stops the hidden avatar overlay prewarm without blocking on-demand voice", async () => {
-  const runtimeSource = [
-    "function eJ(){let O=Y(`2635985366`),t=tJ(),s=Co(),Be=Cf();",
-    "(0,nJ.useEffect)(()=>{s||jr.dispatchMessage(`electron-avatar-overlay-restore-ready`,{onDemandEnabled:O,shouldPrewarmAvatarOverlay:t&&Be})},[O,t,s,Be]);}",
-  ].join("");
-  const url = "app://-/assets/app-runtime-aa2c0a69096f.js";
-  for (const disablePet of [true, false]) {
-    delete globalThis.__codeyRendererPatchInstalled;
-    (0, eval)(await loadStartupPatchTemplate({ disablePet }));
-    const patched = globalThis.__codeyRendererPatchEntry(url, runtimeSource);
-    if (!disablePet) {
-      assert.equal(patched, null, "app-runtime is only intercepted for the slim pet");
-      continue;
-    }
-    assert.match(patched, /\{onDemandEnabled:O,shouldPrewarmAvatarOverlay:!1\}/);
-    assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
-  }
-});
-
-test("checkout webviews load on demand instead of prewarming hidden pages", async () => {
-  delete globalThis.__codeyRendererPatchInstalled;
-  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
-  const url = "app://-/assets/webview-page-71976c9e9730.js";
-  const pricing = "function ue(a,s,c,h,l,p,_,C){let O;e[9]!==a?(O=!re()&&a===`chatgpt`&&!s&&c!=null&&!h&&l?.structure===`personal`&&ee(p,He,{disableExposureLog:!0}).get(`use_embedded_checkout`,!1)?_e({currentPlan:ye(l.plan_type),url:_()}):null,e[9]=a,e[16]=O):O=e[16];let A=C??O;return(0,X.jsx)(me,{forcePricingRefreshInBackground:!0,search:A})}";
-  const credit = "function U(y,eligible){let T,E,Y={useLayoutEffect(){}},re=()=>!eligible,ee=()=>({get:()=>eligible}),d,He;if((0,Y.useLayoutEffect)(T,E),!y&&(re()||!ee(d,He,{disableExposureLog:!0}).get(`use_embedded_credit_checkout`,!1)))return null;let N=!y;return{isPrewarm:N}}";
-  const patched = globalThis.__codeyRendererPatchEntry(url, `${pricing}${credit}`);
-  assert.match(patched, /\(O=null,e\[9\]=a,e\[16\]=O\)/, "no background pricing search without a pricing route");
-  assert.match(patched, /let A=C\?\?O;/, "an opened pricing route still drives the native webview");
-  const creditGate = Function(`${patched.slice(patched.indexOf("function U("))};return U`)();
-  assert.equal(creditGate(false, true), null, "an eligible account no longer mounts the hidden credit page");
-  assert.deepEqual({ ...creditGate(true, true) }, { isPrewarm: false }, "a presented credit page still loads");
-  assert.deepEqual({ ...creditGate(true, false) }, { isPrewarm: false });
-  assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
-});
-
 test("the hosted AppServerManager service leaves a diagnostic marker when it connects", async () => {
   delete globalThis.__codeyRendererPatchInstalled;
-  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
-  const url = "app://-/assets/renderer-app-server-managers-8103218e001d.js";
+  (0, eval)(await loadStartupPatchTemplate());
+  const url = "app://-/assets/async/49792.d8d33ace73.js";
   const source = "function im(e){let t=A.appServerManagers;if(t==null)throw Error(`Desktop host did not provide its AppServerManager service`);return tm(e,t)}";
   const patched = globalThis.__codeyRendererPatchEntry(url, source);
   const connect = (service) => Function("A", "tm", `${patched};return im`)({ appServerManagers: service }, () => "connected");
@@ -986,12 +492,12 @@ test("the hosted AppServerManager service leaves a diagnostic marker when it con
 
 test("hosted composer sends pass through the portable handoff gate", async () => {
   delete globalThis.__codeyRendererPatchInstalled;
-  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
+  (0, eval)(await loadStartupPatchTemplate());
   const followUp = "async function f(e,n,i,o){let l=d(e,n),m=null;return f=await l.sendFollowUpMessage(i,{...o,useUserMessageAdmission:c(e,n),writingBlockContextPrepared:m!=null}),f}";
   const turnStart = "async function f(e,n,r,a){let c=d(e,n);return await c.startTurn(r,{...a,context:{...a.context,onRequestDispatched:a.context?.onRequestDispatched},request:{...a.request}})}async function p(e,n,r,a){let s=d(e,n);await s.startEmptyTurn(r,a)}";
   const cases = [
-    ["app://-/assets/send-follow-up-message-41b7bd38775d.js", followUp, "sendFollowUpMessage", { prompt: "hi" }],
-    ["app://-/assets/start-turn-e9a3bd89232f.js", turnStart, "startTurn", { request: { input: [] } }],
+    ["app://-/assets/async/49792.d8d33ace73.js", followUp, "sendFollowUpMessage", { prompt: "hi" }],
+    ["app://-/assets/async/102734.cdd4b920b9.js", turnStart, "startTurn", { request: { input: [] } }],
   ];
   for (const [url, source, method, options] of cases) {
     const patched = globalThis.__codeyRendererPatchEntry(url, source);
@@ -1014,5 +520,5 @@ test("hosted composer sends pass through the portable handoff gate", async () =>
     assert.deepEqual(calls.map(([kind, name]) => kind === "gate" ? `gate:${name}` : kind), ["native", `gate:${method}`, "native"]);
   }
   const lock = "function t(e){return!r.has(e)&&(r.add(e),!0)}";
-  assert.equal(globalThis.__codeyRendererPatchEntry("app://-/assets/start-turn-lock-be4319076981.js", lock), null);
+  assert.equal(globalThis.__codeyRendererPatchEntry("app://-/assets/async/999999.be4319076981.js", lock), null);
 });

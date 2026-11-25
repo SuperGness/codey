@@ -70,15 +70,15 @@ class FakeElement extends FakeElementCore {
 function loadShield(enabled) {
   const semantic = new FakeElement();
   semantic.__reactProps$test = {
-    children: { props: { id: "settings.personalization.pets.openPet" } },
+    children: { props: { id: "settings.overview.pets" } },
   };
   const settingsMenu = new FakeElement("外观设置");
   settingsMenu.__reactProps$test = {
-    children: { props: { id: "settings.appearance.pets.title" } },
+    children: { props: { id: "settings.pets.appearance.title" } },
   };
   const nestedSettingsMenu = new FakeElement("设置分区");
   nestedSettingsMenu.__reactProps$test = {
-    children: { props: { id: "settings.nav.pets.title" } },
+    children: { props: { id: "settings.nav.pets.v2" } },
   };
   const localizedSettingsMenu = new FakeElement("宠物");
   const localized = new FakeElement("唤醒宠物");
@@ -299,6 +299,17 @@ test("pet slim mode blocks the renamed mini entry points without hiding models",
     null,
     "a model option must never match the mini entry point labels",
   );
+  for (const id of [
+    "settings.overview.pets",
+    "settings.appshots.alwaysSendToMini.label",
+    "settings.appshots.alwaysSendToMini.description",
+    "codex.commandMenu.miniPetSearchAlias",
+    "settings.personalization.avatars.select",
+  ]) {
+    const control = new FakeElement("打开设置");
+    control.__reactProps$test = { children: { props: { id } } };
+    assert.equal(runtime.window.__codeyPetControlShield.isPetControl(control), true, id);
+  }
 });
 
 test("pet slim mode stops the current settings menu before lazy pet resources load", () => {
@@ -426,7 +437,7 @@ test("pet control verdicts are re-evaluated when React repurposes the element", 
 
   // A stale verdict here would leave a live pet entry point reachable, so this
   // shield must never cache across a React update.
-  fiberProps = { children: { props: { id: "codex.command.openPetOverlay" } } };
+  fiberProps = { children: { props: { id: "codex.command.showMiniOverlay" } } };
   assert.equal(evaluate(), true, "a repurposed control must produce a fresh verdict");
 
   fiberProps = { children: { props: { id: "codex.command.somethingElse" } } };
@@ -489,7 +500,7 @@ test("unchanged React props reuse the cached verdict without walking the prop gr
     "repeated evaluations with identical React prop references must hit the cache",
   );
 
-  currentProps = createProps("codex.command.openPetOverlay");
+  currentProps = createProps("codex.command.showMiniOverlay");
   currentFiber = { memoizedProps: currentProps };
   assert.equal(evaluate(), true);
   assert.ok(nestedPropReads > readsAfterFirstEvaluation);

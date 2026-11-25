@@ -205,7 +205,7 @@ async fn misses_patch_in_the_page_and_hits_fulfill_from_cache() {
         .attach_page("s1", "main", "about:blank", false)
         .await;
 
-    let url = "app://-/assets/app-primary-b4ce9e46e8cf.js";
+    let url = "app://-/assets/348410.f0081c7d18.js";
     let asset_body =
         "codex-message-from-view old.sendMessageFromView Failed to send message from view";
     service.send(paused("s1", "r1", url, false)).await;
@@ -277,7 +277,7 @@ async fn failed_evaluation_passes_the_original_response_through_uncached() {
     service.answer_startup(json!([])).await;
     service.attach_page("s1", "main", "", true).await;
     let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
-    let url = "app://-/assets/app-initial-90eb42395b7d.js";
+    let url = "app://-/assets/357055.788c31e830.js";
     service.send(paused("s1", "r1", url, true)).await;
     let body = service.expect("Fetch.getResponseBody").await;
     service
@@ -308,7 +308,7 @@ async fn cached_fulfillments_release_a_shared_limited_slot() {
     service.answer_startup(json!([])).await;
     service.attach_page("s1", "main", "", true).await;
     let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
-    let url = "app://-/assets/app-shared-52443cbe9ac4.js";
+    let url = "app://-/assets/async/49792.d8d33ace73.js";
     service
         .context
         .cache
@@ -349,8 +349,8 @@ async fn cold_responses_and_cached_requests_share_slots_without_holding_idle_per
     service.answer_startup(json!([])).await;
     service.attach_page("s1", "main", "", true).await;
     let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
-    let cached_url = "app://-/assets/app-shared-52443cbe9ac4.js";
-    let cold_url = "app://-/assets/app-initial-90eb42395b7d.js";
+    let cached_url = "app://-/assets/async/49792.d8d33ace73.js";
+    let cold_url = "app://-/assets/348410.f0081c7d18.js";
     service
         .context
         .cache
@@ -411,7 +411,7 @@ async fn cached_fulfillment_errors_release_the_shared_slot() {
     service.answer_startup(json!([])).await;
     service.attach_page("s1", "main", "", true).await;
     let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
-    let url = "app://-/assets/app-shared-52443cbe9ac4.js";
+    let url = "app://-/assets/async/49792.d8d33ace73.js";
     service
         .context
         .cache
@@ -508,7 +508,10 @@ fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
         ".startTurn(",
         "totalASTLRUCacheSize:",
         "orbit-character-preloaded",
-        "auto.ui.browser.metrics",
+        "\"orbit.navigation\"",
+        "PerformanceEventTiming",
+        "this.eventObserver=new PerformanceObserver",
+        "EventLoopBlockRenderer",
         "ensureObserver(\"long-animation-frame\")",
         "_pending_observations",
         "Reached the post-login Statsig bootstrap deadline",
@@ -520,18 +523,6 @@ fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
             "{required}"
         );
     }
-    let slim_anchors = renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, true).unwrap();
-    let full_pet_anchors =
-        renderer_patch_anchors_for_mode(RENDERER_ASSET_PATCH_SCRIPT, false).unwrap();
-    assert_eq!(slim_anchors.len(), anchors.len());
-    assert_eq!(
-        full_pet_anchors.len() + PET_ONLY_PATCH_ANCHORS.len(),
-        slim_anchors.len()
-    );
-    for pet_anchor in PET_ONLY_PATCH_ANCHORS {
-        assert!(slim_anchors.iter().any(|anchor| anchor == pet_anchor));
-        assert!(!full_pet_anchors.iter().any(|anchor| anchor == pet_anchor));
-    }
     assert!(renderer_patch_anchors("const a=[];").is_err());
     assert!(
         renderer_patch_anchors(&format!("{PATCH_ANCHORS_START}[]{PATCH_ANCHORS_END}")).is_err()
@@ -539,37 +530,34 @@ fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
 }
 
 #[test]
-fn compound_rule_matcher_requires_all_literals_in_a_rule_and_respects_pet_mode() {
-    let slim_matcher = PatchAnchorMatcher::for_script(RENDERER_ASSET_PATCH_SCRIPT, true).unwrap();
-    let full_pet_matcher =
-        PatchAnchorMatcher::for_script(RENDERER_ASSET_PATCH_SCRIPT, false).unwrap();
-    assert_ne!(slim_matcher.digest_hex(), full_pet_matcher.digest_hex());
+fn compound_rule_matcher_requires_all_literals_in_a_rule() {
+    let matcher = PatchAnchorMatcher::for_script(RENDERER_ASSET_PATCH_SCRIPT).unwrap();
+    assert!(!matcher.digest_hex().is_empty());
 
     // 仅出现规则里的部分前置字面量不应误命中。
-    assert!(!slim_matcher.matches("let{agentMode:a}resolvedHostId:b"));
+    assert!(!matcher.matches("let{agentMode:a}resolvedHostId:b"));
     assert!(
-        slim_matcher.matches(
+        matcher.matches(
             "CodexComposerAdapter let{agentMode:a} resolvedHostId:b submitDisabledReasons:c"
         )
     );
 
-    // petOnly 规则在 disable_pet=false 时不触发。
-    let pet_only_sample = "settings.appearance import x from\"./codex-avatar-123.js\"";
-    assert!(slim_matcher.matches(pet_only_sample));
-    assert!(!full_pet_matcher.matches(pet_only_sample));
+    // 新增 P0 性能规则必须同时命中全部前置字面量。
+    assert!(!matcher.matches("durationThreshold:16 PerformanceEventTiming"));
+    assert!(matcher.matches("durationThreshold:16 PerformanceEventTiming eventsSupported:"));
+    assert!(!matcher.matches("EventLoopBlockRenderer"));
+    assert!(matcher.matches("EventLoopBlockRenderer rendererHangDetectionEnabled"));
 
-    // Orbit preload 在 disable_pet=false 时依然生效。
-    let orbit_sample = "allow-same-origin \"orbit-character-preloaded\"";
-    assert!(slim_matcher.matches(orbit_sample));
-    assert!(full_pet_matcher.matches(orbit_sample));
+    // Orbit preload 始终生效。
+    assert!(matcher.matches("allow-same-origin \"orbit-character-preloaded\""));
 
     // Statsig 启动收敛规则需同时命中 bootstrap deadline 与 fetch timeout 两个字面量。
-    assert!(!slim_matcher.matches("Reached the post-login Statsig bootstrap deadline"));
-    let statsig_sample = "Reached the post-login Statsig bootstrap deadline Timed out while fetching post-login Statsig bootstrap";
-    assert!(slim_matcher.matches(statsig_sample));
-    assert!(full_pet_matcher.matches(statsig_sample));
+    assert!(!matcher.matches("Reached the post-login Statsig bootstrap deadline"));
+    assert!(matcher.matches(
+        "Reached the post-login Statsig bootstrap deadline Timed out while fetching post-login Statsig bootstrap"
+    ));
 
-    assert!(PatchAnchorMatcher::for_script("const r=[];", true).is_err());
+    assert!(PatchAnchorMatcher::for_script("const r=[];").is_err());
 }
 
 #[tokio::test]
@@ -725,7 +713,7 @@ fn prune_caps_entry_count_by_recent_use() {
 }
 
 #[test]
-fn interception_covers_named_and_numeric_scripts() {
+fn interception_covers_numeric_css_and_pet_sprites() {
     let urls = |patterns: Value| -> Vec<String> {
         patterns
             .as_array()
@@ -736,22 +724,20 @@ fn interception_covers_named_and_numeric_scripts() {
     };
     let with_pet = urls(fetch_patterns(true, None));
     let without_pet = urls(fetch_patterns(false, None));
-    assert!(with_pet.contains(&"app://*/assets/app-initial*".to_string()));
-    assert!(with_pet.contains(&"app://*/assets/pets-settings*".to_string()));
-    assert!(with_pet.contains(&NUMERIC_ASSET_URL_PATTERN.to_string()));
-    assert!(with_pet.contains(&PET_SPRITE_URL_PATTERN.to_string()));
-    assert!(!without_pet.iter().any(|url| url.contains("pets-settings")));
-    assert!(!without_pet.contains(&PET_SPRITE_URL_PATTERN.to_string()));
     assert_eq!(
-        with_pet.len(),
-        without_pet.len() + PET_ASSET_PREFIXES.len() + 1
+        without_pet,
+        vec![
+            NUMERIC_ASSET_URL_PATTERN.to_string(),
+            CSS_ASSET_URL_PATTERN.to_string(),
+        ]
     );
-    assert!(
-        with_pet
-            .iter()
-            .filter(|pattern| *pattern == NUMERIC_ASSET_URL_PATTERN)
-            .count()
-            == 1
+    assert_eq!(
+        with_pet,
+        vec![
+            NUMERIC_ASSET_URL_PATTERN.to_string(),
+            CSS_ASSET_URL_PATTERN.to_string(),
+            PET_SPRITE_URL_PATTERN.to_string(),
+        ]
     );
 }
 
@@ -775,12 +761,14 @@ fn asset_scans_replace_the_numeric_wildcard_with_exact_chunks() {
     };
     let exact_patterns = fetch_patterns(false, Some(&scan));
     let exact = urls(exact_patterns.clone());
-    assert!(exact.contains(&"app://*/assets/348410.ae8bb87271.js*".to_string()));
-    assert!(exact.contains(&"app://*/assets/async/24191.589dcc9878.js*".to_string()));
-    assert!(exact.contains(&"app://*/assets/async/e77f816560c6.css*".to_string()));
-    assert!(!exact.contains(&NUMERIC_ASSET_URL_PATTERN.to_string()));
-    assert!(!exact.contains(&CSS_ASSET_URL_PATTERN.to_string()));
-    assert!(exact.contains(&"app://*/assets/app-initial*".to_string()));
+    assert_eq!(
+        exact,
+        vec![
+            "app://*/assets/348410.ae8bb87271.js*".to_string(),
+            "app://*/assets/async/24191.589dcc9878.js*".to_string(),
+            "app://*/assets/async/e77f816560c6.css*".to_string(),
+        ]
+    );
     assert!(
         exact_patterns
             .as_array()
@@ -791,15 +779,9 @@ fn asset_scans_replace_the_numeric_wildcard_with_exact_chunks() {
                     && pattern["resourceType"] == "Stylesheet"
             )
     );
-
-    let named = crate::renderer_asset_scan::AssetScan {
-        numeric_chunks: 0,
-        candidates: Vec::new(),
-    };
-    assert_eq!(
-        urls(fetch_patterns(false, Some(&named))).len(),
-        PATCHABLE_ASSET_PREFIXES.len()
-    );
+    let exact_with_pet = urls(fetch_patterns(true, Some(&scan)));
+    assert_eq!(exact_with_pet.len(), exact.len() + 1);
+    assert!(exact_with_pet.contains(&PET_SPRITE_URL_PATTERN.to_string()));
 }
 
 #[test]
@@ -935,18 +917,12 @@ fn numeric_assets_require_bounded_hashed_chunk_names() {
         "app://-/assets/async/e77f816560c6.css",
         "app://-/assets/app-initial-90eb4239.css",
     ] {
-        assert!(is_patchable_asset_url(url, false), "{url}");
+        assert!(is_patchable_asset_url(url), "{url}");
     }
-    assert!(is_patchable_asset_url(
-        "app://-/assets/app-initial-90eb42395b7d.js",
-        false
-    ));
-    assert!(is_patchable_asset_url(
-        "app://-/assets/pets-settings-90eb42395b7d.js",
-        true
-    ));
     for url in [
         "https://codex.example/assets/async/634303.855e57c3e7.js",
+        "app://-/assets/app-initial-90eb42395b7d.js",
+        "app://-/assets/pets-settings-90eb42395b7d.js",
         "app://-/assets/async/composer.855e57c3e7.js",
         "app://-/assets/async/634303.js",
         "app://-/assets/async/634303.not-a-hash.js",
@@ -958,21 +934,15 @@ fn numeric_assets_require_bounded_hashed_chunk_names() {
         "app://-/assets/app-initial.css",
         "app://-/assets/async/not-a-hash.css",
     ] {
-        assert!(!is_patchable_asset_url(url, true), "{url}");
+        assert!(!is_patchable_asset_url(url), "{url}");
     }
 }
 
 #[test]
-fn page_patch_names_match_the_interception_list() {
-    // 页面入口与 Fetch 名单必须一致：只拦不改浪费一次往返，只改不拦则补丁
-    // 永远不会生效。
-    let named = format!(
-        "(?:(?:{})(?:[~-][^/]*)?)",
-        PATCHABLE_ASSET_PREFIXES.join("|")
+fn page_patch_script_matches_rspack_numeric_assets() {
+    assert!(
+        RENDERER_ASSET_PATCH_SCRIPT.contains(r"/^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i")
     );
-    let pet = format!("(?:(?:{})(?:[~-][^/]*)?)", PET_ASSET_PREFIXES.join("|"));
-    assert!(RENDERER_ASSET_PATCH_SCRIPT.contains(&named), "{named}");
-    assert!(RENDERER_ASSET_PATCH_SCRIPT.contains(&pet), "{pet}");
 }
 
 #[test]

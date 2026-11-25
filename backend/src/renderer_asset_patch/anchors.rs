@@ -12,22 +12,10 @@ pub(super) const PATCH_ANCHORS_END: &str = "/*end-codey-renderer-patch-anchors*/
 pub(super) const PATCH_RULES_START: &str = "/*codey-renderer-patch-rules*/";
 pub(super) const PATCH_RULES_END: &str = "/*end-codey-renderer-patch-rules*/";
 
-/// 仅在开启宠物精简时才生效的前置字面量；精简关闭时不加入扫描与预筛。
-#[cfg(test)]
-pub(super) const PET_ONLY_PATCH_ANCHORS: [&str; 5] = [
-    "codex-avatar",
-    "codex-pet-assets",
-    "avatar-mascot-button",
-    "use-avatar-options",
-    "shouldPrewarmAvatarOverlay:",
-];
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PatchAnchorRule {
     all_of: Vec<String>,
-    #[serde(default)]
-    pet_only: bool,
 }
 
 /// 复合前置字面量匹配器：每条规则内所有字面量同时出现才命中对应 chunk。
@@ -61,8 +49,8 @@ impl PatchAnchorMatcher {
         }
     }
 
-    /// 解析 `renderer_asset_patch.js` 内置的复合规则表，并按 `disable_pet` 过滤。
-    pub(crate) fn for_script(script: &str, disable_pet: bool) -> Result<Self> {
+    /// 解析 `renderer_asset_patch.js` 内置的复合规则表。
+    pub(crate) fn for_script(script: &str) -> Result<Self> {
         let start = script
             .find(PATCH_RULES_START)
             .context("缺少复合前置规则表起始标记")?
@@ -81,12 +69,7 @@ impl PatchAnchorMatcher {
             if rule.all_of.is_empty() || rule.all_of.iter().any(String::is_empty) {
                 bail!("复合前置规则的 allOf 不能为空，也不能含空字符串");
             }
-            if disable_pet || !rule.pet_only {
-                rules.push(rule.all_of);
-            }
-        }
-        if rules.is_empty() {
-            bail!("当前模式下没有启用任何复合前置规则");
+            rules.push(rule.all_of);
         }
         Ok(Self { rules })
     }
@@ -140,18 +123,6 @@ pub(super) fn renderer_patch_anchors(script: &str) -> Result<Vec<String>> {
         serde_json::from_str(&script[start..end]).context("前置字面量表不是 JSON 字符串数组")?;
     if anchors.is_empty() || anchors.iter().any(String::is_empty) {
         bail!("前置字面量表不能为空，也不能含空字符串");
-    }
-    Ok(anchors)
-}
-
-#[cfg(test)]
-pub(super) fn renderer_patch_anchors_for_mode(
-    script: &str,
-    disable_pet: bool,
-) -> Result<Vec<String>> {
-    let mut anchors = renderer_patch_anchors(script)?;
-    if !disable_pet {
-        anchors.retain(|anchor| !PET_ONLY_PATCH_ANCHORS.contains(&anchor.as_str()));
     }
     Ok(anchors)
 }

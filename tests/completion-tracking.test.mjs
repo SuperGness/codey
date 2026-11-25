@@ -490,148 +490,7 @@ test("reconciles when the conversation appears after renderer startup", async ()
   assert.deepEqual(events.map((event) => event.payload.conversationId), ["session-1"]);
 });
 
-test("usage-only manager remains available when deletion and reconciliation are missing", async () => {
-  const requests = [];
-  const runtime = loadInjection({
-    discoveredAppServerManager: { sendRequest(method) { requests.push(method); return { rateLimits: {} }; } },
-    selectedTurnIds: ["turn-1"],
-  });
-  await flushMicrotasks();
-  assert.equal(runtime.window.__codeyPageCapabilities.reconcile.status, "unavailable");
-  assert.ok((await runtime.window.__codeyReadAccountRateLimits()).rateLimits);
-  assert.deepEqual(requests, ["account/rateLimits/read"]);
-  await runtime.window.__codeyDeleteSelectedMessages();
-  assert.equal(runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"), false);
-  assert.equal(runtime.alerts.length, 0);
-  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
-  assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "unavailable");
-});
 
-test("native model routing discovers the local request client without sending a request", async () => {
-  const client = { hostId: "local", enqueueRequest() { throw Error("must not send"); }, createRequest() {}, onResult() {} };
-  const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
-  const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
-  let fetches = 0;
-  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
-  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
-  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
-  assert.equal(fetches, 0, "exported registry discovery must not read asset source");
-});
-
-test("native model routing retains module discovery before React mounts", async () => {
-  const client = { hostId: "local", enqueueRequest() { assert.fail("must not send"); }, createRequest() {}, onResult() {} };
-  const manager = { requestClient: client };
-  const runtime = loadInjection({ initialSessionId: "" });
-  const scope = {
-    query() {}, set() {}, watch() {}, when() {},
-    get(_key, hostId) { return hostId === "local" ? manager : null; },
-  };
-  const module = {
-    container: { scope },
-    Registry: class {
-      getAll() { return this.scope.get("managers"); }
-      getForHostId(hostId) { return this.scope.get("manager", hostId); }
-    },
-  };
-  runtime.document.scripts.push({ src: "app://-/assets/app-initial-module.js" });
-  runtime.window.__codeyImportCodexAsset = async () => module;
-  let fetches = 0;
-  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
-
-  assert.equal(runtime.document.body.__reactFiber$test, undefined);
-  assert.equal(await runtime.window.__codeyLoadCodexRequestClientFromModule(), client);
-  assert.equal(fetches, 0, "module discovery must not read asset source");
-});
-
-test("native model routing retries unexported registry discovery and caches source bindings across capabilities", async () => {
-  for (const unavailable of ["react", "import", "fetch"]) {
-    const hosts = {}, managers = {};
-    const client = { hostId: "local", enqueueRequest() { assert.fail("must not send"); }, createRequest() {}, onResult() {} };
-    const manager = createLocalDeletionManager({ requestClient: client, sendRequest() { assert.fail("must not send"); } });
-    const scope = Object.assign(function scope() {}, {
-      query() {}, set() {}, watch() {}, when() {},
-      get(key, hostId) {
-        if (key === hosts) return ["local"];
-        assert.equal(key, managers);
-        assert.equal(hostId, "local");
-        return manager;
-      },
-    });
-    const module = { h: hosts, m: managers, mQt: { scope } };
-    const url = "app://-/assets/app-initial-unexported-routing.js";
-    const asset = "throw Error('must not evaluate');class R {getForHostId(e){return this.scope.get(hosts).includes(e)?this.scope.get(managers,e):null}};export {hosts as h,managers as m};";
-    const runtime = loadInjection({ initialSessionId: "" });
-    const mount = () => { runtime.document.body.__reactFiber$test = { memoizedState: { scope } }; };
-    if (unavailable !== "react") mount();
-    runtime.document.scripts.push({ src: url });
-    let ready = false;
-    let fetches = 0;
-    runtime.window.__codeyImportCodexAsset = async () => {
-      if (!ready && unavailable === "import") throw Error("asset import is not ready");
-      return module;
-    };
-    runtime.window.fetch = async (assetUrl) => {
-      assert.equal(assetUrl, url);
-      fetches += 1;
-      return { ok: ready || unavailable !== "fetch", text: async () => asset };
-    };
-
-    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/, unavailable);
-    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "unavailable", unavailable);
-    if (unavailable === "react") {
-      await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
-      assert.equal(fetches, 1, "React retries reuse bindings even before a manager is found");
-      mount();
-    }
-    ready = true;
-    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client, unavailable);
-    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available", unavailable);
-    runtime.window.__codeyCodexSessionController = null;
-    assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, manager);
-    assert.equal(fetches, unavailable === "fetch" ? 2 : 1, "deletion reuses the successful source resolver");
-  }
-});
-
-function loadCachedManagerInjection(managers, { inherited = false, mounted = true } = {}) {
-  const runtime = loadInjection({ initialSessionId: "" });
-  const families = managers.map(() => ({ kind: "signal-family" }));
-  const bindings = new Map(families.map((family) => [family, new Map(mounted ? [["local", {}]] : [])]));
-  const reads = [];
-  const node = { familyBindings: bindings };
-  const scope = {
-    query: null,
-    node: inherited ? { familyBindings: new Map() } : node,
-    chain: new Map(inherited ? [["parent", node]] : []),
-    get(family, hostId) {
-      assert.equal(hostId, "local");
-      assert.ok(bindings.get(family)?.has(hostId), "discovery must not initialize an unused signal");
-      reads.push(family);
-      return managers[families.indexOf(family)];
-    },
-    set() { throw Error("discovery must not change signals"); },
-    watch() { throw Error("discovery must not create RPC watchers"); },
-    when() {},
-  };
-  runtime.document.body.__reactFiber$cachedManager = {
-    memoizedState: { scope },
-    return: null,
-  };
-  runtime.document.scripts.push({ src: "app://-/assets/app-initial-private-registry.js" });
-  runtime.window.__codeyImportCodexAsset = async () => ({});
-  return { ...runtime, reads };
-}
-
-test("native model routing discovers a cached manager when its registry is no longer exported", async () => {
-  for (const inherited of [false, true]) {
-    const client = { hostId: "local", enqueueRequest() { throw Error("must not send"); }, createRequest() {}, onResult() {} };
-    const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
-    const runtime = loadCachedManagerInjection([manager], { inherited });
-    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
-    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
-    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
-    assert.equal(runtime.reads.length, 1, "reuse the verified manager on subsequent calls");
-  }
-});
 
 test("React manager discovery enumerates an object shared by many fibers once per scan", () => {
   const runtime = loadInjection({ initialSessionId: "" });
@@ -660,11 +519,20 @@ test("background completion reconcile backs off longer than other failed capabil
   for (const [feature, capMs] of [["reconcile", 300_000], ["usage", 30_000]]) {
     const runtime = loadInjection({ initialSessionId: "" });
     let discoveries = 0;
-    runtime.document.scripts.push({ src: "app://-/assets/app-initial-unsupported.js" });
-    runtime.window.__codeyImportCodexAsset = async () => {
-      discoveries += 1;
-      return {};
+    const family = { kind: "signal-family" };
+    const scope = {
+      query: null,
+      node: { familyBindings: new Map([[family, new Map([["local", {}]])]]) },
+      chain: new Map(),
+      get() {
+        discoveries += 1;
+        return null;
+      },
+      set() {},
+      watch() {},
+      when() {},
     };
+    runtime.document.body.__reactFiber$backoff = { memoizedState: { scope }, return: null };
     const load = () => runtime.window.__codeyLoadCodexSessionController({ feature });
     for (let failure = 0; failure < 10; failure += 1) {
       await assert.rejects(load(), /暂不支持/);
@@ -679,70 +547,6 @@ test("background completion reconcile backs off longer than other failed capabil
     await assert.rejects(load(), /暂不支持/);
     assert.equal(discoveries, 12, `${feature} rediscovers once its backoff cap expires`);
   }
-});
-
-test("cached manager discovery rejects remote, incomplete, ambiguous, and unmounted clients", async () => {
-  const manager = (hostId = "local") => ({
-    requestClient: { hostId, enqueueRequest() {}, createRequest() {}, onResult() {} },
-    sendRequest() { throw Error("must not send"); },
-  });
-  for (const [managers, options] of [
-    [[manager("remote")], {}],
-    [[{ requestClient: { hostId: "local" }, sendRequest() {} }], {}],
-    [[manager(), manager()], {}],
-    [[manager()], { mounted: false }],
-  ]) {
-    const runtime = loadCachedManagerInjection(managers, options);
-    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
-    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "unavailable");
-    if (options.mounted === false) assert.equal(runtime.reads.length, 0);
-  }
-});
-
-test("native model routing cannot use a remote or incomplete client", async () => {
-  const manager = { requestClient: { hostId: "remote" }, getConversation() { return null; } };
-  const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
-  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
-});
-
-test("native model routing retries a real discovery inside the failure backoff", async () => {
-  const runtime = loadInjection({ initialSessionId: "" });
-  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
-
-  // 第一次失败把 retryAt 推到了将来；模型请求校验的重试节奏由宿主注入流程
-  // 控制，所以下一次调用必须重新走发现流程，而不是被退避直接拒绝。
-  const client = {
-    hostId: "local",
-    enqueueRequest() { throw Error("must not send"); },
-    createRequest() {},
-    onResult() {},
-  };
-  const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
-  const scope = {
-    query: null,
-    get(_key, hostId) { return hostId === "local" ? manager : null; },
-    set() {},
-    watch() {},
-    when() {},
-    forHost() {},
-  };
-  runtime.document.body.__reactFiber$late = {
-    dependencies: null,
-    memoizedProps: null,
-    memoizedState: { scope },
-    return: null,
-    updateQueue: null,
-  };
-  runtime.document.scripts.push({ src: "app://-/assets/app-initial-late.js" });
-  runtime.window.__codeyImportCodexAsset = async () => ({
-    LocalRegistry: class {
-      getAll() { return this.scope.get("managers"); }
-      getForHostId(hostId) { return this.scope.get("manager", hostId); }
-    },
-  });
-
-  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
-  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
 });
 
 test("MCP reload prefers the patched AppServerRequestClient over fiber discovery", async () => {
@@ -764,13 +568,10 @@ test("MCP reload prefers the patched AppServerRequestClient over fiber discovery
 test("MCP reload awaits the native request without restarting or resuming a task", async () => {
   const requests = [];
   let finish;
-  const runtime = loadInjection({
-    initialSessionId: "",
-    discoveredAppServerManager: {
-      sendRequest(...args) {
-        requests.push(args);
-        return new Promise((resolve) => { finish = resolve; });
-      },
+  const runtime = loadHostedManagerInjection({
+    sendRequest(...args) {
+      requests.push(args);
+      return new Promise((resolve) => { finish = resolve; });
     },
   });
   let completed = false;
@@ -788,12 +589,9 @@ test("MCP reload awaits the native request without restarting or resuming a task
 
 test("MCP reload propagates protocol errors and can be retried", async () => {
   let fail = true;
-  const runtime = loadInjection({
-    initialSessionId: "",
-    discoveredAppServerManager: {
-      sendRequest() {
-        return fail ? Promise.reject(new Error("Unknown method")) : Promise.resolve({});
-      },
+  const runtime = loadHostedManagerInjection({
+    sendRequest() {
+      return fail ? Promise.reject(new Error("Unknown method")) : Promise.resolve({});
     },
   });
   await assert.rejects(runtime.window.__codeyReloadMcpServers(), /Unknown method/);
@@ -803,51 +601,8 @@ test("MCP reload propagates protocol errors and can be retried", async () => {
 
 test("MCP reload reports an unavailable manager instead of using legacy session signals", async () => {
   const runtime = loadInjection({ initialSessionId: "" });
-  runtime.window.__codeyCodexSignalDispatcher = () => { throw new Error("unexpected signal"); };
   await assert.rejects(runtime.window.__codeyReloadMcpServers(), { code: "codey_capability_unavailable" });
   assert.equal(runtime.window.__codeyPageCapabilities.mcpReload.status, "unavailable");
-});
-
-test("MCP reload discovery is not capped by the native session timeout", async () => {
-  const requests = [];
-  const manager = {
-    sendRequest(...args) {
-      requests.push(args);
-      return {};
-    },
-  };
-  const runtime = loadInjection({
-    discoveredAppServerManager: manager,
-    initialSessionId: "",
-  });
-  runtime.window.__codeyCodexSessionController = null;
-  const originalImport = runtime.window.__codeyImportCodexAsset;
-  let release;
-  runtime.window.__codeyImportCodexAsset = (...args) => new Promise((resolve) => {
-    release = () => resolve(originalImport(...args));
-  });
-  const reload = runtime.window.__codeyReloadMcpServers();
-  await flushMicrotasks();
-  runtime.flushTimers();
-  await flushMicrotasks();
-  assert.equal(requests.length, 0);
-  release();
-  assert.equal((await reload).ok, true);
-  assert.equal(JSON.stringify(requests), JSON.stringify([["config/mcpServer/reload", {}]]));
-});
-
-test("message deletion requires the complete local manager before releasing or persisting", async () => {
-  for (const missing of ["getHostId", "getConversation", "getStreamRole", "sendRequest",
-    "updateConversationState", "inactiveThreadUnsubscriber"]) {
-    let releases = 0;
-    const manager = createLocalDeletionManager({ sendRequest() { releases += 1; } });
-    delete manager[missing];
-    const runtime = loadInjection({ localAppServerManager: manager, selectedTurnIds: ["turn-1"] });
-    await flushMicrotasks();
-    await runtime.window.__codeyDeleteSelectedMessages();
-    assert.equal(releases, 0, missing);
-    assert.equal(runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"), false, missing);
-  }
 });
 
 test("RPC function stubs do not advertise unavailable in-place deletion methods", async () => {
@@ -862,7 +617,7 @@ test("RPC function stubs do not advertise unavailable in-place deletion methods"
   });
   const runtime = loadInjection({
     initialSessionId: "",
-    discoveredAppServerManager: rpc,
+    codexSessionController: { kind: "manager", manager: rpc },
     selectedTurnIds: ["turn-1"],
   });
   await assert.rejects(
@@ -875,343 +630,42 @@ test("RPC function stubs do not advertise unavailable in-place deletion methods"
   assert.equal(runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"), false);
 });
 
-test("deletion uses the local registry instead of RPC stubs without custom native methods", async () => {
-  const rpcCalls = [];
-  const rpc = new Proxy({}, {
-    get(_target, method) {
-      return async () => {
-        rpcCalls.push(method);
-        throw new TypeError(`'${String(method)}' is not a function.`);
-      };
-    },
-  });
-  const retainedTurn = { turnId: "turn-2", status: "completed" };
-  const conversation = {
-    turns: [{ turnId: "turn-1", status: "completed" }, retainedTurn],
-    resumeState: "resumed",
-  };
-  const events = [];
-  let runtime;
-  const manager = {
-    getHostId() { return "local"; },
-    getConversation() { return conversation; },
-    getStreamRole() { return { role: "owner" }; },
-    async sendRequest(method, params) {
-      assert.equal(method, "thread/unsubscribe");
-      assert.equal(params.threadId, "session-1");
-      events.push("unsubscribe");
-    },
-    updateConversationState(sessionId, update) {
-      assert.equal(sessionId, "session-1");
-      update(conversation);
-      for (let index = 0; index < 2; index += 1) {
-        const row = runtime.getTurnRow(index);
-        if (!conversation.turns.some((turn) => turn.turnId === row.getAttribute("data-turn-key"))) row.remove();
-      }
-      events.push("update");
-    },
-    inactiveThreadUnsubscriber: {
-      clearConversationStreamOwnership() { events.push("clear"); },
-    },
-    discardConversationFromCache() { assert.fail("must not evict the conversation"); },
-    resumeConversation() { assert.fail("must not resume the conversation"); },
-  };
-  runtime = loadInjection({
-    initialSessionId: "",
-    turnIds: ["turn-1", "turn-2"],
-    selectedTurnIds: ["turn-1"],
-    codexSessionController: { kind: "manager", manager: rpc },
-    discoveredAppServerManager: rpc,
-    localAppServerManager: manager,
-    bridgeHandler: async (path) => {
-      if (path !== "/session/delete-messages") return { status: "ok" };
-      events.push("persist");
-      return { status: "ok", deleted: 1 };
-    },
-  });
-  runtime.setSessionId("session-1");
-  await runtime.window.__codeyDeleteSelectedMessages();
-  assert.equal(runtime.window.__codeyCodexSessionController.manager, manager);
-  assert.deepEqual(events, ["unsubscribe", "persist", "update", "clear"]);
-  assert.deepEqual(rpcCalls, []);
-  assert.equal(conversation.turns[0], retainedTurn);
-  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-2"]);
-  assert.deepEqual(runtime.alerts, []);
-  assert.equal(runtime.getReloadCount(), 0);
-});
-
-test("message deletion works when native registry classes are not exported and source edits are unavailable", async () => {
-  const hosts = {}, managers = {};
-  const module = { h: hosts, m: managers };
-  const url = "app://-/assets/app-initial-unexported.js";
-  const asset = "class R {getForHostId(e){return this.scope.get(hosts).includes(e)?this.scope.get(managers,e):null}};export {hosts as h,managers as m};";
-  const events = [];
-  const retained = { turnId: "turn-2", status: "completed" };
-  const conversation = { turns: [{ turnId: "turn-1", status: "completed" }, retained], resumeState: "resumed" };
-  const manager = createLocalDeletionManager({
-    getConversation() { return conversation; },
-    async sendRequest(method) { assert.equal(method, "thread/unsubscribe"); events.push("unsubscribe"); },
-    updateConversationState(_id, update) { update(conversation); events.push("update"); },
-    inactiveThreadUnsubscriber: { clearConversationStreamOwnership() { events.push("clear"); } },
-  });
-  const runtime = loadInjection({
-    initialSessionId: "", selectedTurnIds: ["turn-1"], turnIds: ["turn-1", "turn-2"],
-    bridgeHandler(path) {
-      if (path === "/session/delete-messages") events.push("persist");
-      return { status: "ok", deleted: 1 };
-    },
-  });
-  runtime.document.scripts.push({ src: url });
-  runtime.document.body.__reactFiber$test = { memoizedState: { scope: {
-    query: null, set() {}, watch() {}, when() {},
-    get(key, host) {
-      if (key === hosts) return ["local"];
-      assert.equal(key, managers);
-      assert.equal(host, "local");
-      return manager;
-    },
-  } } };
-  runtime.window.__codeyImportCodexAsset = async () => module;
-  let fetches = 0;
-  runtime.window.fetch = async (assetUrl) => {
-    assert.equal(assetUrl, url);
-    fetches += 1;
-    return { ok: true, text: async () => asset };
-  };
-  assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, manager);
-  runtime.window.__codeyCodexSessionController = null;
-  assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, manager);
-  assert.equal(fetches, 1, "validated bindings are cached without retaining the source");
-  assert.deepEqual(events, [], "discovery must not release or delete a conversation");
-  runtime.setSessionId("session-1");
-  await runtime.window.__codeyDeleteSelectedMessages();
-  assert.deepEqual(events, ["unsubscribe", "persist", "update", "clear"]);
-  assert.deepEqual(conversation.turns, [retained]);
-  assert.deepEqual(runtime.alerts, []);
-  assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
-});
-
-test("direct manager registry deletes without React discovery or module exports", async () => {
-  const events = [];
-  const retained = { turnId: "turn-2", status: "completed" };
-  const conversation = { turns: [{ turnId: "turn-1", status: "completed" }, retained], resumeState: "resumed" };
-  let runtime;
-  const manager = createLocalDeletionManager({
-    getConversation() { return conversation; },
-    async sendRequest(method, params) {
-      assert.equal(method, "thread/unsubscribe");
-      assert.equal(params.threadId, "session-1");
-      events.push("unsubscribe");
-    },
-    updateConversationState(id, update) {
-      assert.equal(id, "session-1");
-      update(conversation);
-      runtime.getTurnRow().remove();
-      events.push("update");
-    },
-    inactiveThreadUnsubscriber: { clearConversationStreamOwnership(id) {
-      assert.equal(id, "session-1");
-      events.push("clear");
-    } },
-  });
-  runtime = loadInjection({
-    initialSessionId: "", turnIds: ["turn-1", "turn-2"], selectedTurnIds: ["turn-1"],
-    appServerManagers: new Map([["local", manager]]),
-    bridgeHandler(path) {
-      if (path === "/session/delete-messages") events.push("persist");
-      return { status: "ok", deleted: 1 };
-    },
-  });
-  assert.deepEqual(runtime.document.scripts, []);
-  assert.equal(runtime.document.body.__reactFiber$test, undefined);
-  runtime.setSessionId("session-1");
-  await runtime.window.__codeyDeleteSelectedMessages();
-  assert.deepEqual(events, ["unsubscribe", "persist", "update", "clear"]);
-  assert.equal(conversation.turns.length, 1);
-  assert.equal(conversation.turns[0], retained);
-  assert.equal(runtime.getReloadCount(), 0);
-});
-
-test("late direct registration bypasses discovery backoff and replaces a cached manager", async () => {
-  const registry = new Map();
-  const runtime = loadInjection({ initialSessionId: "", appServerManagers: registry });
-  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
-  const first = createLocalDeletionManager();
-  registry.set("local", first);
-  assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, first);
-  const replacement = createLocalDeletionManager();
-  registry.set("local", replacement);
-  assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, replacement);
-});
-
-test("a registered local manager serves every session capability without asset discovery", async () => {
-  const client = { hostId: "local", enqueueRequest() {}, createRequest() {}, onResult() {} };
-  const manager = createLocalDeletionManager({
-    requestClient: client,
-    async refreshRecentConversations() {},
-    async codeyReconcileCompletedConversation() { return true; },
-  });
-  const runtime = loadInjection({ initialSessionId: "", appServerManagers: new Map([["local", manager]]) });
-  runtime.document.scripts.push({ src: "app://-/assets/782259.9dd29a0a62.js" });
-  let fetches = 0;
-  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
-  for (const feature of ["session", "usage", "mcpReload", "reconcile", "refresh", "modelRouting", "deleteMessages"]) {
-    runtime.window.__codeyCodexSessionController = null;
-    assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature })).manager, manager, feature);
-    assert.equal(runtime.window.__codeyPageCapabilities[feature].status, "available", feature);
-  }
-  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
-  assert.equal(fetches, 0, "registered managers need no asset discovery");
-});
-
-test("numeric rspack chunks are neither fetched nor reported as a model routing outage", async () => {
+test("failed discovery backs off independently and recovers when a hosted manager appears", async () => {
+  let reads = 0;
+  let connected = false;
+  const family = { kind: "signal-family" };
+  const rpc = fakeRpcStub({ sendRequest: () => ({ rateLimits: {} }) });
   const runtime = loadInjection({ initialSessionId: "" });
-  runtime.document.scripts.push(
-    { src: "app://-/assets/782259.9dd29a0a62.js" },
-    { src: "app://-/assets/async/24191.589dcc9878.js?v=1" },
-  );
-  let fetches = 0;
-  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
-  runtime.window.__codeyImportCodexAsset = async () => assert.fail("numeric chunks expose no module instances");
-  await assert.rejects(runtime.window.__codeyLoadCodexRequestClientFromModule(), /没有可导入的模块入口/);
-  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting, undefined, "the fast path failure is not a capability verdict");
-  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "refresh" }));
-  assert.equal(fetches, 0);
-});
-
-test("direct registry rejects remote incomplete disposed and RPC managers before persistence", async () => {
-  const rpcCalls = [];
-  const rpc = new Proxy({}, { get(_target, key) { return async () => { rpcCalls.push(key); }; } });
-  const candidates = [
-    createLocalDeletionManager({ getHostId() { return "remote"; } }),
-    createLocalDeletionManager({ disposed: true }),
-    rpc,
-    ...["getHostId", "getConversation", "getStreamRole", "sendRequest", "updateConversationState", "inactiveThreadUnsubscriber"]
-      .map((key) => { const manager = createLocalDeletionManager(); delete manager[key]; return manager; }),
-  ];
-  for (const candidate of candidates) {
-    const runtime = loadInjection({ initialSessionId: "", selectedTurnIds: ["turn-1"], appServerManagers: new Map([["local", candidate]]) });
-    runtime.setSessionId("session-1");
-    await runtime.window.__codeyDeleteSelectedMessages();
-    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
-  }
-  assert.deepEqual(rpcCalls, []);
-});
-
-test("registration during module discovery wins over delayed success and failure", async () => {
-  for (const failImport of [false, true]) {
-    const registry = new Map();
-    const oldManager = createLocalDeletionManager();
-    const runtime = loadInjection({ initialSessionId: "", appServerManagers: registry, discoveredAppServerManager: oldManager });
-    const originalImport = runtime.window.__codeyImportCodexAsset;
-    let release;
-    const blocked = new Promise((resolve) => { release = resolve; });
-    runtime.window.__codeyImportCodexAsset = async (...args) => {
-      await blocked;
-      if (failImport) throw new Error("module import failed");
-      return originalImport(...args);
-    };
-    const loading = runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
-    await flushMicrotasks();
-    const current = createLocalDeletionManager();
-    registry.set("local", current);
-    release();
-    assert.equal((await loading).manager, current);
-    assert.equal(runtime.window.__codeyCodexSessionController.manager, current);
-    assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
-  }
-});
-
-test("failed discovery backs off independently and recovers when a manager appears", async () => {
-  let imports = 0;
-  // Exercise discovery through an already discoverable manager asset.
-  const manager = { sendRequest() { return { rateLimits: {} }; } };
-  const discovered = loadInjection({ discoveredAppServerManager: manager, initialSessionId: "" });
-  const originalImport = discovered.window.__codeyImportCodexAsset;
-  discovered.window.__codeyImportCodexAsset = async (...args) => { imports += 1; return originalImport(...args); };
-  await assert.rejects(discovered.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }), { code: "codey_capability_unavailable" });
-  const firstImports = imports;
-  await assert.rejects(discovered.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
-  assert.equal(imports, firstImports);
-  discovered.advanceTime(1_000);
-  await assert.rejects(discovered.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
-  assert.ok(imports > firstImports);
-  const secondImports = imports;
-  discovered.advanceTime(1_000);
-  await assert.rejects(discovered.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
-  assert.equal(imports, secondImports, "second failure waits two seconds");
-  Object.assign(manager, createLocalDeletionManager({ sendRequest: manager.sendRequest }));
-  const controller = await discovered.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
-  assert.equal(controller.manager, manager);
-  assert.equal(discovered.window.__codeyPageCapabilities.deleteMessages.status, "available");
-  assert.ok((await discovered.window.__codeyReadAccountRateLimits()).rateLimits);
-});
-
-test("timed out discovery cannot later issue a message deletion", async () => {
-  const manager = createLocalDeletionManager();
-  const runtime = loadInjection({ discoveredAppServerManager: manager, initialSessionId: "", selectedTurnIds: ["turn-1"] });
-  const originalImport = runtime.window.__codeyImportCodexAsset;
-  let release;
-  runtime.window.__codeyImportCodexAsset = (...args) => new Promise((resolve) => { release = () => resolve(originalImport(...args)); });
-  runtime.setSessionId("session-1");
-  const deletion = runtime.window.__codeyDeleteSelectedMessages();
-  await flushMicrotasks();
-  runtime.flushTimers();
-  await deletion;
-  release();
-  await flushMicrotasks();
-  assert.equal(runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"), false);
-  assert.equal(runtime.alerts.length, 0);
-});
-
-test("disposed capability discovery cannot replace a new installation's controller or status", async () => {
-  const manager = { sendRequest() { return { rateLimits: {} }; } };
-  const runtime = loadInjection({ discoveredAppServerManager: manager, initialSessionId: "" });
-  const originalImport = runtime.window.__codeyImportCodexAsset;
-  let release;
-  runtime.window.__codeyImportCodexAsset = (...args) => new Promise((resolve) => {
-    release = () => resolve(originalImport(...args));
-  });
-  const pending = runtime.window.__codeyLoadCodexSessionController({ feature: "usage" });
-  await flushMicrotasks();
-  runtime.window.__codeySessionToolsInstall.dispose();
-  const replacement = { kind: "manager", manager: { sendRequest() {} } };
-  const replacementStatus = { usage: { status: "available", message: "" } };
-  runtime.window.__codeyCodexSessionController = replacement;
-  runtime.window.__codeyPageCapabilities = replacementStatus;
-  release();
-  await assert.rejects(pending, { code: "codey_capability_unavailable" });
-  assert.equal(runtime.window.__codeyCodexSessionController, replacement);
-  assert.equal(runtime.window.__codeyPageCapabilities, replacementStatus);
-  assert.equal(replacementStatus.usage.status, "available");
-});
-
-test("rediscovers a patched manager cached before completion reconciliation was available", async () => {
-  const managerEvents = [];
-  const discoveredAppServerManager = {
-    codeyReconcileCompletedConversation(payload) {
-      managerEvents.push(payload.conversationId);
-      return Promise.resolve(true);
+  const scope = {
+    query: null,
+    node: { familyBindings: new Map([[family, new Map([["local", {}]])]]) },
+    chain: new Map(),
+    get() {
+      reads += 1;
+      return connected ? { status: "ready", client: { hostId: "local", rpc } } : null;
     },
-    discardConversationFromCache() {},
-    handleThreadDeletion() {},
-    refreshRecentConversations() {},
-    resumeConversation() {},
+    set() {},
+    watch() {},
+    when() {},
   };
-  loadInjection({
-    codexSessionController: {
-      kind: "manager",
-      discardConversation() {},
-      notifyConversationDeleted() {},
-      refreshRecentConversations() {},
-      resumeConversation() {},
-    },
-    discoveredAppServerManager,
-  });
-
-  await flushMicrotasks();
-
-  assert.deepEqual(managerEvents, ["session-1"]);
+  runtime.document.body.__reactFiber$hostedBackoff = { memoizedState: { scope }, return: null };
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }), { code: "codey_capability_unavailable" });
+  const firstReads = reads;
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
+  assert.equal(reads, firstReads);
+  runtime.advanceTime(1_000);
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
+  assert.ok(reads > firstReads);
+  const secondReads = reads;
+  runtime.advanceTime(1_000);
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }));
+  assert.equal(reads, secondReads, "second failure waits two seconds");
+  runtime.advanceTime(2_000);
+  connected = true;
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  assert.equal(controller.reloadsConversationAfterDeletion, true);
+  assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
+  assert.ok((await runtime.window.__codeyReadAccountRateLimits()).rateLimits);
 });
 
 test("resets the reconciliation interval when the visible session changes", async () => {
@@ -1270,36 +724,7 @@ test("rejects a stale result and reconciles the task opened while a request was 
   );
 });
 
-test("retries AppServerManager discovery when a signals controller was cached first", async () => {
-  const managerEvents = [];
-  const signalEvents = [];
-  const discoveredAppServerManager = {
-    codeyReconcileCompletedConversation(payload) {
-      managerEvents.push("reconcile:" + payload.conversationId);
-      return Promise.resolve(true);
-    },
-    discardConversationFromCache() {},
-    handleThreadDeletion() {},
-    refreshRecentConversations() {},
-    resumeConversation() {},
-  };
-  const runtime = loadInjection({
-    codexSessionController: {
-      kind: "signals",
-      discardConversation: () => signalEvents.push("discard"),
-      notifyConversationDeleted: () => signalEvents.push("delete"),
-      refreshRecentConversations: () => signalEvents.push("refresh"),
-      resumeConversation: () => signalEvents.push("resume"),
-    },
-    discoveredAppServerManager,
-  });
 
-  await flushMicrotasks();
-
-  assert.deepEqual(managerEvents, ["reconcile:session-1"]);
-  assert.deepEqual(signalEvents, []);
-  assert.equal(runtime.window.__codeyCodexSessionController.kind, "manager");
-});
 
 test("deletes selected turns in place without evicting or resuming the conversation", async () => {
   const events = [];
@@ -2962,7 +2387,7 @@ test("exports a session through ordered chunks and finalizes the transfer", asyn
 });
 
 test("refreshes Codex recent sessions after importing instead of reloading", async () => {
-  const signalCalls = [];
+  let refreshCount = 0;
   const runtime = loadInjection({
     bridgeHandler: async (path, payload) => {
       if (path === "/session/import/start") {
@@ -2988,8 +2413,11 @@ test("refreshes Codex recent sessions after importing instead of reloading", asy
       }
       return { status: "ok" };
     },
-    codexSignalDispatcher: async (name, payload) => {
-      signalCalls.push({ name, payload });
+    codexSessionController: {
+      kind: "manager",
+      refreshRecentConversations: async () => {
+        refreshCount += 1;
+      },
     },
   });
   const button = new FakeElement();
@@ -3000,10 +2428,7 @@ test("refreshes Codex recent sessions after importing instead of reloading", asy
     button,
   );
 
-  assert.deepEqual(JSON.parse(JSON.stringify(signalCalls)), [{
-    name: "refresh-recent-conversations-for-host",
-    payload: { hostId: "local" },
-  }]);
+  assert.equal(refreshCount, 1);
   const chunkCall = runtime.bridgeCalls.find((call) => call.path === "/session/import/chunk");
   assert.equal(Buffer.from(chunkCall?.payload.data, "base64").toString("utf8"), "{\"format\":\"codey.session\"}");
   const finishCall = runtime.bridgeCalls.find((call) => call.path === "/session/import/finish");
@@ -3155,10 +2580,10 @@ test("hosted AppServerManager rejects page-only capabilities once without rescan
 });
 
 function hostedReconcileHandlers(overrides = {}) {
-  const state = { execution: { inProgress: true, activeTurnId: "turn-1" }, role: { role: "owner" }, status: "idle", unsubscribed: false };
+  const state = { execution: { inProgress: true, activeTurnId: "turn-1" }, status: "idle", unsubscribed: false };
   const handlers = {
     getThreadExecutionState: () => state.execution,
-    getStreamRole: () => state.role,
+    getStreamRole: () => { assert.fail("Codex 26.1120 removed getStreamRole"); },
     sendRequest: (method, params) => {
       assert.equal(method, "thread/read");
       assert.deepEqual({ ...params }, { threadId: "thread-1", includeTurns: false });
@@ -3194,6 +2619,7 @@ test("hosted completion reconcile confirms idle twice, then unsubscribes and res
   const runtime = loadHostedManagerInjection(handlers);
   assert.equal(await runHostedReconcile(runtime), true);
   const names = runtime.calls.map(([name]) => name);
+  assert.ok(!names.includes("getStreamRole"), "must not call removed getStreamRole");
   assert.ok(names.indexOf("unsubscribeInactiveConversation") < names.indexOf("resumeConversation"));
   assert.equal(names.at(-1), "getThreadExecutionState", "the result reflects the resumed state");
   assert.equal(names.filter((name) => name === "sendRequest").length, 2, "native status is read twice");
@@ -3206,12 +2632,11 @@ test("hosted completion reconcile confirms idle twice, then unsubscribes and res
   assert.equal(runtime.window.__codeyPageCapabilities.reconcile.status, "available");
 });
 
-test("hosted completion reconcile leaves live, pending, follower, changing, and unowned threads alone", async () => {
+test("hosted completion reconcile leaves live, pending, changing, and unowned threads alone", async () => {
   let reads = 0;
   for (const [label, setup] of [
     ["still running", ({ state }) => { state.status = "active"; }],
     ["pending submission has no turn id", ({ state }) => { state.execution = { inProgress: true, activeTurnId: null }; }],
-    ["follower window", ({ state }) => { state.role = { role: "follower" }; }],
     ["status changes between reads", ({ state }) => {
       state.status = () => ({ type: reads++ === 0 ? "idle" : "active" });
     }],
@@ -3238,10 +2663,10 @@ test("hosted completion reconcile leaves live, pending, follower, changing, and 
 });
 
 function hostedDeletionHandlers(overrides = {}) {
-  const state = { execution: { inProgress: false, activeTurnId: null }, role: { role: "owner" } };
+  const state = { execution: { inProgress: false, activeTurnId: null } };
   const handlers = {
     getThreadExecutionState: () => state.execution,
-    getStreamRole: () => state.role,
+    getStreamRole: () => { assert.fail("Codex 26.1120 removed getStreamRole"); },
     unsubscribeInactiveConversation: () => {},
     sendRequest: (method, params) => {
       assert.equal(method, "thread/unsubscribe");
@@ -3264,7 +2689,7 @@ test("hosted message deletion releases the thread before files change and reload
   await controller.prepareMessageDeletion("thread-1");
   // The host call updates its own state; the direct call covers streams it skips.
   assert.deepEqual(runtime.calls.map(([name, arg]) => name === "sendRequest" ? arg : name), [
-    "getThreadExecutionState", "getStreamRole", "unsubscribeInactiveConversation", "thread/unsubscribe",
+    "getThreadExecutionState", "unsubscribeInactiveConversation", "thread/unsubscribe",
   ]);
   runtime.calls.length = 0;
   // Read the workspace before eviction removes its store entry, then explicitly
@@ -3316,10 +2741,9 @@ test("hosted deletion waits for resumed history and reports a failed resume", as
   assert.ok(!failed.calls.some(([name]) => name === "refreshRecentConversations"));
 });
 
-test("hosted message deletion leaves running, unloaded, and follower threads untouched", async () => {
+test("hosted message deletion leaves running and unloaded threads untouched", async () => {
   for (const [label, setup, pattern] of [
     ["running", ({ state }) => { state.execution = { inProgress: true, activeTurnId: "turn-1" }; }, /仍在运行/],
-    ["follower", ({ state }) => { state.role = { role: "follower" }; }, /拥有当前会话的窗口/],
     ["not loaded", ({ state }) => { state.execution = null; }, /尚未加载/],
   ]) {
     const fixture = hostedDeletionHandlers();

@@ -953,8 +953,6 @@
     if (template instanceof HTMLElement) {
       const innerClass = String(template.getAttribute("class") || "").trim();
       if (innerClass) inner.setAttribute("class", innerClass);
-    } else {
-      inner.className = "_ButtonInner_f5tnh_2";
     }
     inner.appendChild(icon);
     button.appendChild(inner);
@@ -2097,132 +2095,6 @@
     scheduleThreadUpdatedAtFetch();
   };
 
-  const codexAppAssetUrls = () => {
-    const performanceUrls = (
-      typeof performance !== "undefined"
-      && typeof performance.getEntriesByType === "function"
-    )
-      ? performance.getEntriesByType("resource").map((entry) => entry.name)
-      : [];
-    return [...new Set([
-      ...Array.from(document.scripts || []).map((script) => script.src),
-      ...Array.from(document.querySelectorAll("link[href]") || []).map((link) => link.href),
-      ...performanceUrls,
-    ].filter((url) => (
-      url
-      && url.includes("/assets/")
-      && url.split("?")[0].endsWith(".js")
-    )))];
-  };
-
-  const codexAssetReferencesFromSource = (source, baseUrl) => {
-    const references = [];
-    const pattern = /["']((?:\.\/(?:assets\/)?|\/assets\/)(?:app-initial|app-server-manager-signals|app-shared)(?:-[^"'?#/]+)?\.js(?:\?[^"']*)?)["']/g;
-    for (const match of String(source || "").matchAll(pattern)) {
-      try {
-        const resolved = new URL(match[1], baseUrl).href;
-        if (!references.includes(resolved)) references.push(resolved);
-      } catch {
-        continue;
-      }
-    }
-    return references;
-  };
-  window.__codeyCodexAssetReferencesFromSource = codexAssetReferencesFromSource;
-
-  const numericCodexChunkUrl = (url) => (
-    /\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js(?:[?#]|$)/i.test(String(url || ""))
-  );
-
-  const discoverCodexAppAssetUrls = async () => {
-    const loadedUrls = codexAppAssetUrls();
-    const discoveredUrls = loadedUrls.filter((url) => (
-      url.includes("app-server-manager-signals-")
-      || url.includes("app-initial-")
-      || url.includes("app-shared-")
-    ));
-    const fetchAsset = typeof window.fetch === "function"
-      ? window.fetch.bind(window)
-      : (typeof fetch === "function" ? fetch : null);
-    if (!fetchAsset) return discoveredUrls;
-
-    // rspack 构建的数字 chunk 只导出模块工厂表，不含按名引用，导入后也拿不到
-    // 模块实例，抓取它们只会白白读取大文件。
-    const scriptUrls = [...new Set([
-      ...Array.from(document.scripts || []).map((script) => script.src),
-      ...loadedUrls,
-    ])].filter((url) => (
-      url
-      && !url.includes("app-server-manager-signals-")
-      && !url.includes("app-initial-")
-      && !url.includes("app-shared-")
-      && !numericCodexChunkUrl(url)
-    )).slice(0, 6);
-    for (const scriptUrl of scriptUrls) {
-      try {
-        const response = await fetchAsset(scriptUrl);
-        if (!response?.ok || typeof response.text !== "function") continue;
-        const source = await response.text();
-        for (const assetUrl of codexAssetReferencesFromSource(source, scriptUrl)) {
-          if (!discoveredUrls.includes(assetUrl)) discoveredUrls.push(assetUrl);
-        }
-      } catch {
-        continue;
-      }
-    }
-    return discoveredUrls;
-  };
-
-  const signalDispatcherFromModule = (module, namedSignalAsset) => {
-    const preferred = namedSignalAsset ? [module?.rn, module?.O] : [module?.O, module?.rn];
-    const candidates = [...preferred, ...Object.values(module || {})].filter((
-      candidate,
-      index,
-      values,
-    ) => typeof candidate === "function" && values.indexOf(candidate) === index);
-    const matches = candidates.filter((candidate) => {
-      let source = "";
-      try {
-        source = Function.prototype.toString.call(candidate);
-      } catch {
-        return false;
-      }
-      return (
-        candidate.length >= 2
-        && candidate.length <= 3
-        && !/\bthis\.[\w$]+\.sendRequest\(/.test(source)
-        && /(?:\breturn\b|=>)[^{};]{0,240}\b[A-Za-z_$][\w$]*\.sendRequest\(\s*[A-Za-z_$][\w$]*\s*,\s*[A-Za-z_$][\w$]*/.test(source)
-      );
-    });
-    const preferredMatches = matches.filter((candidate) => preferred.includes(candidate));
-    if (namedSignalAsset && preferredMatches.length === 1) return preferredMatches[0];
-    return matches.length === 1 ? matches[0] : null;
-  };
-  window.__codeySignalDispatcherFromModule = signalDispatcherFromModule;
-
-  const appServerManagerResolverFromModule = (module) => {
-    const candidates = [...new Set(Object.values(module || {}).filter((candidate) => (
-      typeof candidate === "function"
-    )))];
-    const matches = candidates.filter((candidate) => {
-      let source = "";
-      try {
-        source = Function.prototype.toString.call(candidate);
-      } catch {
-        return false;
-      }
-      return (
-        candidate.length >= 2
-        && candidate.length <= 3
-        && /AppServerManager RPC is not connected/.test(source)
-        && /\.get\(/.test(source)
-        && /\.forHost\(/.test(source)
-      );
-    });
-    return matches.length === 1 ? matches[0] : null;
-  };
-  window.__codeyAppServerManagerResolverFromModule = appServerManagerResolverFromModule;
-
   const reactFiberFromElement = (element) => {
     if (!(element instanceof HTMLElement)) return null;
     const key = Object.keys(element).find((candidate) => (
@@ -2345,14 +2217,6 @@
   };
   window.__codeyAppServerManagerFromReact = appServerManagerFromReact;
 
-  const legacySessionController = (dispatcher) => ({
-    kind: "signals",
-    dispatcher,
-    refreshRecentConversations: () => dispatcher("refresh-recent-conversations-for-host", {
-      hostId: "local",
-    }),
-  });
-
   const declaredMethod = (object, name) => {
     for (let depth = 0; object && depth < 8; depth += 1) {
       const descriptor = Object.getOwnPropertyDescriptor(object, name);
@@ -2362,33 +2226,9 @@
     return null;
   };
 
-  // 新版 Codex 把 AppServerManager 解析器放在 app-shared 里，app-initial
-  // 只剩单参辅助函数；保留原有优先级，只在 app-initial 无法解析时下沉。
-  const managerAssetPriority = (url) => (
-    url.includes("app-initial-")
-      ? 3
-      : url.includes("app-shared-")
-        ? 2
-        : Number(url.includes("app-server-manager-signals-"))
-  );
-
-  const appServerManagerRegistryResolverFromModule = (module) => {
-    const lookups = [...new Set(Object.values(module || {}))].flatMap((candidate) => {
-      if (typeof candidate !== "function") return [];
-      const prototype = Object.getOwnPropertyDescriptor(candidate, "prototype")?.value;
-      if (!prototype || !declaredMethod(prototype, "getAll")) return [];
-      const lookup = declaredMethod(prototype, "getForHostId");
-      if (!lookup || !Function.prototype.toString.call(lookup).includes(".scope.get(")) return [];
-      return [lookup];
-    });
-    return lookups.length === 1
-      ? (scope, hostId) => lookups[0].call({ scope }, hostId) : null;
-  };
-  window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
-
-  // Codex 26.1027 起 AppServerManager 运行在桌面宿主进程，页面只在宿主连接
-  // 信号里持有它的 RPC 存根：{status:"ready", client:{hostId, rpc}}。存根的任意
-  // 属性都可调用，只能按原型上的 dup/onRpcBroken 识别。
+  // AppServerManager 运行在桌面宿主进程，页面只在宿主连接信号里持有它的 RPC
+  // 存根：{status:"ready", client:{hostId, rpc}}。存根的任意属性都可调用，
+  // 只能按原型上的 dup/onRpcBroken 识别。
   const isAppServerRpcStub = (value) => (
     typeof value === "function"
     && Boolean(declaredMethod(value, "dup"))
@@ -2410,18 +2250,14 @@
     }
   };
 
-  // 与资源补丁里的 codeyReconcileCompletedConversation 同一判定：原生 app-server
-  // 两次确认已结束、其间没有新提交，才退订并按重连恢复的方式重新载入。宿主不暴露
-  // 流修订号，改为比对进行中的轮次；尚未确认的提交没有轮次 ID，不会被当作卡住。
+  // 原生 app-server 两次确认已结束、其间没有新提交，才退订并按重连恢复的方式
+  // 重新载入；尚未确认的提交没有轮次 ID，不会被当作卡住。
   const reconcileHostedConversation = async (rpc, params) => {
     const conversationId = params?.conversationId;
     if (conversationId == null) return false;
     const runningTurnId = async () => {
-      const [state, role] = await Promise.all([
-        callHostedAppServer(() => rpc().getThreadExecutionState(conversationId)),
-        callHostedAppServer(() => rpc().getStreamRole(conversationId)),
-      ]);
-      return state?.inProgress === true && state.activeTurnId != null && role?.role !== "follower"
+      const state = await callHostedAppServer(() => rpc().getThreadExecutionState(conversationId));
+      return state?.inProgress === true && state.activeTurnId != null
         ? state.activeTurnId : null;
     };
     const readStatus = async () => {
@@ -2451,16 +2287,12 @@
   };
 
   // 宿主托管时页面拿不到会话状态：删除前由宿主退订并标记待恢复，再按原流程直接
-  // 退订一次（宿主只在本窗口持有历史流时才会发出）；app-server 仍可能保留已加载的
-  // 会话，后端为此记录删除墓碑并在启动维护时重放。完成后经宿主恢复重建页面历史。
+  // 退订一次；app-server 仍可能保留已加载的会话，后端为此记录删除墓碑并在启动
+  // 维护时重放。完成后经宿主恢复重建页面历史。
   const prepareHostedMessageDeletion = async (rpc, conversationId) => {
-    const [state, role] = await Promise.all([
-      callHostedAppServer(() => rpc().getThreadExecutionState(conversationId)),
-      callHostedAppServer(() => rpc().getStreamRole(conversationId)),
-    ]);
+    const state = await callHostedAppServer(() => rpc().getThreadExecutionState(conversationId));
     if (state == null) throw new Error("当前会话尚未加载，请打开该对话后再删除");
     if (state.inProgress === true) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
-    if (role?.role === "follower") throw new Error("请在拥有当前会话的窗口中删除消息");
     await callHostedAppServer(() => rpc().unsubscribeInactiveConversation(conversationId));
     await callHostedAppServer(() => rpc().sendRequest("thread/unsubscribe", { threadId: conversationId }));
   };
@@ -2512,160 +2344,40 @@
 
   const cachedAppServerManagerFromScope = (scope, hostId) => {
     if (hostId !== "local") return null;
-    const managers = new Set();
     const connections = new Set();
     const seenFamilies = new Set();
     const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
     for (const node of nodes) {
       for (const [family, bindings] of node?.familyBindings?.entries?.() || []) {
-        // New builds keep the concrete manager in a signal without exporting
-        // its registry. Read existing local bindings only; probing unused
-        // families can initialize managers or create deferred RPC connections.
+        // Read existing local bindings only; probing unused families can
+        // create deferred RPC connections.
         if (family?.kind !== "signal-family" || !bindings?.has?.(hostId) || seenFamilies.has(family)) continue;
         seenFamilies.add(family);
         try {
           const manager = scope.get(family, hostId);
           if (hostedAppServerConnection(manager, hostId)) {
             connections.add(family);
-            continue;
           }
-          const client = manager && Object.getOwnPropertyDescriptor(manager, "requestClient")?.value;
-          if (client?.hostId !== hostId || !declaredMethod(manager, "sendRequest")
-            || !["enqueueRequest", "createRequest", "onResult"].every((method) => declaredMethod(client, method))) continue;
-          managers.add(manager);
         } catch {
           continue;
         }
       }
     }
-    if (managers.size) return managers.size === 1 ? managers.values().next().value : null;
     return connections.size === 1
       ? hostedAppServerManager(scope, connections.values().next().value, hostId)
       : null;
   };
 
-  const appServerManagerRegistryResolverFromSource = (source, module) => {
-    // 新版不再导出注册表类，但仍导出它读取的两个状态定义。只解析同一
-    // 原生查找表达式的引用，不执行源码，也不依赖压缩后的变量名。
-    const lookups = [...String(source).matchAll(/getForHostId\s*\(\s*([$A-Z_a-z][$\w]*)\s*\)\s*\{\s*return\s+this\.scope\.get\(\s*([$A-Z_a-z][$\w]*)\s*\)\.includes\(\s*\1\s*\)\s*\?\s*this\.scope\.get\(\s*([$A-Z_a-z][$\w]*)\s*,\s*\1\s*\)\s*:\s*null\s*;?\s*\}/g)];
-    const bindings = [...new Set(lookups.map((match) => `${match[2]},${match[3]}`))];
-    if (bindings.length !== 1) return null;
-    const exports = [...String(source).matchAll(/\bexport\s*\{([^{}]+)\}/g)].at(-1);
-    if (!exports) return null;
-    const names = exports[1].split(",").map((entry) => (
-      entry.trim().match(/^([$A-Z_a-z][$\w]*)(?:\s+as\s+([$A-Z_a-z][$\w]*))?$/)
-    )).filter(Boolean);
-    const resolve = (name) => {
-      const values = [...new Set(names.filter((entry) => entry[1] === name)
-        .map((entry) => module?.[entry[2] || entry[1]]))];
-      return values.length === 1 && values[0] && typeof values[0] === "object"
-        ? values[0] : null;
-    };
-    const [hosts, managers] = bindings[0].split(",").map(resolve);
-    if (!hosts || !managers || hosts === managers) return null;
-    return (scope, hostId) => {
-      const registeredHosts = scope.get(hosts);
-      return Array.isArray(registeredHosts) && registeredHosts.includes(hostId)
-        ? scope.get(managers, hostId) : null;
-    };
-  };
-  window.__codeyAppServerManagerRegistryResolverFromSource = appServerManagerRegistryResolverFromSource;
-
-  const managerSourceResolvers = new WeakMap();
-  const loadManagerSourceResolver = async (url, module) => {
-    if (managerSourceResolvers.has(module)) return managerSourceResolvers.get(module);
-    // 只读取客户端自身已加载的资产；能力探测不依赖 Debugger 改写权限。
-    if (new URL(url).protocol !== "app:") return null;
-    const fetchAsset = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
-    if (!fetchAsset) return null;
-    const response = await fetchAsset(url);
-    if (!response?.ok || typeof response.text !== "function") return null;
-    const resolver = appServerManagerRegistryResolverFromSource(await response.text(), module);
-    if (resolver) managerSourceResolvers.set(module, resolver);
-    return resolver;
-  };
-
-  const messageDeletionMethods = {
-    async prepare(conversationId) {
-      if (!isLocalMessageDeletionManager(this)) throw unavailableCapability("deleteMessages");
-      const conversation = this.getConversation(conversationId);
-      const history = conversation?.turnHistory;
-      if (
-        !Array.isArray(conversation?.turns)
-        || (history != null && (history.kind !== "canonical"
-          || !Array.isArray(history.history?.islands)
-          || !history.history.islands.every((island) => Array.isArray(island.entries))
-          || !Number.isInteger(history.history.generation)
-          || !history.history.entitiesByKey
-          || typeof history.history.entitiesByKey !== "object"))
-      ) throw new Error("当前会话不支持局部删除");
-      const turns = [...conversation.turns, ...Object.values(history?.history?.entitiesByKey || {})];
-      if (
-        conversation.threadRuntimeStatus?.type === "active"
-        || conversation.requests?.length
-        || turns.some((turn) => turn?.status === "inProgress")
-      ) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
-      if (this.getStreamRole(conversationId)?.role === "follower") {
-        throw new Error("请在拥有当前会话的窗口中删除消息");
-      }
-      await this.sendRequest("thread/unsubscribe", { threadId: conversationId });
-    },
-    finish(conversationId, messageIds) {
-      if (!isLocalMessageDeletionManager(this)) throw unavailableCapability("deleteMessages");
-      const selected = new Set(messageIds);
-      this.updateConversationState(conversationId, (conversation) => {
-        if (selected.size) {
-          const deletedTurns = new Set();
-          const history = conversation.turnHistory?.kind === "canonical"
-            ? conversation.turnHistory.history : null;
-          if (history) {
-            history.generation += 1;
-            const deletedKeys = new Set(Object.keys(history.entitiesByKey).filter((key) => (
-              selected.has(history.entitiesByKey[key]?.turnId)
-              || selected.has(key)
-              || selected.has(`history-content:${key}`)
-            )));
-            for (const island of history.islands) {
-              island.entries = island.entries.filter((entry) => !deletedKeys.has(entry.value));
-            }
-            for (const key of deletedKeys) {
-              deletedTurns.add(history.entitiesByKey[key]);
-              delete history.entitiesByKey[key];
-            }
-          }
-          conversation.turns = conversation.turns.filter((turn) => (
-            !selected.has(turn.turnId) && !deletedTurns.has(turn)
-          ));
-        }
-        conversation.resumeState = "needs_resume";
-      });
-      this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(conversationId);
-    },
-  };
-  const isLocalMessageDeletionManager = (manager) => {
-    try {
-      if (!manager || manager.disposed === true
-        || !["getHostId", "getConversation", "getStreamRole", "sendRequest", "updateConversationState"]
-          .every((name) => declaredMethod(manager, name))) return false;
-      const unsubscriber = Object.getOwnPropertyDescriptor(manager, "inactiveThreadUnsubscriber")?.value;
-      return Boolean(declaredMethod(unsubscriber, "clearConversationStreamOwnership"))
-        && declaredMethod(manager, "getHostId").call(manager) === "local";
-    } catch {
-      return false;
-    }
-  };
-
   const managerSessionController = (manager) => {
-    const canDeleteMessages = isLocalMessageDeletionManager(manager);
-    const hostedDeletion = !canDeleteMessages && ownHostedAppServerManagers.has(manager);
+    const hostedDeletion = ownHostedAppServerManagers.has(manager);
     return {
       kind: "manager",
       manager,
       // RPC 存根的任意属性都像函数，宿主删除只认本脚本创建的适配器。
-      prepareMessageDeletion: canDeleteMessages ? messageDeletionMethods.prepare.bind(manager)
-        : hostedDeletion ? (conversationId) => manager.codeyPrepareMessageDeletion(conversationId) : null,
-      finishMessageDeletion: canDeleteMessages ? messageDeletionMethods.finish.bind(manager)
-        : hostedDeletion ? (conversationId, messageIds) => manager.codeyFinishMessageDeletion(conversationId, messageIds) : null,
+      prepareMessageDeletion: hostedDeletion
+        ? (conversationId) => manager.codeyPrepareMessageDeletion(conversationId) : null,
+      finishMessageDeletion: hostedDeletion
+        ? (conversationId, messageIds) => manager.codeyFinishMessageDeletion(conversationId, messageIds) : null,
       reloadsConversationAfterDeletion: hostedDeletion,
       refreshRecentConversations: typeof manager.refreshRecentConversations === "function"
         ? () => manager.refreshRecentConversations() : null,
@@ -2673,20 +2385,6 @@
         ? (payload) => manager.codeyReconcileCompletedConversation(payload)
         : null,
     };
-  };
-
-  // 渲染补丁在原生管理器被读取时登记本机实例。登记后各项会话能力都直接复用
-  // 它，不必遍历 React 或按文件名导入资源（Codex 26.1029 起资源全是数字 chunk）。
-  const registeredSessionController = (feature) => {
-    try {
-      const registry = globalThis.__codeyAppServerManagers;
-      const manager = registry instanceof Map ? registry.get("local") : null;
-      if (!manager || manager.disposed === true) return null;
-      const controller = managerSessionController(manager);
-      return sessionControllerLooksUsable(controller, feature) ? controller : null;
-    } catch {
-      return null;
-    }
   };
 
   const sessionControllerLooksUsable = (controller, feature = "session") => {
@@ -2702,7 +2400,7 @@
       ? ["prepareMessageDeletion", "finishMessageDeletion"]
       : feature === "refresh" ? ["refreshRecentConversations"] : [];
     return methods.length ? methods.every((method) => typeof controller[method] === "function")
-      : controller.kind === "manager" || controller.kind === "signals";
+      : controller.kind === "manager";
   };
 
   const capabilityProbes = new Map();
@@ -2731,12 +2429,6 @@
 
   const discoverCodexSessionController = async (feature) => {
     if (disposed) throw unavailableCapability(feature);
-    const registered = registeredSessionController(feature);
-    if (registered) {
-      window.__codeyCodexSessionController = registered;
-      return registered;
-    }
-    const requireCompletionReconcile = feature === "reconcile";
     // Rebuild wrappers so methods added by a late renderer patch become usable.
     if (window.__codeyCodexSessionController?.manager) {
       window.__codeyCodexSessionController = managerSessionController(window.__codeyCodexSessionController.manager);
@@ -2746,7 +2438,7 @@
     }
     const hostedUnsupported = () => new Error("Codex 的会话管理运行在桌面宿主进程，页面无法接管该接口");
     // 宿主进程里的管理器只开放 RPC 方法；请求客户端与本地会话状态都不在页面里，
-    // 资源模块中也没有别的实例，已确认后不再重扫 React 或逐个导入资源。
+    // 已确认后不再重扫 React。
     if (ownHostedAppServerManagers.has(window.__codeyCodexSessionController?.manager)) {
       throw hostedUnsupported();
     }
@@ -2760,71 +2452,13 @@
       window.__codeyCodexSessionController = cachedController;
       throw hostedUnsupported();
     }
-    let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
-      ? window.__codeyCodexSignalDispatcher
-      : null;
-    const urls = (await discoverCodexAppAssetUrls())
-      .sort((left, right) => managerAssetPriority(right) - managerAssetPriority(left));
-    if (disposed) throw unavailableCapability(feature);
-    for (const url of urls) {
-      const namedSignalAsset = url.includes("app-server-manager-signals-");
-      try {
-        const module = typeof window.__codeyImportCodexAsset === "function"
-          ? await window.__codeyImportCodexAsset(url)
-          : await import(url);
-        // 旧安装的迟到探测不能替换新安装已确认的接口。
-        if (disposed) throw unavailableCapability(feature);
-        const registered = registeredSessionController(feature);
-        if (registered) {
-          window.__codeyCodexSessionController = registered;
-          return registered;
-        }
-        const resolvers = [
-          feature === "deleteMessages" || feature === "modelRouting" ? appServerManagerRegistryResolverFromModule(module) : null,
-          appServerManagerResolverFromModule(module),
-        ].filter(Boolean);
-        for (const resolver of resolvers) {
-          const manager = appServerManagerFromReact(resolver);
-          if (!manager) continue;
-          const controller = managerSessionController(manager);
-          if (sessionControllerLooksUsable(controller, feature)) {
-            window.__codeyCodexSessionController = controller;
-            return controller;
-          }
-          window.__codeyCodexSessionController ||= controller;
-        }
-        if (feature === "deleteMessages" || feature === "modelRouting") {
-          const resolver = await loadManagerSourceResolver(url, module);
-          if (disposed) throw unavailableCapability(feature);
-          const registered = registeredSessionController(feature);
-          const manager = !registered && resolver ? appServerManagerFromReact(resolver) : null;
-          const controller = registered || (manager && managerSessionController(manager));
-          if (sessionControllerLooksUsable(controller, feature)) {
-            window.__codeyCodexSessionController = controller;
-            return controller;
-          }
-        }
-        fallbackDispatcher ||= signalDispatcherFromModule(module, namedSignalAsset);
-      } catch (error) {
-        if (disposed) throw error;
-        continue;
-      }
-    }
-    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "deleteMessages" && feature !== "modelRouting") {
-      window.__codeyCodexSignalDispatcher = fallbackDispatcher;
-      const controller = legacySessionController(fallbackDispatcher);
-      window.__codeyCodexSessionController = controller;
-      return controller;
-    }
     throw unavailableCapability(feature);
   };
   const loadCodexSessionController = async ({ requireCompletionReconcile = false, feature = "session" } = {}) => {
     if (requireCompletionReconcile) feature = "reconcile";
     if (disposed) throw unavailableCapability(feature);
     const cached = window.__codeyCodexSessionController;
-    // 新管理器可能在此前探测失败后才登记，必须先于缓存和失败退避检查。
-    const current = registeredSessionController(feature)
-      || (cached?.manager ? managerSessionController(cached.manager) : cached);
+    const current = cached?.manager ? managerSessionController(cached.manager) : cached;
     if (sessionControllerLooksUsable(current, feature)) {
       window.__codeyCodexSessionController = current;
       capabilityProbes.delete(feature);
@@ -2844,21 +2478,12 @@
       ? Promise.resolve().then(discover)
       : waitForNativeSessionOperation(discover)).then((controller) => {
       if (disposed) throw unavailableCapability(feature);
-      controller = registeredSessionController(feature) || controller;
       window.__codeyCodexSessionController = controller;
       state.failures = 0;
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
     }, (error) => {
-      const registered = !disposed && registeredSessionController(feature);
-      if (registered) {
-        window.__codeyCodexSessionController = registered;
-        state.failures = 0;
-        state.retryAt = 0;
-        publishCapability(feature, true);
-        return registered;
-      }
       state.failures += 1;
       // 完成状态同步只是后台修复，由 15 秒定时器和页面事件反复触发；接口长期
       // 不可用时每轮失败发现都要遍历 React 树，上限放宽到 5 分钟。
@@ -2879,103 +2504,8 @@
   window.__codeyLoadCodexRequestClient = async () => (
     (await loadCodexSessionController({ feature: "modelRouting" })).manager.requestClient
   );
-
-  // 模块级快路径：DI scope 是模块导出的单例，app 初始化（约 React 挂载前
-  // 几秒）就填充完毕——scope + registry 直接给出 manager.requestClient，
-  // 不必遍历 React fiber 等组件挂载。任一环节缺失即抛错，由调用方回落。
-  const appServerScopeLike = (scope) => (
-    !!scope
-    && typeof scope === "object"
-    && typeof scope.get === "function"
-    && typeof scope.set === "function"
-    && typeof scope.watch === "function"
-    && typeof scope.when === "function"
-    && typeof scope.query === "function"
-  );
-  const appServerScopeFromModule = (module) => {
-    for (const value of Object.values(module || {})) {
-      if (!value || typeof value !== "object") continue;
-      const scope = value.scope;
-      if (appServerScopeLike(scope)) return scope;
-      // 诊断：mQt 存在但 scope 还没到 DI 形态时，记录原始类型与前几帧状态。
-      if (module.mQt === value) {
-        window.__codeyModuleClientProbe ||= {};
-        window.__codeyModuleClientProbe.mQtScopeRaw = scope === null
-          ? "null" : typeof scope;
-      }
-    }
-    return null;
-  };
-
-  let moduleClientUrls = null;
-  window.__codeyLoadCodexRequestClientFromModule = async () => {
-    const probe = (window.__codeyModuleClientProbe ||= { attempts: 0 });
-    probe.attempts += 1;
-    if (!moduleClientUrls) {
-      const discovered = (await discoverCodexAppAssetUrls())
-        .sort((left, right) => managerAssetPriority(right) - managerAssetPriority(left));
-      // 文档解析早期脚本标签可能还没挂进 DOM：空结果不缓存，下一轮重新发现。
-      if (discovered.length) moduleClientUrls = discovered;
-      if (probe.urlsN == null) probe.urlsN = moduleClientUrls?.length ?? 0;
-    }
-    // 没有可导入的命名入口（如 rspack 数字 chunk 构建）时只是快路径不可用，
-    // 调用方会回落到登记表或 React 路径，不能把模型请求校验标成不可用。
-    if (!moduleClientUrls?.length) throw new Error("当前 Codex 没有可导入的模块入口");
-    for (const url of moduleClientUrls || []) {
-      try {
-        const module = typeof window.__codeyImportCodexAsset === "function"
-          ? await window.__codeyImportCodexAsset(url)
-          : await import(url);
-        if (disposed) throw unavailableCapability("modelRouting");
-        if (probe.importedMs == null) {
-          probe.importedMs = Math.round(performance.now());
-          probe.importedUrl = url.split("/").pop();
-        }
-        const scope = appServerScopeFromModule(module);
-        const lookup = appServerManagerRegistryResolverFromModule(module);
-        if (scope && probe.scopeSeenMs == null) {
-          probe.scopeSeenMs = Math.round(performance.now());
-        }
-        if (!scope || !lookup) {
-          if (probe.scopeNullMs == null) {
-            probe.scopeNullMs = Math.round(performance.now());
-            probe.scopeNullUrl = url.split("/").pop();
-            probe.lookupFound = !!lookup;
-          }
-          continue;
-        }
-        const client = lookup(scope, "local")?.requestClient;
-        if (
-          client?.hostId === "local"
-          && ["enqueueRequest", "createRequest", "onResult"].every(
-            (method) => declaredMethod(client, method),
-          )
-        ) {
-          if (probe.clientSeenMs == null) {
-            probe.clientSeenMs = Math.round(performance.now());
-          }
-          return client;
-        }
-      } catch (error) {
-        if (disposed) throw error;
-        probe.lastError = String(error).slice(0, 200);
-        continue;
-      }
-    }
-    throw unavailableCapability("modelRouting");
-  };
-  // Native macOS uses a frozen bridge. Install the request-client guard after
-  // these module/scope discovery helpers are available, including after reload.
+  // Install the request-client guard after session discovery helpers are available.
   void window.__codeyModelWhitelistPatch?.ensureRequestGate?.().catch(() => {});
-
-  const loadCodexSignalDispatcher = async () => {
-    const controller = await loadCodexSessionController();
-    if (controller.kind === "signals" && typeof controller.dispatcher === "function") {
-      return controller.dispatcher;
-    }
-    throw new Error("当前 Codex 使用 AppServerManager 会话接口");
-  };
-  window.__codeyLoadCodexSignalDispatcher = loadCodexSignalDispatcher;
 
   const getCodexSessionController = (feature) => loadCodexSessionController({ feature });
 

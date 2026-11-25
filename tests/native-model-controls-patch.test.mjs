@@ -15,16 +15,16 @@ test("Fast access follows model tiers for every login and third-party routes kee
     // original body, a string means the response is rewritten.
     const patchAsset = (
       fixture,
-      url = "app://-/assets/app-initial-native-controls-fixture.js",
+      url = "app://-/assets/async/182996.81f2f5b0c3.js",
     ) => globalThis.__codeyRendererPatchEntry(url, fixture) ?? fixture;
 
     const ultraQuerySource = [
       "const ultraGate={},queryFactory=(_,factory)=>factory;",
-      "const query=queryFactory(null,({includeUltraReasoningEffort:i,isCustomModelProvider:a,modelCatalogPath:c},",
-      "{get:l})=>{let m=i&&l(ultraGate,`1186680773`);",
-      "return {select:({data:r,enabledReasoningEfforts:n})=>r.map(e=>({...e,",
+      "const query=queryFactory(null,({hostId:l,includeUltraReasoningEffort:i=!0,teamCatalog:d},",
+      "{get:getAtom})=>{let custom=Boolean(d),m=i&&getAtom(ultraGate,`1186680773`);",
+      "return {select:({data:r,enabledReasoningEfforts:n})=>({includeUltraReasoningEffort:m,isCustomModelProvider:custom,models:r.map(e=>({...e,",
       "supportedReasoningEfforts:e.supportedReasoningEfforts.filter(",
-      "({reasoningEffort:e})=>(m||e!==`ultra`)&&n.has(e))}))}});",
+      "({reasoningEffort:e})=>(m||e!==`ultra`)&&n.has(e))}))})}});",
     ].join("");
     const patchedUltraQuery = await patchAsset(ultraQuerySource);
     const ultraQuery = Function(`${patchedUltraQuery};return query;`)();
@@ -47,12 +47,13 @@ test("Fast access follows model tiers for every login and third-party routes kee
       [false, true, true, true, true],
     ]) {
       const result = ultraQuery({
+        hostId: "local",
         includeUltraReasoningEffort: includeUltra,
-        isCustomModelProvider: customProvider,
+        teamCatalog: customProvider,
       }, {get: () => remoteGate}).select({
         data: routeModels,
         enabledReasoningEfforts: new Set(nativeEfforts.filter(e => enabledUltra || e !== "ultra")),
-      });
+      }).models;
       for (const model of result.slice(0, 4)) {
         assert.deepEqual(
           model.supportedReasoningEfforts.map(e => e.reasoningEffort),
@@ -62,8 +63,7 @@ test("Fast access follows model tiers for every login and third-party routes kee
       assert.deepEqual(result[4], routeModels[4], "models without ultra must not gain it");
     }
 
-    // Codex 26.1013 app-shared tier helpers: account requirements decide
-    // whether a declared Fast or Ultrafast tier may be shown and sent.
+    // Tier helpers: account requirements decide whether a declared Fast or Ultrafast tier may be shown and sent.
     const tierAccessSource = [
       "function Uat(e){let t=e.requirements?.featureRequirements,n=t?.fast_mode!==!1;",
       "return{fast:n,ultrafast:(`supportsIndependentSpeedModes`in e&&e.supportsIndependentSpeedModes===!0||n)&&t?.ultrafast_mode!==!1}}",
@@ -80,7 +80,7 @@ test("Fast access follows model tiers for every login and third-party routes kee
     assert.equal(nativeTiers.Wat("priority", deniedAccess), false);
     const patchedTierAccess = patchAsset(
       tierAccessSource,
-      "app://-/assets/app-shared-tier-access-fixture.js",
+      "app://-/assets/async/976185.d6427dfaa7.js",
     );
     const tiers = Function(`${patchedTierAccess};return {Wat,Xat}`)();
     for (const access of [null, deniedAccess]) {
@@ -90,8 +90,7 @@ test("Fast access follows model tiers for every login and third-party routes kee
     }
     assert.equal(tiers.Xat(null, "default", null), null, "standard speed still sends no tier");
 
-    // Codex 26.1013 app-initial access hook: only finished ChatGPT requirements
-    // produce an access object; null hides the picker entry and settings row.
+    // Access hook: only finished ChatGPT requirements produce an access object; null hides speed controls.
     const accessHookSource = [
       "function Mxo(e,i,query,t){let r=e?.hostId??`local`,a=i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`,o=i?.authMethod??null,s;",
       "t[0]!==r||t[1]!==o?(s={authMethod:o,hostId:r},t[0]=r,t[1]=o,t[2]=s):s=t[2];",
@@ -100,7 +99,7 @@ test("Fast access follows model tiers for every login and third-party routes kee
       "let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}",
       "function Tr(e){return{fast:e.fast_mode!==!1,ultrafast:!1}}",
     ].join("");
-    const accessHook = Function(`${patchAsset(accessHookSource)};return Mxo`)();
+    const accessHook = Function(`${patchAsset(accessHookSource, "app://-/assets/async/209295.0d5d4181ef.js")};return Mxo`)();
     for (const [auth, query] of [
       [{ authMethod: "apikey" }, { data: null, isPending: false }],
       [{ authMethod: "chatgpt" }, { data: null, isPending: true }],
@@ -113,15 +112,14 @@ test("Fast access follows model tiers for every login and third-party routes kee
     }
     assert.deepEqual(records, [], "current Fast shapes must patch without compatibility errors");
 
-    // Codex 26.1021 host services pass the same Ultra gate into the model
-    // picker but hold no model catalog query; leave that chunk untouched.
+    // Host services chunk passes the Ultra gate into dynamic tools without a teamCatalog model query; leave it untouched.
     const hostServicesSource = [
       "function Hs(t,e,c){return Sm({hostId:e.hostId,includeUltraReasoningEffort:Kl(t,`1186680773`),",
       "isAuthLoading:c.isLoading,isCustomModelProvider:e.isCustomModelProvider})}",
     ].join("");
     assert.equal(
       globalThis.__codeyRendererPatchEntry(
-        "app://-/assets/initialize-app-host-services-5891c906a171.js",
+        "app://-/assets/async/49792.d8d33ace73.js",
         hostServicesSource,
       ),
       null,
@@ -132,6 +130,7 @@ test("Fast access follows model tiers for every login and third-party routes kee
     // original body — the entry never reads or clones them.
     for (const url of [
       "app://-/assets/unrelated-windows-chunk.js",
+      "app://-/assets/app-initial-90eb42395b7d.js",
       "app://-/assets/general-settings-679bf39c78a4.js",
       "app://-/assets/use-service-tier-settings-XUBE8MwV.js",
     ]) {

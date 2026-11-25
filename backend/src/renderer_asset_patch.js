@@ -4,12 +4,6 @@
 // 同样的改写，结果按资产文件名缓存在 Codey 侧。
 // 本文件只依赖页面 JS 环境，不使用任何 Node/Electron API。
 (() => {
-  const rendererPatchOptions =
-    typeof globalThis.__CODEY_RENDERER_PATCH_OPTIONS__ === "object" &&
-    globalThis.__CODEY_RENDERER_PATCH_OPTIONS__ !== null
-      ? globalThis.__CODEY_RENDERER_PATCH_OPTIONS__
-      : {};
-  const disablePet = rendererPatchOptions.disablePet === true;
   // 渲染进程没有 --codey-record-error 子进程可写：补丁失败经 CDP
   // Runtime.addBinding 暴露的 __codeyPatchLog 回传给 Rust 记录。
   const recordCodeyPatchFailure = (operation, error, context = {}) => {
@@ -77,16 +71,17 @@
     "supportsIndependentSpeedModes",
     "includeUltraReasoningEffort",
     "isCustomModelProvider",
-    "getHasInProgressLocalConversation",
     "electron-app-state-snapshot-request",
     "submitDisabledReasons:",
     "checkout-webview-presentation-changed",
     "totalASTLRUCacheSize:",
-    "thread.userMessageNavigation.ariaLabel",
     "threadScroll.restore",
     "orbit-character-preloaded",
     "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
-    "PerformanceObserver.supportedEntryTypes",
+    "\"orbit.navigation\"",
+    "PerformanceEventTiming",
+    "this.eventObserver=new PerformanceObserver",
+    "EventLoopBlockRenderer",
     "ensureObserver(\"long-animation-frame\")",
     "_pending_observations",
     "Reached the post-login Statsig bootstrap deadline",
@@ -156,75 +151,10 @@
     }
     return patched;
   };
-  const replacePetRendererImportWithStubs = (match, importClause) => {
-    if (typeof importClause !== "string" || importClause.trim() === "") {
-      return "";
-    }
-    const localBindings = [];
-    const rememberBinding = (binding) => {
-      if (
-        /^[$A-Z_a-z][$\w]*$/.test(binding)
-        && !localBindings.includes(binding)
-      ) {
-        localBindings.push(binding);
-      }
-    };
-    const defaultBinding = importClause.match(/^\s*([$A-Z_a-z][$\w]*)/);
-    if (defaultBinding) rememberBinding(defaultBinding[1]);
-    for (const specifier of importClause.matchAll(
-      /(?:^|[,{])\s*([$A-Z_a-z][$\w]*)(?:\s+as\s+([$A-Z_a-z][$\w]*))?\s*(?=[,}])/g,
-    )) {
-      rememberBinding(specifier[2] ?? specifier[1]);
-    }
-    for (const namespace of importClause.matchAll(
-      /\*\s+as\s+([$A-Z_a-z][$\w]*)/g,
-    )) {
-      rememberBinding(namespace[1]);
-    }
-    if (!localBindings.length) {
-      const message =
-        "Codey could not identify Codex pet settings renderer import bindings";
-      recordCodeyPatchFailure("renderer_patch:pet settings avatar resources", message);
-      try {
-        console.error(message);
-      } catch {}
-      return match;
-    }
-    const [firstBinding, ...aliases] = localBindings;
-    const aliasDeclarations = aliases
-      .map((binding) => `,${binding}=${firstBinding}`)
-      .join("");
-    return `const ${firstBinding}=(()=>{const target=function(){return null};return new Proxy(target,{get(target,property,receiver){if(property===Symbol.iterator)return function*(){};if(property===\`map\`||property===\`filter\`||property===\`flatMap\`||property===\`slice\`)return()=>[];if(property===\`then\`)return void 0;return Reflect.get(target,property,receiver)},construct(){return{}}})})()${aliasDeclarations};`;
-  };
-  // Older Codex builds imported a single codex-avatar chunk from the settings
-  // chunk; current builds split the preview across the mascot button, the pet
-  // asset table, and the avatar option hook. One settings chunk can import
-  // several of them, so every match is stubbed rather than requiring a unique
-  // one.
-  const petRendererResourceImport =
-    /import(?:\s*([^;"']+?)\s*from)?\s*["']\.\/(?:codex-avatar|codex-pet-assets|avatar-mascot-button|use-avatar-options)(?:[~-][^/"']*)?\.js["']/;
-  const petRendererResourceImportAll = new RegExp(
-    petRendererResourceImport.source,
-    "g",
-  );
-  const replacePetRendererResourceImports = (source, name) => {
-    if (activeRendererPatchFailures?.has(name)) return source;
-    let count = 0;
-    const patched = source.replace(petRendererResourceImportAll, (...args) => {
-      count += 1;
-      return replacePetRendererImportWithStubs(...args);
-    });
-    if (count === 0) return recordIncompatibleRendererGate(source, name, count);
-    return patched;
-  };
   const draftFactoryPattern = /\b[$A-Z_a-z][$\w]*=(?:[$A-Z_a-z][$\w]*|\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\([$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?,[$A-Z_a-z][$\w]*=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:null\}\)\)/g;
-  const draftResolverPattern = /function ([$A-Z_a-z][$\w]*)\(\{userSavedModelString:[$A-Z_a-z][$\w]*,userSavedReasoningEffort:[$A-Z_a-z][$\w]*,listModelsData:[$A-Z_a-z][$\w]*\}\)/g;
-  // Codex 26.1021 起，草稿原生保存手动选择并以 draftModelSettings 传入设置
-  // hook，只需把未手动选择的新草稿的推理强度初值换成 medium。返回改写后的
-  // 源码；无法唯一识别时返回匹配次数。
-  // Codex 26.1029 起 hook 先声明 var/let 槽位；resolver 为 null 时从 hook 内
-  // 唯一的解析器调用处取得调用表达式（模块导入或本地函数）。
-  const patchNativeDraftReasoningEffort = (source, resolver) => {
+  // 把未手动选择的新草稿的推理强度初值换成 medium；管理员下发的新会话设置和
+  // 草稿内的手动选择保持原样。返回改写后的源码；无法唯一识别时返回匹配次数。
+  const patchNativeDraftReasoningEffort = (source) => {
     const hooks = [...source.matchAll(
       /function [$A-Z_a-z][$\w]*\(([$A-Z_a-z][$\w]*)\)\{(?:var [$\w,]+;)?let (?:[$A-Z_a-z][$\w]*,)*[$A-Z_a-z][$\w]*=\(0,[$A-Z_a-z][$\w]*\.c\)\(\d+\),\{((?=[^{}]*\bmanagedNewThreadModelSettings:)(?=[^{}]*\bdraftModelSettings:)(?=[^{}]*\bisNewThreadDraft:)[^{}]*)\}=\1,/g,
     )];
@@ -237,12 +167,10 @@
     if (![managed, draft, isDraft].every((binding) => /^[$A-Z_a-z][$\w]*$/.test(binding ?? ""))) return 0;
     const hookEnd = source.indexOf("}function ", hook.index + hook[0].length);
     if (hookEnd < 0) return 0;
-    if (resolver == null) {
-      const scope = source.slice(hook.index, hookEnd);
-      const calls = [...scope.matchAll(/(\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)|\b[$A-Z_a-z][$\w]*)\(\{userSavedModelString:/g)];
-      if (calls.length !== 1) return calls.length;
-      resolver = calls[0][1];
-    }
+    const scope = source.slice(hook.index, hookEnd);
+    const calls = [...scope.matchAll(/(\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)|\b[$A-Z_a-z][$\w]*)\(\{userSavedModelString:/g)];
+    if (calls.length !== 1) return calls.length;
+    const resolver = calls[0][1];
     const call = `${resolver}({userSavedModelString:`;
     const callStart = source.indexOf(call, hook.index);
     const nextCall = callStart < 0 ? -1 : source.indexOf(call, callStart + 1);
@@ -264,89 +192,26 @@
     }
     if (argsEnd < 0 || source[argsEnd] !== ")") return 0;
     const args = source.slice(argsStart, argsEnd);
-    // 管理员下发的新会话设置和草稿内的手动选择保持原样；模型不在目录中时
-    // 沿用原生结果，模型不支持 medium 时由原生解析器回退。
+    // 模型不在目录中时沿用原生结果，模型不支持 medium 时由原生解析器回退。
     const replacement = `/*codey-new-thread-draft-defaults*/((__codeyArgs,__codeyResolved=${resolver}(__codeyArgs))=>${isDraft}&&${draft}==null&&${managed}==null&&__codeyArgs.listModelsData?.models?.some(e=>e.model===__codeyResolved.model)?${resolver}({...__codeyArgs,userSavedModelString:__codeyResolved.model,userSavedReasoningEffort:\`medium\`}):__codeyResolved)(${args})`;
     return source.slice(0, callStart) + replacement + source.slice(argsEnd + 1);
-  };
-  // 旧版 Codex：草稿不保存手动选择，需在草稿 hook 内补目录校验并让手动
-  // 选择写入草稿。返回改写后的源码；无法唯一识别时返回匹配次数。
-  const patchLegacyDraftReasoningEffort = (source, resolver) => {
-    const patterns = {
-      catalog: /managedNewThreadModelSettings:[$A-Z_a-z][$\w]*,waitForModelList:[\s\S]{0,4000}?let\{data:([$A-Z_a-z][$\w]*),isLoading:[$A-Z_a-z][$\w]*\}=([$A-Z_a-z][$\w]*)\([$A-Z_a-z][$\w]*\),[$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\([$A-Z_a-z][$\w]*\?\.settings,\1\),[\s\S]{0,1500}?userSavedModelString:/g,
-      model: /function [$A-Z_a-z][$\w]*\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{let ([$A-Z_a-z][$\w]*)=\(0,([$A-Z_a-z][$\w]*)\.c\)\((\d+)\)[\s\S]{0,700}?let\{draftSettings:([$A-Z_a-z][$\w]*),isNewThreadDraft:[$A-Z_a-z][$\w]*,updateDraftSettings:([$A-Z_a-z][$\w]*)\}=[$A-Z_a-z][$\w]*\([$A-Z_a-z][$\w]*\),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\([^)]*\),\{isLunaReserveActive:[$A-Z_a-z][$\w]*\}=\6,([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*==null&&[$A-Z_a-z][$\w]*,[^;]{0,300}?,([$A-Z_a-z][$\w]*)=\7&&\4\.modelSettings!=null,([$A-Z_a-z][$\w]*)=\6\.modelSettings;(?=if\(\8\))/g,
-    };
-    const matches = {};
-    for (const [key, pattern] of Object.entries(patterns)) {
-      const found = [...source.matchAll(pattern)];
-      if (found.length !== 1) return found.length;
-      matches[key] = found[0];
-    }
-    const [, cache, , cacheSize, , update, settings, isDraft, hasOverride, model] = matches.model;
-    const escapedUpdate = update.replace(/\$/g, "\\$");
-    const manualPattern = new RegExp(
-      `([$_A-Za-z][$\\w]*\\|\\|[$_A-Za-z][$\\w]*\\|\\|[$_A-Za-z][$\\w]*&&[$_A-Za-z][$\\w]*===\x60ultra\x60\\?)${escapedUpdate}\\([$A-Z_a-z][$\\w]*=>\\(\\{\\.\\.\\.[$A-Z_a-z][$\\w]*,isManuallyChanged:!0,modelSettings:`,
-      "g",
-    );
-    // 只在已识别的草稿 hook 内查找回调，不能误改另一个模型选择器。
-    const modelEnd = source.indexOf("}function ", matches.model.index + matches.model[0].length);
-    if (modelEnd < 0) return 0;
-    const modelScope = source.slice(matches.model.index, modelEnd + 1);
-    const manualMatches = [...modelScope.matchAll(manualPattern)];
-    if (manualMatches.length !== 1) return manualMatches.length;
-    const slots = Number(cacheSize);
-    const catalogHook = matches.catalog[2];
-    // 新增目录 hook 始终调用，保留 React hook 顺序。未加载或模型不在目录中
-    // 时保留现有设置；目录就绪后由原生解析器选择 medium 或模型支持的回退。
-    const defaults = `/*codey-new-thread-draft-defaults*/let __codeyDraftCatalog=${catalogHook}({hostId:${settings}.hostId,enabled:${isDraft}}).data;if(${isDraft}&&!${hasOverride}&&__codeyDraftCatalog?.models?.some(e=>e.model===${model}.model)){let __codeyDraftEffort=${resolver}({userSavedModelString:${model}.model,userSavedReasoningEffort:\`medium\`,listModelsData:__codeyDraftCatalog}).reasoningEffort;if(${model}.reasoningEffort!==__codeyDraftEffort){let __codeyDraftSettings;${cache}[${slots}]!==${model}||${cache}[${slots + 1}]!==__codeyDraftEffort?(__codeyDraftSettings={...${model},reasoningEffort:__codeyDraftEffort},${cache}[${slots}]=${model},${cache}[${slots + 1}]=__codeyDraftEffort,${cache}[${slots + 2}]=__codeyDraftSettings):__codeyDraftSettings=${cache}[${slots + 2}],${model}=__codeyDraftSettings}}`;
-    let patchedScope = modelScope.replace(matches.model[0],
-      matches.model[0].replace(`.c)(${cacheSize})`, `.c)(${slots + 3})`) + defaults);
-    patchedScope = patchedScope.replace(manualPattern, (match) => `${isDraft}||${match}`);
-    return source.slice(0, matches.model.index) + patchedScope + source.slice(modelEnd + 1);
   };
   const patchNewThreadDraftDefaults = (source) => {
     const name = "new thread draft defaults";
     if (source.includes("/*codey-new-thread-draft-defaults*/")
       || activeRendererPatchFailures?.has(name)) return source;
-    // 草稿速度初值与推理强度初值必须同时识别；缓存中的默认模型继续有效，
-    // 旧推理强度不再成为下一个草稿的初值。
-    const factories = [...source.matchAll(draftFactoryPattern)];
-    const resolvers = [...source.matchAll(draftResolverPattern)];
-    // Codex 26.1029 把草稿工厂和设置 hook 拆进不同 chunk（解析器可能随 hook
-    // 打包，也可能经模块导入）：hook 所在 chunk 只改推理强度，速度初值由工厂
-    // 所在 chunk 的独立改写负责。
-    // 同一 chunk 里有草稿工厂但形状漂移时仍按合并布局处理，两处须同时识别。
-    if (!source.includes("isManuallyChanged:!1,modelSettings:null")
-      && source.includes("draftModelSettings:")) {
-      const patched = patchNativeDraftReasoningEffort(source, null);
-      if (typeof patched !== "string") return recordIncompatibleRendererGate(source, name, patched);
-      return patched;
-    }
-    if (factories.length !== 1) return recordIncompatibleRendererGate(source, name, factories.length);
-    if (resolvers.length !== 1) return recordIncompatibleRendererGate(source, name, resolvers.length);
-    const patched = source.includes("draftModelSettings:")
-      ? patchNativeDraftReasoningEffort(source, resolvers[0][1])
-      : patchLegacyDraftReasoningEffort(source, resolvers[0][1]);
+    const patched = patchNativeDraftReasoningEffort(source);
     if (typeof patched !== "string") return recordIncompatibleRendererGate(source, name, patched);
-    const factory = factories[0][0];
-    return patched.replace(factory, () => factory.replace("serviceTier:null", "serviceTier:{value:`default`}"));
+    return patched;
   };
   // 每项改写的前置字面量。资源一个都不含时整段跳过；Codey 后端读取同一份
   // 列表，在把资源送进页面求值前预筛。新增改写必须登记它依赖的字面量。
   const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
     "isNewThreadDraft:",
     "isManuallyChanged:!1,modelSettings:null,serviceTier:null",
-    "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
     "resolvedHostId:",
     "sendMessageFromView",
     "AppServerRequestClient is missing a message dispatcher",
-    "codex-avatar",
-    "codex-pet-assets",
-    "avatar-mascot-button",
-    "use-avatar-options",
-    "shouldPrewarmAvatarOverlay:",
-    "forcePricingRefreshInBackground",
-    "use_embedded_credit_checkout",
     "checkout-webview-presentation-changed",
     "Desktop host did not provide its AppServerManager service",
     ".sendFollowUpMessage(",
@@ -357,74 +222,52 @@
     "electron-app-state-snapshot-request",
     "activeInteractions=new Map",
     "totalASTLRUCacheSize:",
-    "thread.userMessageNavigation.ariaLabel",
     "threadScroll.restore",
     "orbit-character-preloaded",
     "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
-    "auto.ui.browser.metrics",
+    "\"orbit.navigation\"",
     "ensureObserver(\"long-animation-frame\")",
     "_pending_observations",
+    "PerformanceEventTiming",
+    "this.eventObserver=new PerformanceObserver",
+    "EventLoopBlockRenderer",
     ":has([data-state=open])",
-    ":has(>[data-state=open])",
-    ":has(button[data-state=open])",
     ":has(:is(button[data-state=open]))",
-    ":has([aria-expanded=true],[data-state=open])",
     "Reached the post-login Statsig bootstrap deadline",
     "CodexStatsigProvider.async.identity",
     "useStatsigInternalClientFactoryAsync=function("
   ]/*end-codey-renderer-patch-anchors*/;
   const rendererPatchRules = /*codey-renderer-patch-rules*/[
-    { "allOf": ["isNewThreadDraft:", "modelSettingsPersistAsDefault:", "userSavedReasoningEffort:"] },
+    { "allOf": ["isNewThreadDraft:", "modelSettingsPersistAsDefault:", "userSavedReasoningEffort:", "draftModelSettings:"] },
     { "allOf": ["isManuallyChanged:!1,modelSettings:null,serviceTier:null"] },
-    { "allOf": ["inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getStreamRole(", "updateConversationState("] },
-    { "allOf": ["CodexComposerAdapter", "let{agentMode:", "resolvedHostId:", "submitDisabled:"] },
     { "allOf": ["CodexComposerAdapter", "let{agentMode:", "resolvedHostId:", "submitDisabledReasons:"] },
     { "allOf": ["codex-message-from-view", "sendMessageFromView", "Failed to send message from view"] },
     { "allOf": ["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"] },
-    { "allOf": ["settings.", "./codex-avatar"], "petOnly": true },
-    { "allOf": ["settings.", "./codex-pet-assets"], "petOnly": true },
-    { "allOf": ["settings.", "./avatar-mascot-button"], "petOnly": true },
-    { "allOf": ["settings.", "./use-avatar-options"], "petOnly": true },
-    { "allOf": ["shouldPrewarmAvatarOverlay:", "electron-avatar-overlay-restore-ready"], "petOnly": true },
-    { "allOf": ["forcePricingRefreshInBackground", "use_embedded_checkout"] },
-    { "allOf": ["isPrewarm:", "use_embedded_credit_checkout"] },
     { "allOf": ["checkout-webview-presentation-changed", "isPrewarm:"] },
     { "allOf": ["Desktop host did not provide its AppServerManager service"] },
     { "allOf": [".sendFollowUpMessage(", "useUserMessageAdmission:"] },
     { "allOf": [".startTurn(", "onRequestDispatched:"] },
-    { "allOf": ["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getConversationStreamRevision("] },
-    { "allOf": ["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"] },
+    { "allOf": ["includeUltraReasoningEffort:", "isCustomModelProvider:", "teamCatalog:", "1186680773"] },
     { "allOf": ["supportsIndependentSpeedModes", "ultrafast_mode"] },
     { "allOf": ["={serviceTierAccess:", "isLoading:"] },
     { "allOf": ["electron-app-state-snapshot-request", "collectAppStateSnapshot("] },
     { "allOf": ["activeInteractions=new Map", "beginCpuSampling", "ensureHeartbeat("] },
     { "allOf": ["totalASTLRUCacheSize:", "poolSize:", "workerFactory:"] },
-    { "allOf": ["thread.userMessageNavigation.ariaLabel", "[data-thread-user-message-navigation-item-id=\""] },
     { "allOf": ["threadScroll.restore", "threadScroll.initialRead", "previousViewportHeightPx:"] },
     { "allOf": ["orbit-character-preloaded", "allow-same-origin"] },
     { "allOf": ["\"general-settings\",\"appearance\",\"keyboard-shortcuts\""] },
-    { "allOf": ["PerformanceObserver.supportedEntryTypes.includes(\"long-animation-frame\")", "auto.ui.browser.metrics"] },
+    { "allOf": ["\"orbit.navigation\"", ".prefetch()", "\"general-settings\",\"appearance\",\"keyboard-shortcuts\""] },
     { "allOf": ["ensureObserver(\"long-animation-frame\")", "ensureObserver(\"longtask\")"] },
     { "allOf": ["_pending_observations", "pending_age_ms", "setInterval("] },
+    { "allOf": ["durationThreshold:16", "PerformanceEventTiming", "eventsSupported:"] },
+    { "allOf": ["durationThreshold:16", "this.eventObserver=new PerformanceObserver"] },
+    { "allOf": ["EventLoopBlockRenderer", "rendererHangDetectionEnabled"] },
     { "allOf": [":has([data-state=open])"] },
-    { "allOf": [":has(>[data-state=open])"] },
-    { "allOf": [":has(button[data-state=open])"] },
     { "allOf": [":has(:is(button[data-state=open]))"] },
-    { "allOf": [":has([aria-expanded=true],[data-state=open])"] },
     { "allOf": ["Reached the post-login Statsig bootstrap deadline", "Timed out while fetching post-login Statsig bootstrap"] },
     { "allOf": ["CodexStatsigProvider.async.identity"] },
     { "allOf": ["useStatsigInternalClientFactoryAsync=function(", ".initializeAsync().catch("] }
   ]/*end-codey-renderer-patch-rules*/;
-  const activeRendererPatchRules = disablePet
-    ? rendererPatchRules
-    : rendererPatchRules.filter((rule) => !rule.petOnly);
-  const petOnlyPatchAnchors = new Set([
-    "codex-avatar",
-    "codex-pet-assets",
-    "avatar-mascot-button",
-    "use-avatar-options",
-    "shouldPrewarmAvatarOverlay:",
-  ]);
   const hostedTurnCall = "(globalThis.__codeyModelWhitelistPatch?.hostedTurnCall??((t,m,...a)=>t[m](...a)))";
   const hostedFollowUpSend = /\b([$A-Z_a-z][$\w]*)\.sendFollowUpMessage\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:)/g;
   const hostedFollowUpSendAnchor = /\.sendFollowUpMessage\([$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:/;
@@ -432,124 +275,27 @@
   const hostedTurnStartAnchor = /\.startTurn\([$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,context:\{\.\.\.[$A-Z_a-z][$\w]*\.context,onRequestDispatched:/;
   const patchComposerQuotaGates = (patched, source) => {
     if (!(
-      (source.includes("codexComposerAdapter.CodexComposerAdapter.interruptThreadError")
-        || source.includes("CodexComposerAdapter"))
+      source.includes("CodexComposerAdapter")
       && source.includes("let{agentMode:")
       && source.includes("resolvedHostId:")
-      && (source.includes("submitDisabled:") || source.includes("submitDisabledReasons:"))
+      && source.includes("submitDisabledReasons:")
       && !source.includes("/*codey-local-quota-gate*/")
     )) {
       return patched;
     }
-    // 只改变 Codex 本机发送按钮的额度条件。保留共享额度状态、官方警告
-    // 和其他禁用条件；每次渲染读取当前模型，避免模型切换后复用旧判断。
-    const localSendGate = (marker, host, mode) =>
-      `/*${marker}*/(()=>{try{return globalThis.__codeyQuotaUnlock?.allowsLocalSend?.({hostId:${host},model:${mode}.settings.model})!==true}catch{return true}})()`;
-    let quotaGate = null;
-    const replaceQuota = (...args) => {
-      quotaGate = args.at(-1);
-      const gate = localSendGate("codey-local-quota-gate", quotaGate.host, quotaGate.mode);
-      return `${args[0]}&&${gate}`;
-    };
-    patched = replaceUniqueRendererGate(
+    // Codex 26.1120 起把 usage-limit 与 reserve-limit 合并进共享额度原因原子，
+    // 经 let 变量汇总进 submitDisabledReasons。仅在本机允许第三方线路发送时清空
+    // 该额度原因，保留共享订阅、其他禁用原因与 React Compiler 缓存失效。
+    return replaceUniqueRendererGate(
       patched,
-      [
-        {
-          pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===`gpt-reserve`[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\((?<host>[$A-Z_a-z][$\w]*)===`local`&&[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>,[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
-          replacement: replaceQuota,
-        },
-        // Codex 26.1029 使用模块导出的模型常量和 Hook，主机比较顺序
-        // 反转，禁用表达式以分号结束。仍在额度读取后追加门禁，保留订阅。
-        {
-          pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\("local"===(?<host>[$A-Z_a-z][$\w]*)&&[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>;[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
-          replacement: replaceQuota,
-        },
-        // Codex 26.1111 起把禁用条件拆成带原因标识的数组拼入 submitDisabledReasons。
-        {
-          pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\("local"===(?<host>[$A-Z_a-z][$\w]*)&&[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let [^;]{0,1024}?,[$A-Z_a-z][$\w]*=\k<quota>&&[`"]usage-limit[`"];[\s\S]{0,6000}?submitDisabledReasons:[$A-Z_a-z][$\w]*,)/g,
-          replacement: replaceQuota,
-        },
-      ],
-      null,
+      /(?<prefix>\{activeMode:(?<mode>[$A-Z_a-z][$\w]*),modelSettings:[\s\S]{0,8000}?resolvedHostId:(?<host>[$A-Z_a-z][$\w]*),[\s\S]{0,8000}?)(?<reasons>let [$A-Z_a-z][$\w]*=void 0!==[$A-Z_a-z][$\w]*&&[$A-Z_a-z][$\w]*&&[`"]caller-disabled[`"][\s\S]{0,2000}?\[(?:[$A-Z_a-z][$\w]*,)+(?<quota>[$A-Z_a-z][$\w]*)\]\.filter\(Boolean\)[\s\S]{0,4000}?submitDisabledReasons:[$A-Z_a-z][$\w]*,)/g,
+      (...args) => {
+        const { prefix, reasons, host, mode, quota } = args.at(-1);
+        return `${prefix}/*codey-local-quota-gate*/if(${quota}&&(()=>{try{return globalThis.__codeyQuotaUnlock?.allowsLocalSend?.({hostId:${host},model:${mode}?.settings?.model})===true}catch{return false}})())${quota}="";${reasons}`;
+      },
       "local third-party composer quota",
     );
-    // Codex 26.1021 起 Team 等工作空间额度耗尽时另有按主机的硬阻断，
-    // 在禁用表达式或原因列表中紧挨额度条件；旧版没有该条件时保持不变。
-    if (quotaGate != null && patched.includes("/*codey-local-quota-gate*/")) {
-      const { disabled, host, mode, quota } = quotaGate;
-      const name = (value) => value.replace(/\$/g, "\\$");
-      const ident = "[$A-Z_a-z][$\\w]*";
-      const hasUniqueHostHardDefinition = (hard) => {
-        if (hard == null || hard === host) return false;
-        const hardDefinitions = [
-          ...patched.matchAll(
-            new RegExp(
-              `(?:^|[,;{]|(?:const|let|var) )${name(hard)}=(?:${ident}\\(${ident},${name(host)}\\)|\\(0,${ident}\\.${ident}\\)\\(${ident}\\.${ident},${name(host)}\\))`,
-              "g",
-            ),
-          ),
-        ];
-        return hardDefinitions.length === 1;
-      };
-      if (disabled != null) {
-        const disabledMatches = [
-          ...patched.matchAll(new RegExp(`let ${name(disabled)}=[^;]{0,512}?\\|\\|(${ident})\\|\\|${name(quota)}([,;])`, "g")),
-        ];
-        const hard = disabledMatches.length === 1 ? disabledMatches[0][1] : null;
-        const terminator = disabledMatches.length === 1 ? disabledMatches[0][2] : null;
-        if (hasUniqueHostHardDefinition(hard)) {
-          const [{ 0: matched, index }] = disabledMatches;
-          const term = `||${hard}||${quota}${terminator}`;
-          const offset = index + matched.length - term.length;
-          patched = `${patched.slice(0, offset)}||${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}||${quota}${terminator}${patched.slice(offset + term.length)}`;
-        }
-      } else {
-        const reasonMatches = [
-          ...patched.matchAll(
-            new RegExp(`(,${ident}=)(${ident})(&&[\\x60"]reserve-limit[\\x60"],${ident}=${name(quota)}&&[\\x60"]usage-limit[\\x60"];)`, "g"),
-          ),
-        ];
-        const hard = reasonMatches.length === 1 ? reasonMatches[0][2] : null;
-        if (hasUniqueHostHardDefinition(hard)) {
-          const [{ 0: matched, 1: prefix, 3: suffix, index }] = reasonMatches;
-          patched = `${patched.slice(0, index)}${prefix}${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}${suffix}${patched.slice(index + matched.length)}`;
-        }
-      }
-    }
-    return patched;
   };
-  // 这段函数会随资源补丁进入 Codex 模块。浏览器完成布局后再判断标记是否需要滚动。
-  function alignMessageMarker(align, rail, marker) {
-    if (!rail) return;
-    const focused = rail.contains(rail.ownerDocument.activeElement);
-    const previous = rail.__codeyPendingMessageMarker;
-    if (previous) {
-      if (previous.marker === marker && !focused) return;
-      previous.observer.disconnect();
-      delete rail.__codeyPendingMessageMarker;
-    }
-    if (!marker) return;
-    if (focused) {
-      align(rail, marker);
-      return;
-    }
-    const observer = new IntersectionObserver((entries) => {
-      if (rail.__codeyPendingMessageMarker?.observer !== observer) return;
-      observer.disconnect();
-      delete rail.__codeyPendingMessageMarker;
-      const { rootBounds, boundingClientRect } = entries.at(-1);
-      if (!marker.isConnected || !rail.contains(marker)) return;
-      // content-visibility 会让远处的标记暂时没有尺寸，这时仍要交给原生函数定位。
-      if (rootBounds && boundingClientRect.height > 0
-        && boundingClientRect.top >= rootBounds.top && boundingClientRect.bottom <= rootBounds.bottom) return;
-      // 标记等待布局期间，用户可能已经开始用键盘或指针操作导航条。
-      if (!rail.contains(rail.ownerDocument.activeElement) && !rail.querySelector('[data-scrub-target="true"]')) {
-        align(rail, marker);
-      }
-    }, { root: rail, threshold: 1 });
-    rail.__codeyPendingMessageMarker = { marker, observer };
-    observer.observe(marker);
-  }
 
   const patchThreadScrollMeasurements = (patched, source) => {
     if (!source.includes("threadScroll.restore") || !source.includes("threadScroll.initialRead")
@@ -560,8 +306,8 @@
       const distance = new RegExp([
         String.raw`,(?<distance>[$\w]+)=(?<saved>null==[$\w]+\?[$\w]+:Math\.max\(0,(?<rail>[$\w]+)\.scrollHeight-\k<rail>\.clientHeight-[$\w]+\));`,
         String.raw`(?<top>"top"===[$\w]+)\?\k<distance>=(?<maximum>Math\.max\(0,\k<rail>\.scrollHeight-\k<rail>\.clientHeight\)):`,
-        String.raw`(?<anchored>[$\w]+&&null!=(?<anchor>[$\w]+\.current))&&\(\k<distance>=(?<anchoredValue>\k<anchor>\+\([$\w]+\(\)\?\.getHeightPx\(\)\?\?0\))\),`,
-        String.raw`(?=[$\w]+\(\k<distance>\),\(0,[$\w]+\.[$\w]+\)\("threadScroll\.restore")`,
+        String.raw`(?<anchored>[$\w]+&&null!=(?<anchor>[$\w]+\.current))&&\(\k<distance>=(?<anchoredValue>\k<anchor>\+\([$\w]+\(\)\?\.getHeightPx\(\)\?\?0\))\);`,
+        String.raw`(?=let [$\w]+=\k<rail>\.scrollTop;\(0,[$\w]+\.[$\w]+\)\("threadScroll\.restore",\(\)=>\(0,[$\w]+\.[$\w]+\)\(\k<rail>,\k<distance>\)\))`,
       ].join(""), "g");
       patched = replaceUniqueRendererGate(patched, distance, (...args) => {
         const { distance, top, maximum, anchored, anchoredValue, saved } = args.at(-1);
@@ -590,78 +336,14 @@
     return patched;
   };
 
-  const patchPerformanceAndPrewarmGates = (patched, source, allowPetSlim) => {
+  const patchPerformanceAndPrewarmGates = (patched, source) => {
     patched = patchThreadScrollMeasurements(patched, source);
-    if (source.includes("thread.userMessageNavigation.ariaLabel")
-      && source.includes('[data-thread-user-message-navigation-item-id="')
-      && !source.includes("__codeyPendingMessageMarker")) {
-      // 只替换函数体内的调用，原生滚动函数仍在每次定位时读取。
-      patched = replaceUniqueRendererGate(
-        patched,
-        /(function [$\w]+\(([$\w]+),[$\w]+\)\{var [$\w]+,[$\w]+;)\(0,([$\w]+\.[$\w]+)\)\((?=\2,\([$\w]+=\2,null==\([$\w]+=[\w$]+\)\|\|null==[$\w]+\?null:[$\w]+\.querySelector\(`\[data-thread-user-message-navigation-item-id=")/g,
-        (_match, declaration, _rail, align) =>
-          `${declaration}(${alignMessageMarker})(${align},`,
-        "thread message navigation alignment",
-      );
-    }
-    if (
-      allowPetSlim
-      && source.includes("shouldPrewarmAvatarOverlay:")
-      && source.includes("electron-avatar-overlay-restore-ready")
-      && /[`"]electron-avatar-overlay-restore-ready[`"]/.test(source)
-    ) {
-      // Once the app is ready and realtime voice is available, Codex asks main
-      // to prewarm the hidden avatar overlay window, which keeps a full renderer
-      // resident. With the pet slimmed, only skip that prewarm; main still
-      // creates the shared overlay on demand for voice.
-      patched = replaceUniqueRendererGate(
-        patched,
-        /([`"]electron-avatar-overlay-restore-ready[`"],\{[^{}]*?\bshouldPrewarmAvatarOverlay:)[^,{}]+/g,
-        (_match, prefix) => `${prefix}!1`,
-        "avatar overlay prewarm",
-      );
-    }
-    if (
-      source.includes("forcePricingRefreshInBackground")
-      && /[`"]use_embedded_checkout[`"]/.test(source)
-    ) {
-      // 账号命中内嵌结账实验时，Codex 会在后台把 chatgpt.com 定价页预载进隐藏
-      // webview 并常驻（独立渲染进程）。只去掉这份后台预取：打开定价页时原生仍按
-      // 路由直接加载，离开后不再保留隐藏副本。
-      patched = replaceUniqueRendererGate(
-        patched,
-        [{
-          pattern: /([$A-Z_a-z][$\w]*)=![$A-Z_a-z][$\w]*\(\)&&[^;]{0,600}?\.get\(`use_embedded_checkout`,!1\)\?[$A-Z_a-z][$\w]*\(\{currentPlan:[^;]{0,200}?\}\):null/g,
-          replacement: (_match, desired) => `${desired}=null`,
-        }, {
-          // Codex 26.1029 把 URL 构造内联成函数表达式；让条件恒假即得 null。
-          pattern: /\b([$A-Z_a-z][$\w]*)=(?=!\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\(\)&&[^;]{0,600}?\.get\("use_embedded_checkout",!1\)\?function\(\{currentPlan:)/g,
-          replacement: (_match, desired) => `${desired}=!1&&`,
-        }],
-        null,
-        "pricing webview prewarm",
-      );
-    }
-    if (
-      source.includes("isPrewarm:")
-      && /[`"]use_embedded_credit_checkout[`"]/.test(source)
-      && !source.includes("checkout-webview-presentation-changed")
-      && !/&&\(!0\|\|[^;]{0,600}?[`"]use_embedded_credit_checkout[`"]/.test(source)
-    ) {
-      // 额度购买页同理：未展示时不再挂载隐藏的预热 webview，展示时照常加载。
-      patched = replaceUniqueRendererGate(
-        patched,
-        /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\([`"]use_embedded_credit_checkout[`"],!1\)\)\)return null;)/g,
-        (_match, presented) => `,!${presented}&&(!0||`,
-        "credit checkout webview prewarm",
-      );
-    }
     if (
       source.includes("checkout-webview-presentation-changed")
       && source.includes("isPrewarm:")
       && !source.includes("/*codey-personal-checkout-prewarm*/")
     ) {
-      // Codex 26.1111 起个人版定价与额度充值共用 CheckoutPersonalWebviewHost：
+      // 个人版定价与额度充值共用 CheckoutPersonalWebviewHost：
       // 仅在存在实际路由参数时启用宿主，并跳过伴随挂载的隐藏预热 webview。
       patched = replaceUniqueRendererGate(
         patched,
@@ -753,16 +435,58 @@
       );
     }
     if (
-      !source.includes("/*codey-sentry-loaf-skip*/")
-      && source.includes("auto.ui.browser.metrics")
-      && /PerformanceObserver\.supportedEntryTypes\.includes\([`"]long-animation-frame[`"]\)/.test(source)
+      !source.includes("/*codey-orbit-nav-prefetch-skip*/")
+      && source.includes("\"orbit.navigation\"")
+      && source.includes(".prefetch()")
+      && /[`"]general-settings[`"],[`"]appearance[`"],[`"]keyboard-shortcuts[`"]/.test(source)
     ) {
-      // 禁用 Sentry 长动画帧与长任务常驻监控，避免每次长帧在主线程分配归因跨度。
+      // 启动阶段会为 orbit 导航额外预取多个分包与状态，改为进入页面时再按需拉取。
       patched = replaceUniqueRendererGate(
         patched,
-        /[$A-Z_a-z][$\w]*&&[$A-Z_a-z][$\w]*\.PerformanceObserver&&PerformanceObserver\.supportedEntryTypes&&PerformanceObserver\.supportedEntryTypes\.includes\([`"]long-animation-frame[`"]\)\?new PerformanceObserver\([\s\S]{0,1200}?\)\.observe\(\{type:[`"]long-animation-frame[`"],buffered:!0\}\):[$A-Z_a-z][$\w]*&&[$A-Z_a-z][$\w]*\([`"]longtask[`"],\([\s\S]{0,600}?op:[`"]ui\.long-task[`"][^;]{0,180}?\}\}\)\}\}\)/g,
-        "(void 0/*codey-sentry-loaf-skip*/)",
-        "sentry loaf observer",
+        /(let ([$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\([$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*,\{name:[`"]orbit\.navigation[`"]\}\)\?\.isCapable;[$A-Z_a-z][$\w]*\[\d+\]!==\2\?\(([$A-Z_a-z][$\w]*)=\(\)=>\{)\2&&\([$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\.prefetch\(\),[\s\S]{0,200}?\.catch\(\(\)=>void 0\)\)(\},)/g,
+        (_match, prefix, _capable, _effectVar, suffix) =>
+          `${prefix}/*codey-orbit-nav-prefetch-skip*/${suffix}`,
+        "orbit navigation startup prefetch",
+      );
+    }
+    if (
+      !source.includes("/*codey-frame-gap-observer-skip*/")
+      && source.includes("durationThreshold:16")
+      && source.includes("PerformanceEventTiming")
+      && source.includes("eventsSupported:")
+    ) {
+      // 交互卡顿采样器在每个交互期间维持全帧率 rAF 循环和 16ms 事件观察器；遥测已关闭，直接返回空句柄。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /Z:function\(([$A-Z_a-z][$\w]*)\)\{return 0===([$A-Z_a-z][$\w]*)\.size&&\([$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\([`"]event[`"],[$A-Z_a-z][$\w]*\),document\.addEventListener\([`"]visibilitychange[`"],[$A-Z_a-z][$\w]*\),[$A-Z_a-z][$\w]*\(\)\),\2\.add\(\1\),\{eventsSupported:null!=[$A-Z_a-z][$\w]*,stop:\(\)=>\{\2\.has\(\1\)&&\([\s\S]{0,240}?document\.removeEventListener\([`"]visibilitychange[`"],[$A-Z_a-z][$\w]*\),[$A-Z_a-z][$\w]*\(\)\)\)\}\}\}/g,
+        "Z:function(){/*codey-frame-gap-observer-skip*/return{eventsSupported:!1,stop(){}}}",
+        "frame gap event observer",
+      );
+    }
+    if (
+      !source.includes("/*codey-startup-event-observer-skip*/")
+      && source.includes("durationThreshold:16")
+      && source.includes("this.eventObserver=new PerformanceObserver")
+    ) {
+      // 启动阶段会创建 30 秒的 16ms 交互事件 PerformanceObserver 收集首屏遥测，停用观察器但保留启动完成流程。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /try\{[`"]u[`"]>typeof PerformanceObserver&&PerformanceObserver\.supportedEntryTypes\?\.includes\([`"]event[`"]\)&&\(this\.eventObserver=new PerformanceObserver\([$A-Z_a-z][$\w]*=>this\.addEvents\([$A-Z_a-z][$\w]*\.getEntries\(\)\)\),this\.eventObserver\.observe\(\{type:[`"]event[`"],buffered:!0,durationThreshold:16\}\),this\.interactions\.supported=!0\)\}catch\{this\.eventObserver\?\.disconnect\(\),this\.eventObserver=void 0\}/g,
+        "/*codey-startup-event-observer-skip*/void 0;",
+        "startup event observer",
+      );
+    }
+    if (
+      !source.includes("/*codey-hang-detection-skip*/")
+      && source.includes("EventLoopBlockRenderer")
+      && source.includes("rendererHangDetectionEnabled")
+    ) {
+      // 禁用渲染进程事件循环卡顿探测（每 500ms 发送 IPC 心跳并触发 V8 栈采样）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /[$A-Z_a-z][$\w]*\.rendererHangDetectionEnabled&&(?=function\([$A-Z_a-z][$\w]*\)\{[\s\S]{0,240}?name:[`"]EventLoopBlockRenderer[`"])/g,
+        "/*codey-hang-detection-skip*/!1&&",
+        "renderer hang detection",
       );
     }
     if (
@@ -835,7 +559,7 @@
     return patched;
   };
   const patchCodexRendererAsset = (source) => {
-    if (!activeRendererPatchRules.some((rule) => rule.allOf.every((anchor) => source.includes(anchor)))) {
+    if (!rendererPatchRules.some((rule) => rule.allOf.every((anchor) => source.includes(anchor)))) {
       return source;
     }
     const previousRendererPatchFailures = activeRendererPatchFailures;
@@ -848,28 +572,16 @@
     let patched = source;
     if (source.includes("isNewThreadDraft:")
       && source.includes("modelSettingsPersistAsDefault:")
-      && source.includes("userSavedReasoningEffort:")) {
+      && source.includes("userSavedReasoningEffort:")
+      && source.includes("draftModelSettings:")) {
       patched = patchNewThreadDraftDefaults(patched);
-    } else if (source.includes("isManuallyChanged:!1,modelSettings:null,serviceTier:null")) {
-      // Codex 26.1029 起草稿工厂单独成 chunk：只把新草稿的速度初值设为默认档。
+    }
+    if (source.includes("isManuallyChanged:!1,modelSettings:null,serviceTier:null")) {
       patched = replaceUniqueRendererGate(
         patched,
         draftFactoryPattern,
         (factory) => factory.replace("serviceTier:null", "serviceTier:{value:`default`}"),
         "new thread draft speed default",
-      );
-    }
-    if (!source.includes("/*codey-app-server-manager-registry*/")
-      && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
-      && source.includes("getStreamRole(")
-      && source.includes("updateConversationState(")) {
-      // 在原生管理器被读取时登记真实实例，避免依赖模块导出名和 React 结构。
-      // 登记失败不得影响原生读取，也不允许已销毁实例覆盖新管理器。
-      patched = replaceUniqueRendererGate(
-        patched,
-        /getConversation\(([$A-Z_a-z][$\w]*)\)\{return this\.threadStore\.getConversation\(\1\)\}/g,
-        (_match, id) => `getConversation(${id}){/*codey-app-server-manager-registry*/try{if(this.disposed!==true&&this.getHostId()===\`local\`){let __codeyManagers=globalThis.__codeyAppServerManagers;if(__codeyManagers==null)globalThis.__codeyAppServerManagers=__codeyManagers=new Map;if(__codeyManagers instanceof Map)__codeyManagers.set(\`local\`,this)}}catch{}return this.threadStore.getConversation(${id})}`,
-        "app server manager registry",
       );
     }
     patched = patchComposerQuotaGates(patched, source);
@@ -888,18 +600,9 @@
         `let __codeySend=()=>{let __codeyMessage=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.(${sourceName})??${sourceName};if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(__codeyMessage)){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(__codeyMessage);return Promise.resolve()}return ${bridgeName}.sendMessageFromView(__codeyMessage)};let __codeyGuard=globalThis.__codeyModelWhitelistPatch?.guardDirectBridgeMessage?.(${sourceName},__codeySend);return __codeyGuard==null||__codeyGuard===true?__codeySend():__codeyGuard`;
       patched = replaceUniqueRendererGate(
         patched,
-        [{
-          pattern: /if\(([$A-Z_a-z][$\w]*)\?\.sendMessageFromView\)\{let ([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*);\1\.sendMessageFromView\(\2\)\.catch\(([$A-Z_a-z][$\w]*)=>\{/g,
-          replacement: (_match, bridgeName, messageName, sourceName, errorName) =>
-          `if(${bridgeName}?.sendMessageFromView){let ${messageName}=${sourceName};let __codeySend=()=>{${messageName}=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.(${sourceName})??${sourceName};if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(${messageName})){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(${messageName});return Promise.resolve()}return ${bridgeName}.sendMessageFromView(${messageName})};let __codeyGuard=globalThis.__codeyModelWhitelistPatch?.guardDirectBridgeMessage?.(${sourceName},__codeySend);(__codeyGuard==null||__codeyGuard===true?__codeySend():__codeyGuard).catch(${errorName}=>{`,
-        }, {
-          // Codex 26.1029：`bridge?.sendMessageFromView&&(bridge.sendMessageFromView(message).catch(...))`。
-          // 失败日志仍记录原始消息。
-          pattern: /\b([$A-Z_a-z][$\w]*)\?\.sendMessageFromView&&\(\1\.sendMessageFromView\(([$A-Z_a-z][$\w]*)\)\.catch\(/g,
-          replacement: (_match, bridgeName, sourceName) =>
-            `${bridgeName}?.sendMessageFromView&&((()=>{${guardedBridgeSend(bridgeName, sourceName)}})().catch(`,
-        }],
-        null,
+        /\b([$A-Z_a-z][$\w]*)\?\.sendMessageFromView&&\(\1\.sendMessageFromView\(([$A-Z_a-z][$\w]*)\)\.catch\(/g,
+        (_match, bridgeName, sourceName) =>
+          `${bridgeName}?.sendMessageFromView&&((()=>{${guardedBridgeSend(bridgeName, sourceName)}})().catch(`,
         "model route bridge preflight",
       );
     }
@@ -916,7 +619,7 @@
       // config/mcpServer/reload without walking the React tree.
       patched = replaceUniqueRendererGate(
         patched,
-        /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
+        /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null,([$A-Z_a-z][$\w]*)\)\{if\(\6\?\.aborted\)return Promise\.reject\([^;]{0,200}\);)let /g,
         (_match, prefix, methodName, paramsName) =>
           `${prefix}let __codeyGuard=globalThis.__codeyModelWhitelistPatch?.guardOutgoingRequest?.(this,${methodName},${paramsName},()=>this.enqueueRequest(...arguments));if(__codeyGuard)return __codeyGuard;(globalThis.__codeyAppServerRequestClients??(globalThis.__codeyAppServerRequestClients=new Map)).set(this.hostId,this);let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,hostId:this.hostId,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(__codeyRoute)){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(__codeyRoute);return Promise.reject(Error(\`Codey blocked cross-provider model request\`))}${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
         "app server request route preflight",
@@ -944,36 +647,11 @@
       );
     }
     if (
-      disablePet
-      && source.includes("settings.")
-      && (
-        source.includes("codex-avatar")
-        || source.includes("codex-pet-assets")
-        || source.includes("avatar-mascot-button")
-        || source.includes("use-avatar-options")
-      )
-      && /settings\.(?:(?:appearance|personalization)\.)?(?:pets|mini)(?:[."`]|$)/.test(source)
-      && petRendererResourceImport.test(source)
-    ) {
-      // Codex keeps the pets/Mini settings preview in a settings route chunk
-      // and statically imports the avatar renderer, mascot button, pet asset
-      // table, and avatar option hook from it. Hiding the controls after React
-      // mounts is too late: those imports have already pulled every bundled
-      // spritesheet into the main window. Replace each settings-side dependency
-      // with inert callable/iterable bindings. The shared avatar overlay host
-      // stays intact because current Codex builds also use it for voice
-      // controls.
-      patched = replacePetRendererResourceImports(
-        patched,
-        "pet settings avatar resources",
-      );
-    }
-    if (
       source.includes("Desktop host did not provide its AppServerManager service")
       && !source.includes("__codeyAppServerManagerHosted")
     ) {
-      // 新版把 AppServerManager 放在桌面宿主进程，页面只拿到 RPC 存根，页面里
-      // 打在请求客户端上的门禁不会经过。在宿主服务实际接入时留下标记供诊断。
+      // AppServerManager 运行在桌面宿主进程，页面只拿到 RPC 存根，在宿主服务
+      // 实际接入时留下标记供诊断。
       patched = replaceUniqueRendererGate(
         patched,
         /(if\((?:[$A-Z_a-z][$\w]*==null|null==[$A-Z_a-z][$\w]*)\)throw Error\([`"]Desktop host did not provide its AppServerManager service[`"]\);)/g,
@@ -1005,39 +683,20 @@
       );
     }
     if (
-      !source.includes("codeyReconcileCompletedConversation")
-      && source.includes("getHasInProgressLocalConversation(")
-      && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
-      && source.includes("getConversationStreamRevision(")
-    ) {
-      // A renderer can miss the terminal notification while retaining its old
-      // in-progress turn and stream role. Confirm the native app-server state
-      // twice, reject a concurrent stream revision, pending submission or
-      // follower window, then mark the thread needs_resume and resume it the
-      // same way reconnect recovery does. This hydrates history without
-      // discarding, interrupting, or starting another turn. The in-progress
-      // predicate is the one getHasInProgressLocalConversation already uses.
-      patched = replaceUniqueRendererGate(
-        patched,
-        /getHasInProgressLocalConversation\(\{exceptConversationId:([$A-Z_a-z][$\w]*)\}=\{\}\)\{for\(let ([$A-Z_a-z][$\w]*) of this\.threadStore\.getRecentConversationIds\(\)\)\{if\(\2===\1\)continue;let ([$A-Z_a-z][$\w]*)=this\.conversations\.get\(\2\);if\((?:\3!=null|null!=\3)&&([$A-Z_a-z][$\w]*)\(\3\)\)return!0\}return!1\}/g,
-        (match, _exceptName, _idName, _conversationName, inProgressName) =>
-          `async codeyReconcileCompletedConversation(__codeyParams){let __codeyId=__codeyParams?.conversationId,__codeyRunning=()=>{let __codeyConversation=__codeyId==null?null:this.getConversation(__codeyId);return __codeyConversation!=null&&__codeyConversation.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)!==!0&&${inProgressName}(__codeyConversation)&&this.getStreamRole(__codeyId)?.role!==\`follower\`};if(!__codeyRunning())return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`systemError\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyId)!==__codeyRevision||!__codeyRunning())return!1;let __codeyCwd=this.getConversation(__codeyId)?.cwd;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyId);this.updateConversationState(__codeyId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.resumeConversation({...__codeyParams,workspaceRoots:__codeyParams.workspaceRoots?.length?__codeyParams.workspaceRoots:__codeyCwd?[__codeyCwd]:[\`/\`]});let __codeyConversation=this.getConversation(__codeyId);return __codeyConversation!=null&&!${inProgressName}(__codeyConversation)}${match}`,
-        "completed thread reconciliation",
-      );
-    }
-    if (
       source.includes("includeUltraReasoningEffort:") &&
       source.includes("isCustomModelProvider:") &&
-      source.includes("modelCatalogPath:") &&
+      source.includes("teamCatalog:") &&
       source.includes("1186680773")
     ) {
       // 第三方线路按模型目录显示 Ultra，保留调用方和用户的推理等级设置。
-      // 宿主服务 chunk 只把同一开关作为参数传入，没有模型目录查询，不在此改写。
+      // 宿主服务 chunk 不含 teamCatalog 模型目录查询，不在此改写。
       patched = replaceUniqueRendererGate(
         patched,
-        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
-        (_match, prefix, _includeUltra, customProvider, _get, gate) =>
-          `${prefix}(${customProvider}||${gate})`,
+        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*(?<ultra>[$A-Z_a-z][$\w]*)(?:=!0)?[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*(?<get>[$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[\s\S]{0,1600}?\b(?<flag>[$A-Z_a-z][$\w]*)\s*=\s*\k<ultra>\s*&&\s*)(?<gate>\k<get>\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(?<quote>["'`])1186680773\k<quote>\s*\))(?=[\s\S]{0,2000}?\bincludeUltraReasoningEffort\s*:\s*\k<flag>\s*,\s*isCustomModelProvider\s*:\s*(?<custom>[$A-Z_a-z][$\w]*)\b)/g,
+        (_match, prefix, ...rest) => {
+          const { custom, gate } = rest.at(-1);
+          return `${prefix}(${custom}||${gate})`;
+        },
         "third-party Ultra reasoning",
       );
     }
@@ -1070,7 +729,7 @@
         "service tier access state",
       );
     }
-    patched = patchPerformanceAndPrewarmGates(patched, source, disablePet);
+    patched = patchPerformanceAndPrewarmGates(patched, source);
     if (!patched.includes("globalThis.__codeyModelRequestSourceGateInstalled=true")
       && patched.includes("globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage")
       && patched.includes("let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage")
@@ -1088,10 +747,8 @@
   // 整页样式重算。改写为普通属性选择器 [data-codey-open-within]，由注入脚本仅在
   // 出现 data-state="open" 时同步到容器。
   const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
-  const openStateCssAriaAndDataStateHasPattern =
-    /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
   const openStateCssDataStateHasPattern =
-    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+    /:has\(\s*(?::is\(\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
   const patchCodexRendererCssAsset = (source) => {
     if (
       source.includes(openStateCssPatchedMarker) ||
@@ -1100,12 +757,10 @@
     ) {
       return source;
     }
-    const patched = source
-      .replace(
-        openStateCssAriaAndDataStateHasPattern,
-        ":is(:has([aria-expanded=true]),[data-codey-open-within])",
-      )
-      .replace(openStateCssDataStateHasPattern, "[data-codey-open-within]");
+    const patched = source.replace(
+      openStateCssDataStateHasPattern,
+      "[data-codey-open-within]",
+    );
     if (patched === source) return source;
     return `${patched}\n:root{${openStateCssPatchedMarker}:1}\n`;
   };
@@ -1131,21 +786,11 @@
       const url = new URL(requestUrl);
       return (
         url.protocol === "app:" &&
-        url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers|send-follow-up-message|start-turn|webview-page)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
-            url.pathname,
-          ) ||
           /^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i.test(
             url.pathname,
           ) ||
-          isCodexRendererCssAssetUrl(requestUrl) ||
-          (
-            disablePet &&
-            /\/(?:(?:pets-settings|app-runtime)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
-              url.pathname,
-            )
-          )
+          isCodexRendererCssAssetUrl(requestUrl)
         )
       );
     } catch {

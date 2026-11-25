@@ -272,8 +272,8 @@ test("runtime stylesheet fallback rewrites unpatched link stylesheets and skips 
         cssText: ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=\"open\"]) *) { opacity: 1; }",
       },
       {
-        selectorText: ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=\"true\"], [data-state=\"open\"]) *)",
-        cssText: ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=\"true\"], [data-state=\"open\"]) *) { opacity: 1; }",
+        selectorText: ".has-\\[button\\[data-state\\=open\\]\\]\\:opacity-100:has(:is(button[data-state=\"open\"]))",
+        cssText: ".has-\\[button\\[data-state\\=open\\]\\]\\:opacity-100:has(:is(button[data-state=\"open\"])) { opacity: 1; }",
       },
     ],
   };
@@ -282,8 +282,8 @@ test("runtime stylesheet fallback rewrites unpatched link stylesheets and skips 
     disabled: false,
     cssRules: [
       {
-        selectorText: ":where(.card-ineZLT)[data-codey-open-within]",
-        cssText: ":where(.card-ineZLT)[data-codey-open-within] { opacity: 1 !important; }",
+        selectorText: ":where(.card-abc123)[data-codey-open-within]",
+        cssText: ":where(.card-abc123)[data-codey-open-within] { opacity: 1 !important; }",
       },
       {
         selectorText: ":root",
@@ -305,7 +305,7 @@ test("runtime stylesheet fallback rewrites unpatched link stylesheets and skips 
   assert.match(replacementStyle.textContent, /:where\(\.group\)\[data-codey-open-within\]/);
   assert.match(
     replacementStyle.textContent,
-    /:where\(\.group\):is\(:has\(\[aria-expanded=true\]\),\[data-codey-open-within\]\)/,
+    /\.has-\\\[button\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/,
   );
 });
 

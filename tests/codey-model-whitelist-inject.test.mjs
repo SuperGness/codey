@@ -6224,8 +6224,8 @@ test("model settings, resume and fork bypass portable preparation at both transp
   const source = await readFile(new URL("../backend/src/renderer_asset_patch.js", import.meta.url), "utf8");
   const globals = {};
   Function("globalThis", source)(globals);
-  const original = 'const transport={postMessage:e=>{let t=!1,n=window.electronBridge;if(n?.sendMessageFromView){let r=e;n.sendMessageFromView(r).catch(t=>{errors.push(t);r.type!==`log-message`&&log.warning(`Failed to send message from view`,{message:e,error:t})}),t=!0}let r=new CustomEvent(`codex-message-from-view`,{detail:e});t&&(r.__codexForwardedViaBridge=!0),window.dispatchEvent(r)}};';
-  const patched = globals.__codeyRendererPatchEntry("app://-/assets/app-initial-direct.js", original);
+  const original = 'const transport={postMessage:e=>{let t=!1,n=window.electronBridge;n?.sendMessageFromView&&(n.sendMessageFromView(e).catch(t=>{errors.push(t);e.type!==`log-message`&&log.warning(`Failed to send message from view`,{message:e,error:t})}),t=!0);let r=new CustomEvent(`codex-message-from-view`,{detail:e});t&&(r.__codexForwardedViaBridge=!0),window.dispatchEvent(r)}};';
+  const patched = globals.__codeyRendererPatchEntry("app://-/assets/348410.f0081c7d18.js", original);
   assert.ok(patched);
   for (const entry of ["client", "direct"]) {
     const sent = [], errors = [], preparations = [];
@@ -6884,8 +6884,8 @@ test("direct source bridge prepares before tracking and sends once, including st
   const source = await readFile(new URL("../backend/src/renderer_asset_patch.js", import.meta.url), "utf8");
   const globals = {};
   Function("globalThis", source)(globals);
-  const original = 'const transport={postMessage:e=>{let t=!1,n=window.electronBridge;if(n?.sendMessageFromView){let r=e;n.sendMessageFromView(r).catch(t=>{errors.push(t);r.type!==`log-message`&&log.warning(`Failed to send message from view`,{message:e,error:t})}),t=!0}let r=new CustomEvent(`codex-message-from-view`,{detail:e});t&&(r.__codexForwardedViaBridge=!0),window.dispatchEvent(r)}};';
-  const patched = globals.__codeyRendererPatchEntry("app://-/assets/app-initial-direct.js", original);
+  const original = 'const transport={postMessage:e=>{let t=!1,n=window.electronBridge;n?.sendMessageFromView&&(n.sendMessageFromView(e).catch(t=>{errors.push(t);e.type!==`log-message`&&log.warning(`Failed to send message from view`,{message:e,error:t})}),t=!0);let r=new CustomEvent(`codex-message-from-view`,{detail:e});t&&(r.__codexForwardedViaBridge=!0),window.dispatchEvent(r)}};';
+  const patched = globals.__codeyRendererPatchEntry("app://-/assets/348410.f0081c7d18.js", original);
   assert.ok(patched);
   for (const mode of ["same-route", "missing-binding", "required", "failed", "load-failed", "approved"]) {
     const calls = [], sent = [], errors = [];
