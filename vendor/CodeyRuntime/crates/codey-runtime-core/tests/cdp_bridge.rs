@@ -143,34 +143,20 @@ fn pick_injectable_codex_page_target_rejects_non_codex_pages() {
 }
 
 #[test]
-fn pick_injectable_codex_page_target_accepts_chatgpt_desktop_page() {
-    let targets = vec![target(
-        "chatgpt",
-        "page",
-        "ChatGPT",
-        "https://chatgpt.com/",
-        Some("ws://chatgpt"),
-    )];
-
-    let picked = pick_injectable_codex_page_target(&targets)
-        .expect("ChatGPT desktop page should be selected");
-
-    assert_eq!(picked.id, "chatgpt");
-}
-
-#[test]
-fn pick_injectable_codex_page_target_rejects_chatgpt_desktop_error_page() {
-    let targets = vec![target(
-        "chatgpt-error",
-        "page",
-        "ChatGPT",
-        "data:text/html;charset=utf-8,%3Ctitle%3EChatGPT%3C/title%3E",
-        Some("ws://chatgpt-error"),
-    )];
-
-    assert!(!is_primary_codex_page_target(&targets[0]));
-    pick_injectable_codex_page_target(&targets)
-        .expect_err("ChatGPT desktop error page must not be selected for injection");
+fn pick_injectable_codex_page_target_rejects_legacy_chatgpt_web_pages() {
+    for (title, url) in [
+        ("ChatGPT", "https://chatgpt.com/"),
+        ("ChatGPT", "https://chat.openai.com/"),
+        (
+            "ChatGPT",
+            "data:text/html;charset=utf-8,%3Ctitle%3EChatGPT%3C/title%3E",
+        ),
+    ] {
+        let targets = vec![target("chatgpt", "page", title, url, Some("ws://chatgpt"))];
+        assert!(!is_primary_codex_page_target(&targets[0]), "{url}");
+        pick_injectable_codex_page_target(&targets)
+            .expect_err("legacy ChatGPT web page must not be selected for injection");
+    }
 }
 
 #[test]
@@ -193,20 +179,19 @@ fn data_html_page_with_codex_in_title_or_content_is_not_a_codex_target() {
 
 #[test]
 fn primary_target_selection_skips_data_html_errors_before_normal_pages() {
-    for url in [
-        "https://chatgpt.com/",
-        "https://chat.openai.com/",
-        "app://-/index.html",
+    for (title, url) in [
+        ("Codex", "app://-/index.html"),
+        ("Codex", "https://codex.local/"),
     ] {
         let targets = vec![
             target(
                 "error",
                 "page",
-                "ChatGPT",
+                "Codex",
                 "data:text/html;charset=utf-8,%3Cp%3ECodex%20failed%20to%20start%3C/p%3E",
                 Some("ws://error"),
             ),
-            target("main", "page", "ChatGPT", url, Some("ws://main")),
+            target("main", "page", title, url, Some("ws://main")),
         ];
 
         let selected = pick_injectable_codex_page_target(&targets)
@@ -221,15 +206,15 @@ fn avatar_overlay_target_detection_is_narrow() {
     let overlay = target(
         "avatar",
         "page",
-        "ChatGPT Avatar Overlay",
+        "Codex Avatar Overlay",
         "app://-/index.html?initialRoute=%2Favatar-overlay",
         Some("ws://avatar"),
     );
     let main = target(
         "main",
         "page",
-        "ChatGPT",
-        "https://chatgpt.com/",
+        "Codex",
+        "app://-/index.html",
         Some("ws://main"),
     );
 
@@ -1299,7 +1284,13 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
 
         for (id, path) in [
             ("slow", "/api/fetch_current_provider_models"),
-            ("fast", "/backend/status"),
+            ("fast-status", "/backend/status"),
+            ("fast-stats", "/session/stats"),
+            ("fast-timestamps", "/session/timestamps"),
+            ("fast-model", "/session/model"),
+            ("fast-compaction", "/session/portable-compaction/status"),
+            ("fast-overlay", "/internal/codey/settings-overlay/load"),
+            ("fast-tools", "/internal/codey/session-tools/load"),
         ] {
             send_json(
                 &mut socket,
@@ -1317,12 +1308,34 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
             .await;
         }
 
-        let first = tokio::time::timeout(Duration::from_secs(1), async {
-            recv_json(&mut socket).await
-        })
-        .await
-        .expect("read-only bridge request should not wait for the serial handler");
-        assert_expression_contains_request(&first, "fast");
+        let mut fast_seen = Vec::new();
+        for _ in 0..7 {
+            let reply = tokio::time::timeout(Duration::from_secs(1), async {
+                recv_json(&mut socket).await
+            })
+            .await
+            .expect("concurrent bridge request should not wait for the serial handler");
+            let expression = reply["params"]["expression"]
+                .as_str()
+                .expect("expression should be string");
+            assert!(expression.contains("__codexSessionDeleteResolve"), "{expression}");
+            assert!(!expression.contains("slow"), "serial call should still be blocked");
+            fast_seen.push(expression.to_string());
+        }
+        for id in [
+            "fast-status",
+            "fast-stats",
+            "fast-timestamps",
+            "fast-model",
+            "fast-compaction",
+            "fast-overlay",
+            "fast-tools",
+        ] {
+            assert!(
+                fast_seen.iter().any(|expr| expr.contains(id)),
+                "missing concurrent completion for {id}"
+            );
+        }
         server_release.notify_one();
 
         let second = recv_json(&mut socket).await;

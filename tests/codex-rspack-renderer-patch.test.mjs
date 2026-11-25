@@ -131,7 +131,17 @@ test("rspack Ultra reasoning gate unlocks custom providers from computed local f
   assert.equal(query({ hostId: "local", includeUltraReasoningEffort: true, teamCatalog: true }, { get }).select().includeUltraReasoningEffort, true);
   assert.equal(query({ hostId: "local", includeUltraReasoningEffort: true, teamCatalog: false }, { get }).select().includeUltraReasoningEffort, false);
   assert.equal(query({ hostId: "local", includeUltraReasoningEffort: false, teamCatalog: true }, { get }).select().includeUltraReasoningEffort, false);
-  assert.deepEqual(logs, []);
+
+  // Host services chunk passes the Ultra gate into dynamic tools without a teamCatalog model query; leave it untouched.
+  const hostServicesSource = [
+    "function Hs(t,e,c){return Sm({hostId:e.hostId,includeUltraReasoningEffort:Kl(t,`1186680773`),",
+    "isAuthLoading:c.isLoading,isCustomModelProvider:e.isCustomModelProvider})}",
+  ].join("");
+  assert.equal(
+    patch(hostServicesSource, "app://-/assets/async/49792.d8d33ace73.js"),
+    null,
+  );
+  assert.deepEqual(logs, [], "a gate argument without the catalog query is not a drift");
 });
 
 test("rspack telemetry patches skip heartbeat snapshots and interaction sampling", async () => {
@@ -198,6 +208,7 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
   const mainCss = [
     ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=open]) *){opacity:1}",
     ".group-has-\\[\\[data-state\\=open\\]\\]\\/project-source\\:opacity-100:is(:where(.group\\/project-source):has([data-state=open]) *){opacity:1}",
+    ":where(.threadCard-Zx98Ab > *):has([data-state=open]){content-visibility:visible}",
     ".has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:has([data-state=open]){opacity:1}",
     ".has-\\[button\\[data-state\\=open\\]\\]\\:opacity-100:has(:is(button[data-state=open])){opacity:1}",
   ].join("");
@@ -208,7 +219,20 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
   assert.match(patchedMain, /:where\(\.group\\\/project-source\)\[data-codey-open-within\]/);
   assert.match(patchedMain, /\.has-\\\[\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
   assert.match(patchedMain, /\.has-\\\[button\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
-  assert.match(patchedMain, /:root\{--codey-css-open-state-has-patched:1\}/);
+  const markerMatch = patchedMain.match(
+    /:root\{--codey-css-open-state-has-patched:1;--codey-open-within-classes:"([^"]+)"\}/,
+  );
+  assert.ok(markerMatch, "patched stylesheet emits open-within class metadata");
+  const harvestedClasses = JSON.parse(decodeURIComponent(markerMatch[1]));
+  assert.deepEqual(harvestedClasses.d, ["threadCard-Zx98Ab"]);
+  assert.deepEqual(
+    harvestedClasses.a.sort(),
+    ["group", "group/project-source", "has-[[data-state=open]]:opacity-100", "threadCard-Zx98Ab"],
+  );
+  assert.deepEqual(
+    harvestedClasses.b,
+    ["has-[button[data-state=open]]:opacity-100"],
+  );
   assert.equal(
     patch(patchedMain, "app://-/assets/async/e77f816560c6.css"),
     null,
@@ -564,5 +588,98 @@ test("rspack Statsig startup gates bound post-login bootstrap, skip remote ident
   assert.deepEqual(stalled.finalizedWith, [null]);
   assert.deepEqual(stalled.loadingChanges, [false]);
 
+  assert.deepEqual(logs, []);
+});
+
+test("incompatible optional renderer patches log anchor excerpts once without blocking responses", async () => {
+  const { logs, patch } = await installPatch();
+  const patchErrors = [];
+  const nativeConsoleError = console.error;
+  console.error = (...args) => {
+    patchErrors.push(args);
+  };
+  try {
+    const incompatibleSource = [
+      "supportsIndependentSpeedModes",
+      "ultrafast_mode",
+      "case`electron-app-state-snapshot-request`:",
+    ].join(" ");
+    const url = "app://-/assets/async/49792.d8d33ace73.js";
+    assert.equal(patch(incompatibleSource, url), null);
+    assert.equal(patchErrors.length, 2);
+    for (const [message] of patchErrors) {
+      assert.match(String(message), /incompatible Codex renderer patch/);
+    }
+    assert.deepEqual(
+      logs.map(({ operation }) => operation),
+      [
+        "renderer_patch:service tier access",
+        "renderer_patch:app state heartbeat snapshot",
+      ],
+    );
+    for (const record of logs) {
+      assert.equal(record.context.matchCount, 0);
+      assert.ok(
+        Array.isArray(record.context.excerpts)
+          && record.context.excerpts.length > 0
+          && record.context.excerpts.every((excerpt) => excerpt.length > 0),
+        `${record.operation} must carry anchor excerpts for field diagnosis`,
+      );
+      assert.match(
+        record.context.excerpts.join("\n"),
+        /supportsIndependentSpeedModes|electron-app-state-snapshot-request/,
+      );
+    }
+
+    assert.equal(patch(incompatibleSource, url), null);
+    assert.equal(patchErrors.length, 2, "the same incompatible source must not rerun failed renderer gates");
+    assert.equal(logs.length, 2, "the same incompatible source must not report the same gates again");
+
+    // Non-numeric chunk URLs pass through untouched.
+    assert.equal(
+      patch(incompatibleSource, "app://-/webview/assets/unrelated-feature-6f60e9ac4103.js"),
+      null,
+    );
+    assert.equal(logs.length, 2);
+  } finally {
+    console.error = nativeConsoleError;
+  }
+});
+
+test("hosted composer sends pass through the portable handoff gate", async () => {
+  const { logs, patch } = await installPatch();
+  const followUp = "async function f(e,n,i,o){let l=d(e,n),m=null;return f=await l.sendFollowUpMessage(i,{...o,useUserMessageAdmission:c(e,n),writingBlockContextPrepared:m!=null}),f}";
+  const turnStart = "async function f(e,n,r,a){let c=d(e,n);return await c.startTurn(r,{...a,context:{...a.context,onRequestDispatched:a.context?.onRequestDispatched},request:{...a.request}})}async function p(e,n,r,a){let s=d(e,n);await s.startEmptyTurn(r,a)}";
+  const cases = [
+    ["app://-/assets/async/49792.d8d33ace73.js", followUp, "sendFollowUpMessage", { prompt: "hi" }],
+    ["app://-/assets/async/102734.cdd4b920b9.js", turnStart, "startTurn", { request: { input: [] } }],
+  ];
+  for (const [url, source, method, options] of cases) {
+    const patched = patch(source, url);
+    assert.ok(patched?.includes(`"${method}",`), method);
+    assert.equal(patch(patched, url), null, `${method} patch is idempotent`);
+    const calls = [];
+    const rpc = { [method]: async (...args) => { calls.push(["native", ...args]); return "sent"; } };
+    const run = Function("d", "c", `${patched};return f`)(() => rpc, () => true);
+    delete globalThis.__codeyModelWhitelistPatch;
+    assert.equal(await run({}, "local", "thread", options), "sent", `${method} works without the gate`);
+    globalThis.__codeyModelWhitelistPatch = {
+      hostedTurnCall: async (target, name, threadId, value) => {
+        calls.push(["gate", name, threadId]);
+        return target[name](threadId, value);
+      },
+    };
+    try {
+      assert.equal(await run({}, "local", "thread", options), "sent");
+    } finally {
+      delete globalThis.__codeyModelWhitelistPatch;
+    }
+    assert.deepEqual(
+      calls.map(([kind, name]) => (kind === "gate" ? `gate:${name}` : kind)),
+      ["native", `gate:${method}`, "native"],
+    );
+  }
+  const lock = "function t(e){return!r.has(e)&&(r.add(e),!0)}";
+  assert.equal(patch(lock, "app://-/assets/async/999999.be4319076981.js"), null);
   assert.deepEqual(logs, []);
 });

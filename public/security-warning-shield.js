@@ -68,24 +68,11 @@
   let unsubscribeMutations = null;
 
   const publishInjectionStatus = () => {
-    const entry = window.__codeyInjectionStatus?.[injectionStatusId];
-    if (!entry || entry.status === "pending") return;
     const status = enabled ? "effective" : "inactive";
     const detail = enabled
       ? "安全提示屏蔽已启用"
       : "控制器已就绪，当前屏蔽策略关闭";
-    if (entry.status === status && entry.detail === detail && !entry.error) return;
-    entry.status = status;
-    entry.detail = detail;
-    entry.error = null;
-    if (
-      typeof window.dispatchEvent === "function"
-      && typeof window.CustomEvent === "function"
-    ) {
-      window.dispatchEvent(new window.CustomEvent(injectionStatusChangedEvent, {
-        detail: { id: injectionStatusId, status },
-      }));
-    }
+    window.__codeySharedRuntime?.publishInjectionStatus?.(injectionStatusId, status, detail);
   };
 
   // innerText forces a layout flush. Read visible text and accessible labels
@@ -160,20 +147,11 @@
     return null;
   };
 
-  const createFrame = (element) => ({
-    element,
-    nextChildIndex: 0,
-    visited: false,
-  });
-  const createContinuation = (root, continuation = null) => {
-    const segments = continuation?.segments
-      ? [...continuation.segments]
-      : [];
-    segments.push([createFrame(root)]);
-    return { segments };
-  };
+  const createContinuation = (root, continuation = null) => (
+    window.__codeySharedRuntime.createElementContinuation(root, continuation)
+  );
   const hasContinuation = (continuation) => (
-    continuation?.segments?.some?.((segment) => segment.length > 0) === true
+    window.__codeySharedRuntime.hasElementContinuation(continuation)
   );
 
   const controlsWithin = (
@@ -181,47 +159,20 @@
     { continuation = null, remaining = null } = {},
   ) => {
     const controls = [];
-    const state = continuation || createContinuation(
-      root instanceof Element ? root : document.documentElement,
-    );
-    let visited = 0;
-    while (remaining ? remaining.value > 0 : true) {
-      const segment = state.segments[0];
-      if (!segment?.length) {
-        state.segments.shift();
-        if (!state.segments.length) break;
-        continue;
-      }
-      const frame = segment[segment.length - 1];
-      const element = frame.element;
-      if (!(element instanceof Element)) {
-        segment.pop();
-        continue;
-      }
-      if (!frame.visited) {
-        frame.visited = true;
-        if (remaining) remaining.value -= 1;
-        scannedElements += 1;
-        visited += 1;
+    const traversal = window.__codeySharedRuntime.walkElementsBudgeted(
+      root,
+      (element) => {
         if (element.matches?.("button, [role=button]")) controls.push(element);
-      }
-      if (remaining?.value <= 0) break;
-      if (frame.nextChildIndex < element.children.length) {
-        const child = element.children[frame.nextChildIndex];
-        frame.nextChildIndex += 1;
-        childExpansions += 1;
-        segment.push(createFrame(child));
-      } else {
-        segment.pop();
-      }
-    }
+      },
+      { continuation, remaining },
+    );
+    scannedElements += traversal.visited;
+    childExpansions += traversal.childExpansions;
     scanCount += 1;
     return {
-      continuation: {
-        segments: state.segments.filter((segment) => segment.length > 0),
-      },
+      continuation: traversal.continuation,
       controls,
-      visited,
+      visited: traversal.visited,
     };
   };
 

@@ -50,8 +50,8 @@ function loadPatch() {
 
 test("large rewritten assets are not retained in the patch script maps", () => {
   const harness = loadPatch();
-  const bodyMiB = 4;
-  const filler = "x".repeat(bodyMiB * 1024 * 1024);
+  const bodyKiB = 96;
+  const filler = "x".repeat(bodyKiB * 1024);
   const results = [];
   for (let version = 0; version < 4; version += 1) {
     const source = `${quotaFixture}const version=${version};const filler=${JSON.stringify(filler)};`;

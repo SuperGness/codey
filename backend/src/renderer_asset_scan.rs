@@ -2,11 +2,11 @@
 //!
 //! rspack 构建把前端拆成上万个数字 chunk。若按通配地址拦截，每个加载的 chunk
 //! 都要经 CDP 暂停一次，冷启动还要整份读回正文再预筛。这里直接读取安装包里的
-//! 资源，找出含补丁前置字面量的 chunk，补丁服务只拦截这些精确地址。结果按
-//! 归档身份和补丁版本缓存，同一 Codex 版本只扫一次。
+//! 资源，找出含补丁复合前置规则的 chunk，补丁服务只拦截这些精确地址。结果按
+//! 归档身份和补丁规则摘要缓存，同一 Codex 版本只扫一次。
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -20,13 +20,14 @@ use crate::renderer_asset_patch::{PatchAnchorMatcher, css_asset_name, numeric_as
 const MAX_ASAR_HEADER_BYTES: u64 = 64 << 20;
 /// 单个脚本上限；超出说明归档异常，整次扫描作废并回到通配拦截。
 const MAX_SCANNED_ASSET_BYTES: u64 = 64 << 20;
+/// 条目数达到阈值才启用多线程扫描，避免小型夹具额外起线程。
+const PARALLEL_SCAN_MIN_ENTRIES: usize = 16;
+const MAX_SCAN_WORKERS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetScan {
-    /// 资源目录中的数字 chunk 数；为 0 说明是按文件名拆分的构建。
-    pub(crate) numeric_chunks: usize,
-    /// 含补丁前置字面量的数字 chunk，路径相对资源目录，如 `async/24191.589dcc9878.js`。
+    /// 含补丁前置规则的数字 chunk 与样式表，路径相对资源目录，如 `async/24191.589dcc9878.js`。
     pub(crate) candidates: Vec<String>,
 }
 
@@ -53,17 +54,6 @@ pub(crate) struct ScanOutcome {
     pub(crate) cache_write_error: Option<String>,
 }
 
-/// 读取缓存或扫描安装包（按兼容的单字面量表构造匹配器）。
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn load_or_scan(
-    app_dir: &Path,
-    cache_file: &Path,
-    anchors: &[String],
-) -> Result<ScanOutcome> {
-    let matcher = PatchAnchorMatcher::from_single_anchors(anchors);
-    load_or_scan_with_matcher(app_dir, cache_file, &matcher)
-}
-
 /// 读取缓存或按复合前置规则扫描安装包；规则集合摘要变化时自动失效重扫。
 pub(crate) fn load_or_scan_with_matcher(
     app_dir: &Path,
@@ -73,7 +63,7 @@ pub(crate) fn load_or_scan_with_matcher(
     let source = AssetSource::locate(app_dir)?;
     let identity = source.identity()?;
     let anchors_sha256 = matcher.digest_hex();
-    if let Some(scan) = read_cache(cache_file, &identity, &anchors_sha256) {
+    if let Some(scan) = read_cache(cache_file, &identity, anchors_sha256) {
         return Ok(ScanOutcome {
             scan,
             cached: true,
@@ -83,7 +73,7 @@ pub(crate) fn load_or_scan_with_matcher(
     let scan = source.scan_with_matcher(matcher)?;
     let cached = CachedScan {
         source: identity,
-        anchors_sha256: Some(anchors_sha256),
+        anchors_sha256: Some(anchors_sha256.to_string()),
         scan: scan.clone(),
     };
     let cache_write_error = serde_json::to_vec(&cached)
@@ -161,17 +151,19 @@ impl AssetSource {
     }
 
     fn scan_with_matcher(&self, matcher: &PatchAnchorMatcher) -> Result<AssetScan> {
-        let compiled = matcher.compile_finders();
-        let matches = |bytes: &[u8]| compiled.matches_bytes(bytes);
         match self {
-            Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, &matches),
-            Self::Directory { app } => scan_directory(&app.join("webview/assets"), &matches),
+            Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, matcher),
+            Self::Directory { app } => scan_directory(&app.join("webview/assets"), matcher),
         }
     }
 }
 
 fn scannable_asset_name(name: &str) -> bool {
     numeric_asset_name(name) || css_asset_name(name)
+}
+
+fn is_css_path(path: &str) -> bool {
+    path.len() >= 4 && path[path.len() - 4..].eq_ignore_ascii_case(".css")
 }
 
 /// 资源目录里的数字 chunk 与带哈希样式表：根目录与 `async/` 子目录，规则与拦截时一致。
@@ -187,10 +179,93 @@ fn scannable_asset_paths<'a>(
     }
 }
 
+enum AsarEntryLocation {
+    Packed { start: u64 },
+    Unpacked { path: PathBuf },
+}
+
+struct AsarScanEntry {
+    relative: String,
+    is_css: bool,
+    size: usize,
+    location: AsarEntryLocation,
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let read = file.seek_read(buf, offset)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ));
+        }
+        offset += read as u64;
+        buf = &mut buf[read..];
+    }
+    Ok(())
+}
+
+fn worker_count_for(total: usize) -> usize {
+    if total < PARALLEL_SCAN_MIN_ENTRIES {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, MAX_SCAN_WORKERS)
+        .min(total)
+}
+
+fn scan_asar_slice(
+    archive: &Path,
+    #[cfg(unix)] shared_file: &File,
+    entries: &[AsarScanEntry],
+    matcher: &PatchAnchorMatcher,
+) -> Result<Vec<String>> {
+    #[cfg(windows)]
+    let local_file = File::open(archive)
+        .with_context(|| format!("无法打开 Codex 归档：{}", archive.display()))?;
+    #[cfg(unix)]
+    let _ = archive;
+    #[cfg(unix)]
+    let reader = shared_file;
+    #[cfg(windows)]
+    let reader = &local_file;
+
+    let mut matched = Vec::new();
+    let mut buffer = Vec::new();
+    for entry in entries {
+        buffer.resize(entry.size, 0);
+        match &entry.location {
+            AsarEntryLocation::Packed { start } => {
+                read_exact_at(reader, &mut buffer, *start)
+                    .with_context(|| format!("无法读取 ASAR 条目：{}", entry.relative))?;
+            }
+            AsarEntryLocation::Unpacked { path } => {
+                File::open(path)
+                    .and_then(|mut unpacked| unpacked.read_exact(&mut buffer))
+                    .with_context(|| format!("无法读取未打包资源：{}", path.display()))?;
+            }
+        }
+        if matcher.matches_asset_bytes(entry.is_css, &buffer) {
+            matched.push(entry.relative.clone());
+        }
+    }
+    Ok(matched)
+}
+
 fn scan_asar(
     archive: &Path,
     unpacked: &Path,
-    matches: &impl Fn(&[u8]) -> bool,
+    matcher: &PatchAnchorMatcher,
 ) -> Result<AssetScan> {
     let mut file = File::open(archive)
         .with_context(|| format!("无法打开 Codex 归档：{}", archive.display()))?;
@@ -219,35 +294,32 @@ fn scan_asar(
         .and_then(Value::as_object)
         .context("ASAR 中没有 webview/assets 目录")?;
 
-    let mut entries: Vec<(String, &Value)> = Vec::new();
+    let mut raw_entries: Vec<(String, &Value)> = Vec::new();
     for (name, node) in assets {
         if name == "async" {
             if let Some(children) = node.get("files").and_then(Value::as_object) {
                 for (child, child_node) in children {
                     if child_node.get("files").is_none() && scannable_asset_name(child) {
-                        entries.push((format!("async/{child}"), child_node));
+                        raw_entries.push((format!("async/{child}"), child_node));
                     }
                 }
             }
         } else if node.get("files").is_none() && scannable_asset_name(name) {
-            entries.push((name.clone(), node));
+            raw_entries.push((name.clone(), node));
         }
     }
 
-    let mut candidates = Vec::new();
-    let mut buffer = Vec::new();
-    for (relative, node) in &entries {
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for (relative, node) in raw_entries {
         let size = node
             .get("size")
             .and_then(Value::as_u64)
             .with_context(|| format!("ASAR 条目缺少大小：{relative}"))?;
         ensure!(size <= MAX_SCANNED_ASSET_BYTES, "ASAR 条目过大：{relative}");
-        buffer.resize(usize::try_from(size)?, 0);
-        if node.get("unpacked").and_then(Value::as_bool) == Some(true) {
-            let path = unpacked.join("webview/assets").join(relative);
-            File::open(&path)
-                .and_then(|mut unpacked| unpacked.read_exact(&mut buffer))
-                .with_context(|| format!("无法读取未打包资源：{}", path.display()))?;
+        let location = if node.get("unpacked").and_then(Value::as_bool) == Some(true) {
+            AsarEntryLocation::Unpacked {
+                path: unpacked.join("webview/assets").join(&relative),
+            }
         } else {
             let offset = node
                 .get("offset")
@@ -262,26 +334,86 @@ fn scan_asar(
                         .is_some_and(|end| end <= archive_len)
                 })
                 .with_context(|| format!("ASAR 条目超出归档长度：{relative}"))?;
-            file.seek(SeekFrom::Start(start))?;
-            file.read_exact(&mut buffer)
-                .with_context(|| format!("无法读取 ASAR 条目：{relative}"))?;
-        }
-        if matches(&buffer) {
-            candidates.push(relative.clone());
-        }
+            AsarEntryLocation::Packed { start }
+        };
+        let is_css = is_css_path(&relative);
+        entries.push(AsarScanEntry {
+            relative,
+            is_css,
+            size: usize::try_from(size)?,
+            location,
+        });
     }
+
+    // 按归档偏移升序排列，保证各工作线程顺序读取归档页缓存。
+    entries.sort_by_key(|entry| match entry.location {
+        AsarEntryLocation::Packed { start } => (0u8, start),
+        AsarEntryLocation::Unpacked { .. } => (1u8, 0),
+    });
+
+    let workers = worker_count_for(entries.len());
+    let mut candidates = if workers <= 1 {
+        #[cfg(unix)]
+        {
+            scan_asar_slice(archive, &file, &entries, matcher)?
+        }
+        #[cfg(windows)]
+        {
+            scan_asar_slice(archive, &entries, matcher)?
+        }
+    } else {
+        let chunk_size = entries.len().div_ceil(workers);
+        std::thread::scope(|scope| -> Result<Vec<String>> {
+            let mut handles = Vec::with_capacity(workers);
+            for chunk in entries.chunks(chunk_size) {
+                #[cfg(unix)]
+                let shared_file = &file;
+                handles.push(scope.spawn(move || {
+                    #[cfg(unix)]
+                    {
+                        scan_asar_slice(archive, shared_file, chunk, matcher)
+                    }
+                    #[cfg(windows)]
+                    {
+                        scan_asar_slice(archive, chunk, matcher)
+                    }
+                }));
+            }
+            let mut combined = Vec::new();
+            for handle in handles {
+                let part = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("ASAR 扫描线程异常退出"))??;
+                combined.extend(part);
+            }
+            Ok(combined)
+        })?
+    };
+
     candidates.sort();
-    let numeric_chunks = entries
-        .iter()
-        .filter(|(relative, _)| !relative.ends_with(".css"))
-        .count();
-    Ok(AssetScan {
-        numeric_chunks,
-        candidates,
-    })
+    Ok(AssetScan { candidates })
 }
 
-fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<AssetScan> {
+fn scan_directory_slice(
+    assets: &Path,
+    paths: &[String],
+    matcher: &PatchAnchorMatcher,
+) -> Result<Vec<String>> {
+    let mut matched = Vec::new();
+    for relative in paths {
+        let path = assets.join(relative);
+        let size = std::fs::metadata(&path)?.len();
+        ensure!(size <= MAX_SCANNED_ASSET_BYTES, "资源文件过大：{relative}");
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("无法读取资源文件：{}", path.display()))?;
+        if matcher.matches_asset_bytes(is_css_path(relative), &bytes) {
+            matched.push(relative.clone());
+        }
+    }
+    Ok(matched)
+}
+
+fn scan_directory(assets: &Path, matcher: &PatchAnchorMatcher) -> Result<AssetScan> {
     let list = |dir: &Path| -> Result<Vec<(String, bool)>> {
         let mut names = Vec::new();
         let entries = match std::fs::read_dir(dir) {
@@ -313,40 +445,43 @@ fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<Ass
         "async/",
         &mut paths,
     );
-    let mut candidates = Vec::new();
-    for relative in &paths {
-        let path = assets.join(relative);
-        let size = std::fs::metadata(&path)?.len();
-        ensure!(size <= MAX_SCANNED_ASSET_BYTES, "资源文件过大：{relative}");
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("无法读取资源文件：{}", path.display()))?;
-        if matches(&bytes) {
-            candidates.push(relative.clone());
-        }
-    }
+    let workers = worker_count_for(paths.len());
+    let mut candidates = if workers <= 1 {
+        scan_directory_slice(assets, &paths, matcher)?
+    } else {
+        let chunk_size = paths.len().div_ceil(workers);
+        std::thread::scope(|scope| -> Result<Vec<String>> {
+            let mut handles = Vec::with_capacity(workers);
+            for chunk in paths.chunks(chunk_size) {
+                handles.push(scope.spawn(move || scan_directory_slice(assets, chunk, matcher)));
+            }
+            let mut combined = Vec::new();
+            for handle in handles {
+                let part = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("资源目录扫描线程异常退出"))??;
+                combined.extend(part);
+            }
+            Ok(combined)
+        })?
+    };
     candidates.sort();
-    let numeric_chunks = paths
-        .iter()
-        .filter(|relative| !relative.ends_with(".css"))
-        .count();
-    Ok(AssetScan {
-        numeric_chunks,
-        candidates,
-    })
+    Ok(AssetScan { candidates })
 }
 
 #[cfg(test)]
 mod tests {
-    use memchr::memmem::Finder;
-
     use super::*;
 
-    fn anchors() -> Vec<String> {
-        vec![
-            "sendMessageFromView".to_string(),
-            "serviceTierAccess:".to_string(),
-            ":has([data-state=open])".to_string(),
-        ]
+    fn test_matcher() -> PatchAnchorMatcher {
+        PatchAnchorMatcher::for_script(
+            r#"/*codey-renderer-patch-rules*/[
+                {"allOf":["sendMessageFromView"]},
+                {"allOf":["serviceTierAccess:"]},
+                {"kind":"css","allOf":[":has([data-state=open])"]}
+            ]/*end-codey-renderer-patch-rules*/"#,
+        )
+        .unwrap()
     }
 
     /// 按 Electron ASAR 格式写一个最小归档：Pickle 头 + JSON 索引 + 正文。
@@ -388,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn asar_scan_keeps_only_numeric_chunks_with_patch_anchors() {
+    fn asar_scan_keeps_only_matching_js_and_css_assets_with_separated_rules() {
         let temp = tempfile::tempdir().unwrap();
         let resources = temp.path().join("Codex.app/Contents/Resources");
         std::fs::create_dir_all(resources.join("app.asar.unpacked/webview/assets/async")).unwrap();
@@ -408,7 +543,11 @@ mod tests {
                     "webview/assets/async/3.cccccccccc.js",
                     b"r?.sendMessageFromView&&r()",
                 ),
-                ("webview/assets/async/4.eeeeeeeeee.js", b"plain"),
+                // JS chunk containing a CSS rule literal must NOT match CSS-only rules.
+                (
+                    "webview/assets/async/4.eeeeeeeeee.js",
+                    b"const s=':has([data-state=open])';",
+                ),
                 (
                     "webview/assets/async/5.dddddddddd.js",
                     b"x.sendMessageFromView(y)",
@@ -421,9 +560,10 @@ mod tests {
                     "webview/assets/async/e77f816560c6.css",
                     b".group:has([data-state=open]){opacity:1}",
                 ),
+                // CSS asset containing a JS rule literal must NOT match JS-only rules.
                 (
                     "webview/assets/async/9012f383f623.css",
-                    b".plain{color:red}",
+                    b"/* sendMessageFromView */ .plain{color:red}",
                 ),
                 (
                     "webview/assets/hoots-spritesheet-v8.52075ad356.webp",
@@ -433,9 +573,10 @@ mod tests {
             &["webview/assets/async/5.dddddddddd.js"],
         );
         let cache = temp.path().join("scan.json");
-        let first = load_or_scan(&temp.path().join("Codex.app"), &cache, &anchors()).unwrap();
+        let matcher = test_matcher();
+        let first =
+            load_or_scan_with_matcher(&temp.path().join("Codex.app"), &cache, &matcher).unwrap();
         assert!(!first.cached);
-        assert_eq!(first.scan.numeric_chunks, 5);
         assert_eq!(
             first.scan.candidates,
             [
@@ -445,67 +586,55 @@ mod tests {
                 "async/e77f816560c6.css",
             ]
         );
-        let second = load_or_scan(&temp.path().join("Codex.app"), &cache, &anchors()).unwrap();
+        let second =
+            load_or_scan_with_matcher(&temp.path().join("Codex.app"), &cache, &matcher).unwrap();
         assert!(second.cached);
         assert_eq!(second.scan, first.scan);
     }
 
     #[test]
-    fn named_builds_report_no_numeric_chunks() {
-        let temp = tempfile::tempdir().unwrap();
-        let resources = temp.path().join("Codex.app/Contents/Resources");
-        std::fs::create_dir_all(&resources).unwrap();
-        write_asar(
-            &resources.join("app.asar"),
-            &[(
-                "webview/assets/app-initial-90eb42395b7d.js",
-                b"sendMessageFromView",
-            )],
-            &[],
-        );
-        let scan = load_or_scan(
-            &temp.path().join("Codex.app"),
-            &temp.path().join("scan.json"),
-            &anchors(),
-        )
-        .unwrap()
-        .scan;
-        assert_eq!(
-            scan,
-            AssetScan {
-                numeric_chunks: 0,
-                candidates: Vec::new()
-            }
-        );
-    }
-
-    #[test]
-    fn scan_handles_large_entries_and_backward_archive_offsets() {
+    fn scan_handles_large_entries_and_parallel_batches() {
         let temp = tempfile::tempdir().unwrap();
         let resources = temp.path().join("Codex.app/Contents/Resources");
         std::fs::create_dir_all(&resources).unwrap();
         let mut large = vec![b'x'; 65_530];
         large.extend_from_slice(b"sendMessageFromView");
-        write_asar(
-            &resources.join("app.asar"),
-            &[
-                ("webview/assets/async/1.aaaaaaaaaa.js", &large),
-                ("webview/assets/2.bbbbbbbbbb.js", b"serviceTierAccess:"),
-                ("webview/assets/async/3.cccccccccc.js", b"plain"),
-            ],
-            &[],
-        );
-        let scan = load_or_scan(
+        let mut owned: Vec<(String, Vec<u8>)> = (0..32)
+            .map(|i| {
+                (
+                    format!("webview/assets/async/{}.{:08x}.js", 100 + i, i + 1),
+                    if i % 10 == 0 {
+                        b"serviceTierAccess:".to_vec()
+                    } else {
+                        b"plain".to_vec()
+                    },
+                )
+            })
+            .collect();
+        owned.push(("webview/assets/async/1.aaaaaaaaaa.js".into(), large));
+        owned.push(("webview/assets/2.bbbbbbbbbb.js".into(), b"serviceTierAccess:".to_vec()));
+        let files: Vec<(&str, &[u8])> = owned
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_slice()))
+            .collect();
+        write_asar(&resources.join("app.asar"), &files, &[]);
+        let scan = load_or_scan_with_matcher(
             &temp.path().join("Codex.app"),
             &temp.path().join("scan.json"),
-            &anchors(),
+            &test_matcher(),
         )
         .unwrap()
         .scan;
-        assert_eq!(scan.numeric_chunks, 3);
         assert_eq!(
             scan.candidates,
-            ["2.bbbbbbbbbb.js", "async/1.aaaaaaaaaa.js"]
+            [
+                "2.bbbbbbbbbb.js",
+                "async/1.aaaaaaaaaa.js",
+                "async/100.00000001.js",
+                "async/110.0000000b.js",
+                "async/120.00000015.js",
+                "async/130.0000001f.js",
+            ]
         );
     }
 
@@ -519,30 +648,40 @@ mod tests {
         std::fs::write(assets.join("8.0123456789.js"), b"none").unwrap();
         let cache = temp.path().join("scan.json");
         let app_dir = temp.path().join("Codex");
-        let scan = load_or_scan(&app_dir, &cache, &anchors()).unwrap().scan;
+        let matcher = test_matcher();
+        let scan = load_or_scan_with_matcher(&app_dir, &cache, &matcher)
+            .unwrap()
+            .scan;
         assert_eq!(scan.candidates, ["async/7.0123456789.js"]);
-        assert_eq!(scan.numeric_chunks, 2);
 
         std::fs::write(
             assets.parent().unwrap().join("index.html"),
             b"<html>updated",
         )
         .unwrap();
-        assert!(!load_or_scan(&app_dir, &cache, &anchors()).unwrap().cached);
+        assert!(
+            !load_or_scan_with_matcher(&app_dir, &cache, &matcher)
+                .unwrap()
+                .cached
+        );
     }
 
     #[test]
     fn missing_or_corrupt_archives_fail_instead_of_guessing() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(load_or_scan(temp.path(), &temp.path().join("scan.json"), &anchors()).is_err());
+        let matcher = test_matcher();
+        assert!(
+            load_or_scan_with_matcher(temp.path(), &temp.path().join("scan.json"), &matcher)
+                .is_err()
+        );
         let resources = temp.path().join("Codex.app/Contents/Resources");
         std::fs::create_dir_all(&resources).unwrap();
         std::fs::write(resources.join("app.asar"), b"not an archive").unwrap();
         assert!(
-            load_or_scan(
+            load_or_scan_with_matcher(
                 &temp.path().join("Codex.app"),
                 &temp.path().join("scan.json"),
-                &anchors()
+                &matcher,
             )
             .is_err()
         );
@@ -589,114 +728,5 @@ mod tests {
             third.scan.candidates,
             ["async/1.11111111.js", "async/2.22222222.js"]
         );
-    }
-
-    #[test]
-    #[ignore = "opt-in isolated renderer asset scan benchmark"]
-    fn asset_scan_latency() {
-        let temp = tempfile::tempdir().unwrap();
-        let resources = temp.path().join("Codex.app/Contents/Resources");
-        std::fs::create_dir_all(&resources).unwrap();
-        let names = (0..10_000)
-            .map(|index| format!("webview/assets/async/{index}.0123456789.js"))
-            .collect::<Vec<_>>();
-        let plain = vec![b'x'; 4096];
-        let matching = b"x.sendMessageFromView(y)";
-        let files = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                (
-                    name.as_str(),
-                    if index % 100 == 0 {
-                        matching.as_slice()
-                    } else {
-                        plain.as_slice()
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        write_asar(&resources.join("app.asar"), &files, &[]);
-        // 真实安装包只读，扫描缓存仍留在临时目录。
-        let installed = std::env::var_os("CODEY_BENCH_APP_DIR");
-        let app = installed
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| temp.path().join("Codex.app"));
-        let anchors = if installed.is_some() {
-            let source = include_str!("renderer_asset_patch.js");
-            let section = source
-                .split("/*codey-renderer-patch-anchors*/")
-                .nth(1)
-                .unwrap()
-                .split("/*end-codey-renderer-patch-anchors*/")
-                .next()
-                .unwrap();
-            serde_json::from_str::<Vec<String>>(section).unwrap()
-        } else {
-            anchors()
-        };
-        let cache = temp.path().join("scan.json");
-        let mut expected = None;
-        for cached in [false, true] {
-            let mut samples = Vec::new();
-            for _ in 0..21 {
-                if !cached && cache.exists() {
-                    std::fs::remove_file(&cache).unwrap();
-                }
-                let started = std::time::Instant::now();
-                let result = load_or_scan(&app, &cache, &anchors).unwrap();
-                samples.push(started.elapsed().as_secs_f64() * 1000.0);
-                assert_eq!(result.cached, cached);
-                if installed.is_none() {
-                    assert_eq!(result.scan.numeric_chunks, 10_000);
-                    assert_eq!(result.scan.candidates.len(), 100);
-                }
-                if let Some(expected) = &expected {
-                    assert_eq!(&result.scan, expected);
-                } else {
-                    expected = Some(result.scan);
-                }
-            }
-            let first = samples.remove(0);
-            samples.sort_by(f64::total_cmp);
-            println!(
-                "BENCH {}",
-                serde_json::json!({"case":"asset_scan", "cached":cached,
-                "installed":installed.is_some(), "chunks":expected.as_ref().unwrap().numeric_chunks,
-                "candidates":expected.as_ref().unwrap().candidates.len(),
-                "first_sample_ms":first, "p50_ms":samples[9], "p95_ms":samples[18]})
-            );
-        }
-        if installed.is_some() {
-            let source = AssetSource::locate(&app).unwrap();
-            let finders = anchors
-                .iter()
-                .map(|anchor| Finder::new(anchor.as_bytes()))
-                .collect::<Vec<_>>();
-            let mut timings = Vec::new();
-            for _ in 0..10 {
-                let started = std::time::Instant::now();
-                let matches =
-                    |bytes: &[u8]| finders.iter().any(|finder| finder.find(bytes).is_some());
-                let scan = match &source {
-                    AssetSource::Asar { archive, unpacked } => {
-                        scan_asar(archive, unpacked, &matches)
-                    }
-                    AssetSource::Directory { app } => {
-                        scan_directory(&app.join("webview/assets"), &matches)
-                    }
-                }
-                .unwrap();
-                timings.push(started.elapsed().as_secs_f64() * 1000.0);
-                assert_eq!(Some(&scan), expected.as_ref());
-            }
-            timings.sort_by(f64::total_cmp);
-            println!(
-                "BENCH {}",
-                serde_json::json!({"case":"asset_matcher", "kind":"memmem",
-                "p50_ms":timings[4], "p95_ms":timings[9]})
-            );
-        }
     }
 }

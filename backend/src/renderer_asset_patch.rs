@@ -153,6 +153,8 @@ pub(crate) struct PageStats {
 struct PageEntry {
     target_id: String,
     stats: PageStats,
+    /// 该会话上已安装补丁入口的 `globalThis` 对象句柄；避免每个未命中 chunk 重复发送安装脚本。
+    patch_object_id: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 type PendingAssetScan = tokio::task::JoinHandle<Result<crate::renderer_asset_scan::ScanOutcome>>;
@@ -259,7 +261,6 @@ impl ServiceContext {
             "renderer_asset_patch.asset_scan",
             json!({
                 "cached": outcome.cached,
-                "numericChunks": outcome.scan.numeric_chunks,
                 "candidates": outcome.scan.candidates.len(),
                 "waitedMs": started.elapsed().as_millis() as u64,
             }),
@@ -276,6 +277,14 @@ impl ServiceContext {
             .values()
             .find(|page| page.target_id == target_id)
             .map(|page| page.stats)
+    }
+
+    fn patch_object_slot(&self, session_id: &str) -> Option<Arc<tokio::sync::Mutex<Option<String>>>> {
+        self.pages
+            .lock()
+            .expect("patch page registry poisoned")
+            .get(session_id)
+            .map(|page| Arc::clone(&page.patch_object_id))
     }
 
     fn update_page(&self, session_id: &str, update: impl FnOnce(&mut PageStats)) {
@@ -469,22 +478,37 @@ struct BrowserConnection {
     pending: Pending,
 }
 
+#[derive(serde::Serialize)]
+struct CdpFrame<'a> {
+    id: u64,
+    method: &'a str,
+    params: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sessionId")]
+    session_id: Option<&'a str>,
+}
+
 impl BrowserConnection {
-    fn frame(id: u64, method: &str, params: Value, session_id: Option<&str>) -> Message {
-        let mut payload = serde_json::Map::new();
-        payload.insert("id".to_string(), Value::from(id));
-        payload.insert("method".to_string(), Value::String(method.to_string()));
-        payload.insert("params".to_string(), params);
-        if let Some(session_id) = session_id {
-            payload.insert(
-                "sessionId".to_string(),
-                Value::String(session_id.to_string()),
-            );
-        }
-        Message::Text(Value::Object(payload).to_string().into())
+    fn frame(id: u64, method: &str, params: &Value, session_id: Option<&str>) -> Message {
+        let encoded = serde_json::to_string(&CdpFrame {
+            id,
+            method,
+            params,
+            session_id,
+        })
+        .expect("CDP frame must serialize");
+        Message::Text(encoded.into())
     }
 
     async fn call(&self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
+        self.call_ref(method, &params, session_id).await
+    }
+
+    async fn call_ref(
+        &self,
+        method: &str,
+        params: &Value,
+        session_id: Option<&str>,
+    ) -> Result<Value> {
         let id = next_message_id();
         let (respond, response) = oneshot::channel();
         self.pending
@@ -520,7 +544,7 @@ impl BrowserConnection {
     fn notify(&self, method: &str, params: Value, session_id: Option<&str>) {
         let _ = self
             .outgoing
-            .send(Self::frame(next_message_id(), method, params, session_id));
+            .send(Self::frame(next_message_id(), method, &params, session_id));
     }
 }
 
@@ -536,7 +560,9 @@ async fn run_service(debug_port: u16, context: Arc<ServiceContext>) {
         }
     };
     let prune_cache = context.cache.clone();
-    tokio::task::spawn_blocking(move || prune_cache.prune());
+    tokio::task::spawn_blocking(move || {
+        prune_cache.prune_if_due();
+    });
     if let Err(error) = serve(socket, context).await {
         log_service_event(
             "renderer_asset_patch.service_failed",
@@ -812,6 +838,7 @@ async fn on_attached(connection: BrowserConnection, context: Arc<ServiceContext>
                     attached_before_load,
                     ..PageStats::default()
                 },
+                patch_object_id: Arc::new(tokio::sync::Mutex::new(None)),
             },
         );
     }
@@ -944,7 +971,7 @@ async fn on_request_paused(
         pass_through();
         return;
     }
-    let Ok(_permit) = context.permits.acquire().await else {
+    let Ok(permit) = context.permits.acquire().await else {
         pass_through();
         return;
     };
@@ -954,18 +981,20 @@ async fn on_request_paused(
             .map(Vec::as_slice)
             .unwrap_or_default(),
     );
-    match patch_response(&connection, &context, session, request_id, url).await {
+    match patch_response(&connection, &context, &session_id, request_id, url).await {
         Ok(Some(patched)) => {
             let body_base64 = base64::engine::general_purpose::STANDARD.encode(patched.as_bytes());
+            drop(patched);
             let mut params = json!({
                 "requestId": request_id,
                 "responseCode": status,
                 "responseHeaders": headers,
             });
-            params["body"] = Value::String(body_base64);
+            params["body"] = Value::String(body_base64.clone());
             let fulfilled = connection
                 .call("Fetch.fulfillRequest", params, session)
                 .await;
+            drop(permit);
             if let Err(error) = fulfilled {
                 log_patch_skip(url, format!("fulfillRequest: {error:#}"));
                 context.update_page(&session_id, |stats| stats.skipped += 1);
@@ -976,15 +1005,17 @@ async fn on_request_paused(
             let patch = StoredPatch {
                 status,
                 headers,
-                body: patched,
+                body_base64,
             };
-            context.cache.store(url, Some(patch)).await;
+            context.cache.store_background(url, Some(patch));
         }
         Ok(None) => {
+            drop(permit);
             pass_through();
-            context.cache.store(url, None).await;
+            context.cache.store_background(url, None);
         }
         Err(error) => {
+            drop(permit);
             log_patch_skip(url, format!("{error:#}"));
             context.update_page(&session_id, |stats| stats.skipped += 1);
             pass_through();
@@ -992,35 +1023,67 @@ async fn on_request_paused(
     }
 }
 
-/// 读取暂停响应的正文并在请求它的页面里跑补丁入口。`Ok(None)` 表示补丁确认
-/// 不需要改写；页面里没装上入口或求值失败返回错误，结果不进缓存。
-async fn patch_response(
+const PATCH_CALL_FUNCTION: &str = "function(url,source){\
+const logs=[];const previous=globalThis.__codeyPatchLog;\
+globalThis.__codeyPatchLog=(record)=>{logs.push(String(record))};\
+try{const entry=globalThis.__codeyRendererPatchEntry;\
+if(typeof entry!==\"function\")return{installed:false,logs};\
+return{installed:true,patched:entry(url,source),logs}}\
+catch(error){logs.push(String(error));return{installed:false,logs}}\
+finally{if(previous===undefined)delete globalThis.__codeyPatchLog;else globalThis.__codeyPatchLog=previous}}";
+
+async fn install_patch_entry_object(
+    connection: &BrowserConnection,
+    install_script: &str,
+    session: Option<&str>,
+) -> Result<String> {
+    let expression = format!(
+        "(()=>{{if(typeof globalThis.__codeyRendererPatchEntry!==\"function\"){{{install_script}\n}}\
+if(typeof globalThis.__codeyRendererPatchEntry!==\"function\")return null;\
+return globalThis}})()"
+    );
+    let params = json!({
+        "expression": expression,
+        "returnByValue": false,
+    });
+    let response = connection.call("Runtime.evaluate", params, session).await?;
+    if let Some(exception) = response["result"].get("exceptionDetails") {
+        bail!("安装补丁入口抛出异常：{exception}");
+    }
+    response["result"]["result"]["objectId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .context("页面未能装上补丁入口")
+}
+
+async fn ensure_patch_object_id(
     connection: &BrowserConnection,
     context: &ServiceContext,
-    session: Option<&str>,
-    request_id: &str,
-    url: &str,
-) -> Result<Option<String>> {
-    let body = connection
-        .call(
-            "Fetch.getResponseBody",
-            json!({ "requestId": request_id }),
-            session,
-        )
-        .await?;
-    let source = take_response_source(body)?;
-    // 数字 chunk 大多与补丁无关：先按复合前置规则预筛，免得逐个把源码连同补丁
-    // 脚本送进页面求值。
-    if !context.matcher.matches(&source) {
-        return Ok(None);
+    session_id: &str,
+    stale_id: Option<&str>,
+) -> Result<(String, bool)> {
+    let session = Some(session_id);
+    if let Some(slot) = context.patch_object_slot(session_id) {
+        let mut guard = slot.lock().await;
+        if let Some(stale) = stale_id
+            && guard.as_deref() == Some(stale)
+        {
+            *guard = None;
+        }
+        if let Some(existing) = guard.clone() {
+            return Ok((existing, true));
+        }
+        let installed =
+            install_patch_entry_object(connection, &context.install_script, session).await?;
+        *guard = Some(installed.clone());
+        return Ok((installed, false));
     }
-    let expression = patch_expression(&context.install_script, url, source)?;
-    let mut params = serde_json::Map::new();
-    params.insert("expression".to_string(), Value::String(expression));
-    params.insert("returnByValue".to_string(), Value::Bool(true));
-    let mut response = connection
-        .call("Runtime.evaluate", Value::Object(params), session)
-        .await?;
+    let installed = install_patch_entry_object(connection, &context.install_script, session).await?;
+    Ok((installed, false))
+}
+
+fn parse_patch_outcome(mut response: Value) -> Result<PatchOutcome> {
     if let Some(exception) = response["result"].get("exceptionDetails") {
         bail!("补丁求值抛出异常：{exception}");
     }
@@ -1031,8 +1094,72 @@ async fn patch_response(
         .map(Value::take)
         .unwrap_or(Value::Null);
     drop(response);
-    let outcome: PatchOutcome =
-        serde_json::from_value(outcome_value).context("补丁求值结果格式无效")?;
+    serde_json::from_value(outcome_value).context("补丁求值结果格式无效")
+}
+
+/// 读取暂停响应的正文并在请求它的页面里跑补丁入口。`Ok(None)` 表示补丁确认
+/// 不需要改写；页面里没装上入口或求值失败返回错误，结果不进缓存。
+async fn patch_response(
+    connection: &BrowserConnection,
+    context: &ServiceContext,
+    session_id: &str,
+    request_id: &str,
+    url: &str,
+) -> Result<Option<String>> {
+    let session = Some(session_id);
+    let body = connection
+        .call(
+            "Fetch.getResponseBody",
+            json!({ "requestId": request_id }),
+            session,
+        )
+        .await?;
+    let source = take_response_source(body)?;
+    // 数字 chunk 大多与补丁无关：先按预编译复合前置规则预筛，免得把源码送进页面求值。
+    if !context.matcher.matches_asset(url, &source) {
+        return Ok(None);
+    }
+    let (object_id, reused) = ensure_patch_object_id(connection, context, session_id, None).await?;
+    let mut call_params = json!({
+        "objectId": object_id,
+        "functionDeclaration": PATCH_CALL_FUNCTION,
+        "arguments": [
+            { "value": url },
+            { "value": source },
+        ],
+        "returnByValue": true,
+    });
+    let first_attempt = connection
+        .call_ref("Runtime.callFunctionOn", &call_params, session)
+        .await
+        .and_then(parse_patch_outcome);
+    let outcome = match first_attempt {
+        Ok(outcome) if outcome.installed => outcome,
+        first_result if reused => {
+            // 页面重载或执行上下文切换后缓存的 objectId 可能失效，重装入口后重试一次。
+            let stale = call_params["objectId"].as_str().map(str::to_string);
+            let (fresh_id, _) =
+                ensure_patch_object_id(connection, context, session_id, stale.as_deref()).await?;
+            call_params["objectId"] = Value::String(fresh_id);
+            match connection
+                .call_ref("Runtime.callFunctionOn", &call_params, session)
+                .await
+                .and_then(parse_patch_outcome)
+            {
+                Ok(outcome) => outcome,
+                Err(retry_err) => {
+                    if let Ok(outcome) = first_result {
+                        for record in &outcome.logs {
+                            record_patch_log(record);
+                        }
+                    }
+                    return Err(retry_err);
+                }
+            }
+        }
+        Ok(outcome) => outcome,
+        Err(error) => return Err(error),
+    };
     for record in &outcome.logs {
         record_patch_log(record);
     }
@@ -1073,25 +1200,6 @@ struct PatchOutcome {
     patched: Option<String>,
     #[serde(default)]
     logs: Vec<String>,
-}
-
-/// 页面里的补丁入口缺失时就地安装（幂等）；失败记录经返回值带回，不依赖
-/// CDP binding。
-fn patch_expression(install_script: &str, url: &str, source: String) -> Result<String> {
-    let url = serde_json::to_string(url).context("补丁 URL 序列化失败")?;
-    let source = serde_json::to_string(&source).context("补丁源码序列化失败")?;
-    Ok(format!(
-        "(()=>{{const logs=[];const previous=globalThis.__codeyPatchLog;\
-globalThis.__codeyPatchLog=(record)=>{{logs.push(String(record))}};\
-try{{if(typeof globalThis.__codeyRendererPatchEntry!==\"function\"){{{install_script}\n}}\
-const entry=globalThis.__codeyRendererPatchEntry;\
-if(typeof entry!==\"function\")return{{installed:false,logs}};\
-return{{installed:true,patched:entry({url},{source}),logs}}}}\
-catch(error){{logs.push(String(error));return{{installed:false,logs}}}}\
-finally{{if(previous===undefined)delete globalThis.__codeyPatchLog;else globalThis.__codeyPatchLog=previous}}}})()",
-        url = url,
-        source = source,
-    ))
 }
 
 fn record_patch_log(payload: &str) {

@@ -2,26 +2,26 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{css_asset_name, log_service_event};
+use super::{css_asset_name, log_service_event, numeric_asset_name};
 
 /// 磁盘缓存上限，约可容纳三个 Codex 版本的补丁结果。
 pub(super) const MAX_CACHE_BYTES: u64 = 96 << 20;
 /// 缓存条目上限。数字 chunk 每个都会留一条「无需改写」记录，体积很小但数量
 /// 随版本累积，单靠字节上限压不住目录规模。
 pub(super) const MAX_CACHE_ENTRIES: usize = 12_000;
-/// 「无需改写」记录不占体积，每写入这么多条才整理一次目录；写入改写结果时
-/// 照常立即整理。
+/// 「无需改写」记录不占体积，每写入这么多条才触发一次整理检查。
 pub(super) const UNCHANGED_STORES_PER_PRUNE: usize = 256;
+/// 自动整理最小间隔，避免冷启动批量写缓存时连续多次遍历上万个文件。
+pub(super) const PRUNE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 /// 当前补丁版本的原子写临时文件（`.{tag}-*.tmp`）保留宽限期，避免并发整理误删正在落盘的临时文件。
 pub(super) const IN_FLIGHT_TEMP_GRACE: Duration = Duration::from_secs(300);
 /// 命中缓存时不频繁刷新 `.meta.json` mtime，间隔至少 1 小时再写入磁盘。
@@ -29,7 +29,7 @@ pub(super) const TOUCH_MIN_INTERVAL: Duration = Duration::from_secs(3600);
 pub(super) const CACHE_DIR_NAME: &str = "renderer-patch-cache";
 
 /// 补丁结果磁盘缓存。键为补丁脚本摘要加资产文件名，只缓存文件名带内容哈希的
-/// 资产；正文先于元数据落盘，元数据缺失或长度不符一律按未命中处理。
+/// 数字 JS chunk 与样式表；正文按标准 base64 落盘，元数据缺失或长度不符一律按未命中处理。
 #[derive(Clone)]
 pub(super) struct PatchCache {
     pub(super) dir: PathBuf,
@@ -38,6 +38,9 @@ pub(super) struct PatchCache {
     unchanged_since_prune: Arc<AtomicUsize>,
     /// 本次运行已确认无需改写的缓存条目名，用于请求阶段免信号量与免磁盘直通。
     unchanged_entries: Arc<RwLock<HashSet<String>>>,
+    /// 上次自动整理的时间，配合 `pruning` 防止冷启动重复全目录扫描。
+    last_pruned: Arc<Mutex<Option<Instant>>>,
+    pruning: Arc<AtomicBool>,
 }
 
 pub(super) enum CachedAsset {
@@ -54,7 +57,7 @@ pub(super) struct CachedPatch {
 pub(super) struct StoredPatch {
     pub(super) status: i64,
     pub(super) headers: Vec<Value>,
-    pub(super) body: String,
+    pub(super) body_base64: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,9 +70,6 @@ pub(super) struct CacheMeta {
     pub(super) headers: Vec<Value>,
     #[serde(default)]
     pub(super) length: u64,
-    /// 为 `true` 时磁盘正文已预先做过标准 base64 编码；缺省按未编码原文兼容读取。
-    #[serde(default)]
-    pub(super) base64: bool,
 }
 
 impl PatchCache {
@@ -82,9 +82,11 @@ impl PatchCache {
         Self {
             dir,
             tag,
-            // 首次写入即整理一次，清掉其他补丁版本留下的条目。
+            // 首次写入即触发一次整理检查，清掉其他补丁版本留下的条目。
             unchanged_since_prune: Arc::new(AtomicUsize::new(UNCHANGED_STORES_PER_PRUNE - 1)),
             unchanged_entries: Arc::new(RwLock::new(HashSet::new())),
+            last_pruned: Arc::new(Mutex::new(None)),
+            pruning: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -129,27 +131,64 @@ impl PatchCache {
         loaded
     }
 
-    pub(super) async fn store(&self, url: &str, patch: Option<StoredPatch>) {
-        let Some(name) = self.entry_name(url) else {
-            return;
-        };
+    fn spawn_store(&self, url: &str, patch: Option<StoredPatch>) -> Option<tokio::task::JoinHandle<()>> {
+        let name = self.entry_name(url)?;
         self.mark_unchanged(&name, patch.is_none());
         let cache = self.clone();
-        let prune = patch.is_some()
+        let should_try_prune = patch.is_some()
             || (self.unchanged_since_prune.fetch_add(1, Ordering::Relaxed) + 1)
                 .is_multiple_of(UNCHANGED_STORES_PER_PRUNE);
-        let _ = tokio::task::spawn_blocking(move || {
+        Some(tokio::task::spawn_blocking(move || {
             if let Err(error) = store_entry(&cache.dir, &name, patch) {
                 log_service_event(
                     "renderer_asset_patch.cache_write_failed",
                     json!({ "entry": name, "message": format!("{error:#}") }),
                 );
             }
-            if prune {
-                cache.prune();
+            if should_try_prune {
+                cache.prune_if_due();
             }
-        })
-        .await;
+        }))
+    }
+
+    /// 后台落盘缓存：立即更新内存索引，不阻塞请求放行或占用并发许可。
+    pub(super) fn store_background(&self, url: &str, patch: Option<StoredPatch>) {
+        let _ = self.spawn_store(url, patch);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn store(&self, url: &str, patch: Option<StoredPatch>) {
+        if let Some(handle) = self.spawn_store(url, patch) {
+            let _ = handle.await;
+        }
+    }
+
+    /// 节流整理：同一时刻只允许一个整理任务，且距上次整理不满 `PRUNE_MIN_INTERVAL` 时跳过。
+    pub(super) fn prune_if_due(&self) -> bool {
+        let now = Instant::now();
+        {
+            let last = self.last_pruned.lock().expect("prune timestamp poisoned");
+            if last.is_some_and(|prev| now.saturating_duration_since(prev) < PRUNE_MIN_INTERVAL) {
+                return false;
+            }
+        }
+        if self
+            .pruning
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        struct ResetFlag<'a>(&'a AtomicBool);
+        impl Drop for ResetFlag<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _reset = ResetFlag(&self.pruning);
+        self.prune();
+        *self.last_pruned.lock().expect("prune timestamp poisoned") = Some(Instant::now());
+        true
     }
 
     pub(super) fn prune(&self) {
@@ -215,23 +254,9 @@ impl PatchCache {
     }
 }
 
-/// 形如 `app-initial-90eb42395b7d.js` 或 `e77f816560c6.css`：文件名里有一段至少 8 位的十六进制哈希。
+/// 仅缓存 rspack 带内容哈希的数字 JS chunk 与样式表。
 pub(super) fn cacheable_asset_name(name: &str) -> bool {
-    if css_asset_name(name) {
-        return true;
-    }
-    let Some(stem) = [".js", ".mjs", ".cjs"]
-        .iter()
-        .find_map(|extension| name.strip_suffix(extension))
-    else {
-        return false;
-    };
-    name.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'~' | b'.'))
-        && !name.starts_with('.')
-        && stem.split(['-', '~', '.']).skip(1).any(|segment| {
-            segment.len() >= 8 && segment.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
+    numeric_asset_name(name) || css_asset_name(name)
 }
 
 pub(super) fn load_entry(dir: &Path, name: &str) -> Option<CachedAsset> {
@@ -253,11 +278,7 @@ pub(super) fn load_entry(dir: &Path, name: &str) -> Option<CachedAsset> {
     if body.len() as u64 != meta.length {
         return None;
     }
-    let body_base64 = if meta.base64 {
-        String::from_utf8(body).ok()?
-    } else {
-        base64::engine::general_purpose::STANDARD.encode(body)
-    };
+    let body_base64 = String::from_utf8(body).ok()?;
     Some(CachedAsset::Patched(CachedPatch {
         status: meta.status,
         headers: meta.headers,
@@ -269,14 +290,12 @@ pub(super) fn store_entry(dir: &Path, name: &str, patch: Option<StoredPatch>) ->
     std::fs::create_dir_all(dir).context("创建补丁缓存目录失败")?;
     let meta = match patch {
         Some(patch) => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(patch.body.as_bytes());
-            write_atomically(&dir.join(name), encoded.as_bytes())?;
+            write_atomically(&dir.join(name), patch.body_base64.as_bytes())?;
             CacheMeta {
                 unchanged: false,
                 status: patch.status,
                 headers: patch.headers,
-                length: encoded.len() as u64,
-                base64: true,
+                length: patch.body_base64.len() as u64,
             }
         }
         None => CacheMeta {
@@ -284,7 +303,6 @@ pub(super) fn store_entry(dir: &Path, name: &str, patch: Option<StoredPatch>) ->
             status: 0,
             headers: Vec::new(),
             length: 0,
-            base64: false,
         },
     };
     write_atomically(

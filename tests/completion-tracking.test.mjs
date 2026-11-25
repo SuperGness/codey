@@ -2574,7 +2574,7 @@ test("hosted AppServerManager rejects page-only capabilities once without rescan
       (error) => error.code === "codey_capability_unavailable" && /桌面宿主进程/.test(error.message),
     );
   }
-  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+  assert.equal(runtime.window.__codeyLoadCodexRequestClient, undefined);
   assert.equal(runtime.connectionReads(), 1, "only the first discovery scans React");
   assert.equal(runtime.imports(), 0);
 });

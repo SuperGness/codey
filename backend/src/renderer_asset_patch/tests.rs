@@ -221,12 +221,27 @@ async fn misses_patch_in_the_page_and_hits_fulfill_from_cache() {
         .await;
     let evaluate = service.expect("Runtime.evaluate").await;
     assert_eq!(evaluate["sessionId"], "s1");
-    let expression = evaluate["params"]["expression"].as_str().unwrap();
-    assert!(expression.contains("__codeyRendererPatchEntry"));
-    assert!(expression.contains("old.sendMessageFromView"));
+    assert_eq!(evaluate["params"]["returnByValue"], false);
+    assert!(
+        evaluate["params"]["expression"]
+            .as_str()
+            .unwrap()
+            .contains("__codeyRendererPatchEntry")
+    );
     service
         .reply(
             &evaluate,
+            json!({ "result": { "type": "object", "objectId": "obj-global-1" } }),
+        )
+        .await;
+    let call_fn = service.expect("Runtime.callFunctionOn").await;
+    assert_eq!(call_fn["sessionId"], "s1");
+    assert_eq!(call_fn["params"]["objectId"], "obj-global-1");
+    assert_eq!(call_fn["params"]["arguments"][0]["value"], url);
+    assert_eq!(call_fn["params"]["arguments"][1]["value"], asset_body);
+    service
+        .reply(
+            &call_fn,
             json!({ "result": { "value": { "installed": true, "patched": "new()", "logs": [] } } }),
         )
         .await;
@@ -290,6 +305,13 @@ async fn failed_evaluation_passes_the_original_response_through_uncached() {
     service
         .reply(
             &evaluate,
+            json!({ "result": { "type": "object", "objectId": "obj-global-fail" } }),
+        )
+        .await;
+    let call_fn = service.expect("Runtime.callFunctionOn").await;
+    service
+        .reply(
+            &call_fn,
             json!({ "result": { "value": { "installed": false, "logs": [] } } }),
         )
         .await;
@@ -298,6 +320,88 @@ async fn failed_evaluation_passes_the_original_response_through_uncached() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(service.context.page_stats("main").unwrap().skipped, 1);
     assert!(service.context.cache.load(url).await.is_none());
+    service.finish().await;
+}
+
+#[tokio::test]
+async fn second_miss_reuses_installed_patch_entry_and_recovers_from_stale_object_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut service = TestService::start(temp.path()).await;
+    service.answer_startup(json!([])).await;
+    service.attach_page("s1", "main", "", true).await;
+    let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
+
+    let body_text =
+        "codex-message-from-view old.sendMessageFromView Failed to send message from view";
+    let url1 = "app://-/assets/async/111111.aaaaaaaa.js";
+    service.send(paused("s1", "r1", url1, true)).await;
+    let b1 = service.expect("Fetch.getResponseBody").await;
+    service.reply(&b1, json!({ "body": body_text })).await;
+    let eval1 = service.expect("Runtime.evaluate").await;
+    service
+        .reply(
+            &eval1,
+            json!({ "result": { "type": "object", "objectId": "obj-1" } }),
+        )
+        .await;
+    let call1 = service.expect("Runtime.callFunctionOn").await;
+    assert_eq!(call1["params"]["objectId"], "obj-1");
+    service
+        .reply(
+            &call1,
+            json!({ "result": { "value": { "installed": true, "patched": "p1()", "logs": [] } } }),
+        )
+        .await;
+    let fulfill1 = service.expect("Fetch.fulfillRequest").await;
+    service.reply(&fulfill1, json!({})).await;
+
+    // 第二个未命中 chunk 直接复用 objectId，不再发送 Runtime.evaluate。
+    let url2 = "app://-/assets/async/222222.bbbbbbbb.js";
+    service.send(paused("s1", "r2", url2, true)).await;
+    let b2 = service.expect("Fetch.getResponseBody").await;
+    service.reply(&b2, json!({ "body": body_text })).await;
+    let call2 = service.expect("Runtime.callFunctionOn").await;
+    assert_eq!(call2["params"]["objectId"], "obj-1");
+    service
+        .reply(
+            &call2,
+            json!({ "result": { "value": { "installed": true, "patched": "p2()", "logs": [] } } }),
+        )
+        .await;
+    let fulfill2 = service.expect("Fetch.fulfillRequest").await;
+    service.reply(&fulfill2, json!({})).await;
+
+    // 重载导致旧 objectId 失效时，自动重新安装入口并重试 callFunctionOn。
+    let url3 = "app://-/assets/async/333333.cccccccc.js";
+    service.send(paused("s1", "r3", url3, true)).await;
+    let b3 = service.expect("Fetch.getResponseBody").await;
+    service.reply(&b3, json!({ "body": body_text })).await;
+    let stale_call = service.expect("Runtime.callFunctionOn").await;
+    assert_eq!(stale_call["params"]["objectId"], "obj-1");
+    service
+        .send(json!({
+            "id": stale_call["id"],
+            "error": { "message": "Could not find object with given id" }
+        }))
+        .await;
+    let eval2 = service.expect("Runtime.evaluate").await;
+    service
+        .reply(
+            &eval2,
+            json!({ "result": { "type": "object", "objectId": "obj-2" } }),
+        )
+        .await;
+    let retry_call = service.expect("Runtime.callFunctionOn").await;
+    assert_eq!(retry_call["params"]["objectId"], "obj-2");
+    assert_eq!(retry_call["params"]["arguments"][1]["value"], body_text);
+    service
+        .reply(
+            &retry_call,
+            json!({ "result": { "value": { "installed": true, "patched": "p3()", "logs": [] } } }),
+        )
+        .await;
+    let fulfill3 = service.expect("Fetch.fulfillRequest").await;
+    service.reply(&fulfill3, json!({})).await;
     service.finish().await;
 }
 
@@ -317,7 +421,7 @@ async fn cached_fulfillments_release_a_shared_limited_slot() {
             Some(StoredPatch {
                 status: 200,
                 headers: vec![json!({ "name": "Content-Type", "value": "text/javascript" })],
-                body: "patched()".to_string(),
+                body_base64: base64::engine::general_purpose::STANDARD.encode("patched()"),
             }),
         )
         .await;
@@ -359,7 +463,7 @@ async fn cold_responses_and_cached_requests_share_slots_without_holding_idle_per
             Some(StoredPatch {
                 status: 200,
                 headers: Vec::new(),
-                body: "patched()".to_string(),
+                body_base64: base64::engine::general_purpose::STANDARD.encode("patched()"),
             }),
         )
         .await;
@@ -395,6 +499,13 @@ async fn cold_responses_and_cached_requests_share_slots_without_holding_idle_per
     service
         .reply(
             &evaluate,
+            json!({ "result": { "type": "object", "objectId": "obj-cold" } }),
+        )
+        .await;
+    let call_fn = service.expect("Runtime.callFunctionOn").await;
+    service
+        .reply(
+            &call_fn,
             json!({ "result": { "value": { "installed": true, "patched": "new()", "logs": [] } } }),
         )
         .await;
@@ -420,7 +531,7 @@ async fn cached_fulfillment_errors_release_the_shared_slot() {
             Some(StoredPatch {
                 status: 200,
                 headers: Vec::new(),
-                body: "patched()".to_string(),
+                body_base64: base64::engine::general_purpose::STANDARD.encode("patched()"),
             }),
         )
         .await;
@@ -499,38 +610,7 @@ async fn assets_without_patch_anchors_skip_page_evaluation() {
 }
 
 #[test]
-fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
-    let anchors = renderer_patch_anchors(RENDERER_ASSET_PATCH_SCRIPT).unwrap();
-    for required in [
-        "resolvedHostId:",
-        "AppServerRequestClient is missing a message dispatcher",
-        "serviceTierAccess:",
-        ".startTurn(",
-        "totalASTLRUCacheSize:",
-        "orbit-character-preloaded",
-        "\"orbit.navigation\"",
-        "PerformanceEventTiming",
-        "this.eventObserver=new PerformanceObserver",
-        "EventLoopBlockRenderer",
-        "ensureObserver(\"long-animation-frame\")",
-        "_pending_observations",
-        "Reached the post-login Statsig bootstrap deadline",
-        "CodexStatsigProvider.async.identity",
-        "useStatsigInternalClientFactoryAsync=function(",
-    ] {
-        assert!(
-            anchors.iter().any(|anchor| anchor == required),
-            "{required}"
-        );
-    }
-    assert!(renderer_patch_anchors("const a=[];").is_err());
-    assert!(
-        renderer_patch_anchors(&format!("{PATCH_ANCHORS_START}[]{PATCH_ANCHORS_END}")).is_err()
-    );
-}
-
-#[test]
-fn compound_rule_matcher_requires_all_literals_in_a_rule() {
+fn compound_rule_matcher_requires_all_literals_and_splits_js_from_css() {
     let matcher = PatchAnchorMatcher::for_script(RENDERER_ASSET_PATCH_SCRIPT).unwrap();
     assert!(!matcher.digest_hex().is_empty());
 
@@ -542,7 +622,7 @@ fn compound_rule_matcher_requires_all_literals_in_a_rule() {
         )
     );
 
-    // 新增 P0 性能规则必须同时命中全部前置字面量。
+    // 性能规则必须同时命中全部前置字面量。
     assert!(!matcher.matches("durationThreshold:16 PerformanceEventTiming"));
     assert!(matcher.matches("durationThreshold:16 PerformanceEventTiming eventsSupported:"));
     assert!(!matcher.matches("EventLoopBlockRenderer"));
@@ -555,6 +635,14 @@ fn compound_rule_matcher_requires_all_literals_in_a_rule() {
     assert!(!matcher.matches("Reached the post-login Statsig bootstrap deadline"));
     assert!(matcher.matches(
         "Reached the post-login Statsig bootstrap deadline Timed out while fetching post-login Statsig bootstrap"
+    ));
+
+    // JS 与 CSS 规则互不误命中。
+    assert!(!matcher.matches_asset("app://-/assets/1.aaaaaaaa.js", ".g:has([data-state=open]){}"));
+    assert!(matcher.matches_asset("app://-/assets/e77f816560c6.css", ".g:has([data-state=open]){}"));
+    assert!(!matcher.matches_asset(
+        "app://-/assets/e77f816560c6.css",
+        "EventLoopBlockRenderer rendererHangDetectionEnabled"
     ));
 
     assert!(PatchAnchorMatcher::for_script("const r=[];").is_err());
@@ -592,54 +680,30 @@ async fn unchanged_cache_hit_bypasses_exhausted_patch_permits() {
 }
 
 #[tokio::test]
-async fn cache_writes_base64_and_reads_legacy_unencoded_entries() {
+async fn cache_writes_preencoded_base64_and_throttles_automatic_prunes() {
     let temp = tempfile::tempdir().unwrap();
     let cache = PatchCache::new(temp.path().to_path_buf(), "script");
-    let modern_url = "app://-/assets/app-shared-52443cbe9ac4.js";
+    let modern_url = "app://-/assets/52443.52443cbe9ac4.js";
+    let encoded = base64::engine::general_purpose::STANDARD.encode("patched()");
     cache
         .store(
             modern_url,
             Some(StoredPatch {
                 status: 200,
                 headers: Vec::new(),
-                body: "patched()".to_string(),
+                body_base64: encoded.clone(),
             }),
         )
         .await;
     let modern_name = cache.entry_name(modern_url).unwrap();
     let disk_body = std::fs::read_to_string(temp.path().join(&modern_name)).unwrap();
-    assert_eq!(
-        disk_body,
-        base64::engine::general_purpose::STANDARD.encode("patched()")
-    );
-    let disk_meta: CacheMeta = serde_json::from_slice(
-        &std::fs::read(temp.path().join(format!("{modern_name}.meta.json"))).unwrap(),
-    )
-    .unwrap();
-    assert!(disk_meta.base64);
-
-    // 兼容旧版未编码正文（meta.base64 缺省为 false）。
-    let legacy_url = "app://-/assets/app-primary-90eb42395b7d.js";
-    let legacy_name = cache.entry_name(legacy_url).unwrap();
-    std::fs::write(temp.path().join(&legacy_name), b"legacy()").unwrap();
-    std::fs::write(
-        temp.path().join(format!("{legacy_name}.meta.json")),
-        serde_json::to_vec(&json!({
-            "unchanged": false,
-            "status": 200,
-            "headers": [],
-            "length": 8
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let Some(CachedAsset::Patched(hit)) = cache.load(legacy_url).await else {
-        panic!("legacy entry should load");
+    assert_eq!(disk_body, encoded);
+    let Some(CachedAsset::Patched(hit)) = cache.load(modern_url).await else {
+        panic!("entry should load");
     };
-    assert_eq!(
-        hit.body_base64,
-        base64::engine::general_purpose::STANDARD.encode("legacy()")
-    );
+    assert_eq!(hit.body_base64, encoded);
+    // 刚执行过自动整理，短时间内再次检查会被节流跳过。
+    assert!(!cache.prune_if_due());
 }
 
 #[test]
@@ -752,7 +816,6 @@ fn asset_scans_replace_the_numeric_wildcard_with_exact_chunks() {
             .collect()
     };
     let scan = crate::renderer_asset_scan::AssetScan {
-        numeric_chunks: 9012,
         candidates: vec![
             "348410.ae8bb87271.js".to_string(),
             "async/24191.589dcc9878.js".to_string(),
@@ -817,11 +880,18 @@ async fn slim_pet_keeps_only_the_selected_pet_sprite() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(
-        home.join(".codex-global-state.json"),
-        r#"{"selected-avatar-id":"hoots"}"#,
-    )
-    .unwrap();
+    let sqlite_path = home.join(".codex-global-state.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (
+                scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                PRIMARY KEY (scope, key)
+            ) WITHOUT ROWID;
+            INSERT INTO settings (scope, key, value) VALUES ('global', 'selected-avatar-id', '\"hoots\"');",
+        )
+        .unwrap();
+    }
     let mut service = TestService::start_with(&temp.path().join("cache"), |context| {
         context.codex_home = Some(home.clone());
     })
@@ -843,7 +913,7 @@ async fn slim_pet_keeps_only_the_selected_pet_sprite() {
         json!({ "requestId": "r2", "errorReason": "BlockedByClient" })
     );
 
-    std::fs::remove_file(home.join(".codex-global-state.json")).unwrap();
+    std::fs::remove_file(&sqlite_path).unwrap();
     let default = "app://-/assets/codex-spritesheet-v6.922b99db4b.webp";
     service.send(paused("s1", "r3", default, false)).await;
     assert_eq!(
@@ -865,7 +935,6 @@ async fn late_asset_scans_narrow_interception_on_attached_pages() {
             gate.recv().unwrap();
             Ok(crate::renderer_asset_scan::ScanOutcome {
                 scan: crate::renderer_asset_scan::AssetScan {
-                    numeric_chunks: 2,
                     candidates: vec!["async/24191.589dcc9878.js".to_string()],
                 },
                 cached: false,
@@ -946,11 +1015,8 @@ fn page_patch_script_matches_rspack_numeric_assets() {
 }
 
 #[test]
-fn only_content_hashed_assets_are_cacheable() {
+fn only_content_hashed_numeric_js_and_css_assets_are_cacheable() {
     for name in [
-        "app-initial-90eb42395b7d.js",
-        "app-primary~b4ce9e46.mjs",
-        "general-settings-679bf39c78a4.js",
         "104974.1e9a7f6707.js",
         "634303.855e57c3e7.js",
         "e77f816560c6.css",
@@ -959,6 +1025,9 @@ fn only_content_hashed_assets_are_cacheable() {
         assert!(cacheable_asset_name(name), "{name}");
     }
     for name in [
+        "app-initial-90eb42395b7d.js",
+        "app-primary~b4ce9e46.mjs",
+        "general-settings-679bf39c78a4.js",
         "app-initial.js",
         "app-initial-dev.js",
         "app-initial.css",
@@ -973,12 +1042,16 @@ fn only_content_hashed_assets_are_cacheable() {
     }
     let cache = PatchCache::new(PathBuf::from("/tmp"), "script");
     assert_eq!(
-        cache.entry_name("app://-/assets/app-initial-90eb42395b7d.js?build=1#x"),
-        Some(format!("{}-app-initial-90eb42395b7d.js", cache.tag))
+        cache.entry_name("app://-/assets/104974.1e9a7f6707.js?build=1#x"),
+        Some(format!("{}-104974.1e9a7f6707.js", cache.tag))
     );
     assert_eq!(
         cache.entry_name("app://-/assets/async/634303.855e57c3e7.js?build=1#x"),
         Some(format!("{}-634303.855e57c3e7.js", cache.tag))
+    );
+    assert_eq!(
+        cache.entry_name("app://-/assets/app-initial-90eb42395b7d.js"),
+        None
     );
 }
 
@@ -986,22 +1059,20 @@ fn only_content_hashed_assets_are_cacheable() {
 async fn cache_round_trips_and_rejects_truncated_bodies() {
     let temp = tempfile::tempdir().unwrap();
     let cache = PatchCache::new(temp.path().to_path_buf(), "script");
-    let patched = "app://-/assets/app-shared-52443cbe9ac4.js";
-    let unchanged = "app://-/assets/general-settings-20eab868ec75.js";
+    let patched = "app://-/assets/52443.52443cbe9ac4.js";
+    let unchanged = "app://-/assets/20868.20eab868ec75.js";
+    let encoded = base64::engine::general_purpose::STANDARD.encode("patched()");
     let patch = StoredPatch {
         status: 200,
         headers: vec![json!({ "name": "Content-Type", "value": "text/javascript" })],
-        body: "patched()".to_string(),
+        body_base64: encoded.clone(),
     };
     cache.store(patched, Some(patch)).await;
     cache.store(unchanged, None).await;
     let Some(CachedAsset::Patched(hit)) = cache.load(patched).await else {
         panic!("patched entry should load");
     };
-    assert_eq!(
-        hit.body_base64,
-        base64::engine::general_purpose::STANDARD.encode("patched()")
-    );
+    assert_eq!(hit.body_base64, encoded);
     assert_eq!(hit.headers.len(), 1);
     assert!(matches!(
         cache.load(unchanged).await,
@@ -1020,9 +1091,9 @@ async fn cache_round_trips_and_rejects_truncated_bodies() {
 fn prune_drops_other_versions_and_least_recently_used_entries() {
     let temp = tempfile::tempdir().unwrap();
     let cache = PatchCache::new(temp.path().to_path_buf(), "script");
-    std::fs::write(temp.path().join("stale-app-initial-90eb42395b7d.js"), "x").unwrap();
-    let big = "x".repeat(300);
-    for (index, name) in ["a-11111111.js", "b-22222222.js", "c-33333333.js"]
+    std::fs::write(temp.path().join("stale-10000.90eb42395b7d.js"), "x").unwrap();
+    let big = base64::engine::general_purpose::STANDARD.encode("x".repeat(300));
+    for (index, name) in ["1.11111111.js", "2.22222222.js", "3.33333333.js"]
         .iter()
         .enumerate()
     {
@@ -1030,7 +1101,7 @@ fn prune_drops_other_versions_and_least_recently_used_entries() {
         let patch = StoredPatch {
             status: 200,
             headers: Vec::new(),
-            body: big.clone(),
+            body_base64: big.clone(),
         };
         store_entry(temp.path(), &entry, Some(patch)).unwrap();
         let used = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + index as u64);
@@ -1051,8 +1122,8 @@ fn prune_drops_other_versions_and_least_recently_used_entries() {
     assert_eq!(
         left,
         [
-            format!("{tag}-c-33333333.js"),
-            format!("{tag}-c-33333333.js.meta.json"),
+            format!("{tag}-3.33333333.js"),
+            format!("{tag}-3.33333333.js.meta.json"),
         ]
     );
 }

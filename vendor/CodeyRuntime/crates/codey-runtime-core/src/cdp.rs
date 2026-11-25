@@ -201,7 +201,6 @@ pub fn is_codex_page_target(target: &CdpTarget) -> bool {
     }
     contains_ignore_ascii_case(&target.title, "codex")
         || contains_ignore_ascii_case(url, "codex")
-        || is_chatgpt_desktop_page(&target.title, url)
         || is_packaged_codex_page(url)
 }
 
@@ -275,15 +274,6 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
-    let url = url.trim();
-    title.trim().eq_ignore_ascii_case("chatgpt")
-        && (url.eq_ignore_ascii_case("https://chatgpt.com")
-            || starts_with_ignore_ascii_case(url, "https://chatgpt.com/")
-            || url.eq_ignore_ascii_case("https://chat.openai.com")
-            || starts_with_ignore_ascii_case(url, "https://chat.openai.com/"))
 }
 
 fn is_packaged_codex_page(url: &str) -> bool {

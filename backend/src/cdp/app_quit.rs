@@ -15,8 +15,15 @@ const APP_QUIT_SCRIPT: &str = r#"(async () => {
 })()"#;
 
 pub(crate) async fn request_app_quit(renderer_websocket_url: &str) -> Result<()> {
+    request_app_quit_with_timeout(renderer_websocket_url, APP_QUIT_TIMEOUT).await
+}
+
+async fn request_app_quit_with_timeout(
+    renderer_websocket_url: &str,
+    timeout: Duration,
+) -> Result<()> {
     // Keep WebSocket state from inflating every launch/cleanup caller's future.
-    Box::pin(tokio::time::timeout(APP_QUIT_TIMEOUT, async {
+    Box::pin(tokio::time::timeout(timeout, async {
         let renderer = loopback_renderer_websocket_url(renderer_websocket_url)?;
         let (mut socket, _) = tokio_tungstenite::connect_async(renderer.as_str())
             .await
@@ -214,9 +221,12 @@ mod tests {
             socket.next().await.unwrap().unwrap();
             std::future::pending::<()>().await;
         });
-        let error = request_app_quit(&format!("ws://{address}/devtools/page/test"))
-            .await
-            .unwrap_err();
+        let error = request_app_quit_with_timeout(
+            &format!("ws://{address}/devtools/page/test"),
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
         assert!(
             error
                 .downcast_ref::<tokio::time::error::Elapsed>()

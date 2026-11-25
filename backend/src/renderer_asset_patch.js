@@ -20,42 +20,25 @@
       }
     } catch {}
   };
-  const maxRendererPatchFingerprints = 64;
-  const rendererPatchFailuresByFingerprint = new Map();
+  const maxRendererPatchFailureKeys = 64;
+  const rendererPatchFailuresByKey = new Map();
   let activeRendererPatchFailures = null;
-  let activeRendererPatchSource = null;
-  // 指纹只作同一源码的失败门禁去重键，不需要加密强度；原主进程版用
-  // sha256，页面里用同步的双路 32 位 FNV-1a 即可。
-  const rendererPatchFingerprint = (source) => {
-    try {
-      let first = 0x811c9dc5;
-      let second = 0x050c5d1f;
-      for (let index = 0; index < source.length; index += 1) {
-        const code = source.charCodeAt(index);
-        first = Math.imul(first ^ code, 0x01000193);
-        second = Math.imul(second ^ code, 0x5bd1e995);
-      }
-      return `${source.length}:${(first >>> 0).toString(36)}:${(second >>> 0).toString(36)}`;
-    } catch {
-      // 指纹不可用时不做失败门禁去重，补丁行为保持原样。
-      return null;
-    }
-  };
-  const rendererPatchFailuresForFingerprint = (fingerprint, create = true) => {
-    if (fingerprint == null) return null;
-    const existing = rendererPatchFailuresByFingerprint.get(fingerprint);
+  let activeRendererPatchKey = null;
+  const rendererPatchFailuresForKey = (key, create = true) => {
+    if (!key) return null;
+    const existing = rendererPatchFailuresByKey.get(key);
     if (existing) {
       // Refresh insertion order so the bounded map behaves as an LRU.
-      rendererPatchFailuresByFingerprint.delete(fingerprint);
-      rendererPatchFailuresByFingerprint.set(fingerprint, existing);
+      rendererPatchFailuresByKey.delete(key);
+      rendererPatchFailuresByKey.set(key, existing);
       return existing;
     }
     if (!create) return null;
     const failures = new Set();
-    rendererPatchFailuresByFingerprint.set(fingerprint, failures);
-    while (rendererPatchFailuresByFingerprint.size > maxRendererPatchFingerprints) {
-      const oldest = rendererPatchFailuresByFingerprint.keys().next().value;
-      rendererPatchFailuresByFingerprint.delete(oldest);
+    rendererPatchFailuresByKey.set(key, failures);
+    while (rendererPatchFailuresByKey.size > maxRendererPatchFailureKeys) {
+      const oldest = rendererPatchFailuresByKey.keys().next().value;
+      rendererPatchFailuresByKey.delete(oldest);
     }
     return failures;
   };
@@ -108,9 +91,9 @@
     return excerpts;
   };
   const recordIncompatibleRendererGate = (source, name, matchCount) => {
-    if (activeRendererPatchFailures == null && activeRendererPatchSource != null) {
-      activeRendererPatchFailures = rendererPatchFailuresForFingerprint(
-        rendererPatchFingerprint(activeRendererPatchSource),
+    if (activeRendererPatchFailures == null && activeRendererPatchKey != null) {
+      activeRendererPatchFailures = rendererPatchFailuresForKey(
+        activeRendererPatchKey,
         true,
       );
     }
@@ -204,70 +187,39 @@
     if (typeof patched !== "string") return recordIncompatibleRendererGate(source, name, patched);
     return patched;
   };
-  // 每项改写的前置字面量。资源一个都不含时整段跳过；Codey 后端读取同一份
-  // 列表，在把资源送进页面求值前预筛。新增改写必须登记它依赖的字面量。
-  const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
-    "isNewThreadDraft:",
-    "isManuallyChanged:!1,modelSettings:null,serviceTier:null",
-    "resolvedHostId:",
-    "sendMessageFromView",
-    "AppServerRequestClient is missing a message dispatcher",
-    "checkout-webview-presentation-changed",
-    "Desktop host did not provide its AppServerManager service",
-    ".sendFollowUpMessage(",
-    ".startTurn(",
-    "includeUltraReasoningEffort:",
-    "supportsIndependentSpeedModes",
-    "serviceTierAccess:",
-    "electron-app-state-snapshot-request",
-    "activeInteractions=new Map",
-    "totalASTLRUCacheSize:",
-    "threadScroll.restore",
-    "orbit-character-preloaded",
-    "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
-    "\"orbit.navigation\"",
-    "ensureObserver(\"long-animation-frame\")",
-    "_pending_observations",
-    "PerformanceEventTiming",
-    "this.eventObserver=new PerformanceObserver",
-    "EventLoopBlockRenderer",
-    ":has([data-state=open])",
-    ":has(:is(button[data-state=open]))",
-    "Reached the post-login Statsig bootstrap deadline",
-    "CodexStatsigProvider.async.identity",
-    "useStatsigInternalClientFactoryAsync=function("
-  ]/*end-codey-renderer-patch-anchors*/;
+  // 每项改写的复合前置规则。资源一条都不命中时整段跳过；Codey 后端读取同一份
+  // 规则表在 ASAR 离线扫描和把资源送进页面求值前预筛，allOf 按最长/最稀有字面量靠前排列。
   const rendererPatchRules = /*codey-renderer-patch-rules*/[
-    { "allOf": ["isNewThreadDraft:", "modelSettingsPersistAsDefault:", "userSavedReasoningEffort:", "draftModelSettings:"] },
+    { "allOf": ["modelSettingsPersistAsDefault:", "userSavedReasoningEffort:", "draftModelSettings:", "isNewThreadDraft:"] },
     { "allOf": ["isManuallyChanged:!1,modelSettings:null,serviceTier:null"] },
-    { "allOf": ["CodexComposerAdapter", "let{agentMode:", "resolvedHostId:", "submitDisabledReasons:"] },
-    { "allOf": ["codex-message-from-view", "sendMessageFromView", "Failed to send message from view"] },
+    { "allOf": ["submitDisabledReasons:", "CodexComposerAdapter", "resolvedHostId:", "let{agentMode:"] },
+    { "allOf": ["Failed to send message from view", "codex-message-from-view", "sendMessageFromView"] },
     { "allOf": ["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"] },
     { "allOf": ["checkout-webview-presentation-changed", "isPrewarm:"] },
     { "allOf": ["Desktop host did not provide its AppServerManager service"] },
-    { "allOf": [".sendFollowUpMessage(", "useUserMessageAdmission:"] },
-    { "allOf": [".startTurn(", "onRequestDispatched:"] },
+    { "allOf": ["useUserMessageAdmission:", ".sendFollowUpMessage("] },
+    { "allOf": ["onRequestDispatched:", ".startTurn("] },
     { "allOf": ["includeUltraReasoningEffort:", "isCustomModelProvider:", "teamCatalog:", "1186680773"] },
     { "allOf": ["supportsIndependentSpeedModes", "ultrafast_mode"] },
     { "allOf": ["={serviceTierAccess:", "isLoading:"] },
     { "allOf": ["electron-app-state-snapshot-request", "collectAppStateSnapshot("] },
     { "allOf": ["activeInteractions=new Map", "beginCpuSampling", "ensureHeartbeat("] },
-    { "allOf": ["totalASTLRUCacheSize:", "poolSize:", "workerFactory:"] },
-    { "allOf": ["threadScroll.restore", "threadScroll.initialRead", "previousViewportHeightPx:"] },
+    { "allOf": ["totalASTLRUCacheSize:", "workerFactory:", "poolSize:"] },
+    { "allOf": ["previousViewportHeightPx:", "threadScroll.initialRead", "threadScroll.restore"] },
     { "allOf": ["orbit-character-preloaded", "allow-same-origin"] },
     { "allOf": ["\"general-settings\",\"appearance\",\"keyboard-shortcuts\""] },
-    { "allOf": ["\"orbit.navigation\"", ".prefetch()", "\"general-settings\",\"appearance\",\"keyboard-shortcuts\""] },
     { "allOf": ["ensureObserver(\"long-animation-frame\")", "ensureObserver(\"longtask\")"] },
     { "allOf": ["_pending_observations", "pending_age_ms", "setInterval("] },
-    { "allOf": ["durationThreshold:16", "PerformanceEventTiming", "eventsSupported:"] },
-    { "allOf": ["durationThreshold:16", "this.eventObserver=new PerformanceObserver"] },
-    { "allOf": ["EventLoopBlockRenderer", "rendererHangDetectionEnabled"] },
-    { "allOf": [":has([data-state=open])"] },
-    { "allOf": [":has(:is(button[data-state=open]))"] },
-    { "allOf": ["Reached the post-login Statsig bootstrap deadline", "Timed out while fetching post-login Statsig bootstrap"] },
+    { "allOf": ["PerformanceEventTiming", "durationThreshold:16", "eventsSupported:"] },
+    { "allOf": ["this.eventObserver=new PerformanceObserver", "durationThreshold:16"] },
+    { "allOf": ["rendererHangDetectionEnabled", "EventLoopBlockRenderer"] },
+    { "kind": "css", "allOf": [":has([data-state=open])"] },
+    { "kind": "css", "allOf": [":has(:is(button[data-state=open]))"] },
+    { "allOf": ["Timed out while fetching post-login Statsig bootstrap", "Reached the post-login Statsig bootstrap deadline"] },
     { "allOf": ["CodexStatsigProvider.async.identity"] },
     { "allOf": ["useStatsigInternalClientFactoryAsync=function(", ".initializeAsync().catch("] }
   ]/*end-codey-renderer-patch-rules*/;
+  const jsRendererPatchRules = rendererPatchRules.filter((rule) => rule.kind !== "css");
   const hostedTurnCall = "(globalThis.__codeyModelWhitelistPatch?.hostedTurnCall??((t,m,...a)=>t[m](...a)))";
   const hostedFollowUpSend = /\b([$A-Z_a-z][$\w]*)\.sendFollowUpMessage\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:)/g;
   const hostedFollowUpSendAnchor = /\.sendFollowUpMessage\([$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:/;
@@ -558,15 +510,16 @@
     }
     return patched;
   };
-  const patchCodexRendererAsset = (source) => {
-    if (!rendererPatchRules.some((rule) => rule.allOf.every((anchor) => source.includes(anchor)))) {
+  const patchCodexRendererAsset = (source, requestUrl) => {
+    if (!jsRendererPatchRules.some((rule) => rule.allOf.every((anchor) => source.includes(anchor)))) {
       return source;
     }
     const previousRendererPatchFailures = activeRendererPatchFailures;
-    const previousRendererPatchSource = activeRendererPatchSource;
-    activeRendererPatchSource = source;
-    activeRendererPatchFailures = rendererPatchFailuresByFingerprint.size > 0
-      ? rendererPatchFailuresForFingerprint(rendererPatchFingerprint(source), false)
+    const previousRendererPatchKey = activeRendererPatchKey;
+    const patchKey = `${requestUrl}:${source.length}`;
+    activeRendererPatchKey = patchKey;
+    activeRendererPatchFailures = rendererPatchFailuresByKey.size > 0
+      ? rendererPatchFailuresForKey(patchKey, false)
       : null;
     try {
     let patched = source;
@@ -739,16 +692,28 @@
     return patched;
     } finally {
       activeRendererPatchFailures = previousRendererPatchFailures;
-      activeRendererPatchSource = previousRendererPatchSource;
+      activeRendererPatchKey = previousRendererPatchKey;
     }
   };
   // Codex 样式表中的 :has([data-state=open]) 等规则会让 data-state 进入 Blink
   // RuleFeatureSet 的 :has() 失效集，悬停侧栏行切换提示气泡 data-state 时触发
-  // 整页样式重算。改写为普通属性选择器 [data-codey-open-within]，由注入脚本仅在
-  // 出现 data-state="open" 时同步到容器。
+  // 整页样式重算。改写为普通属性选择器 [data-codey-open-within]，并把命中规则的
+  // 容器类名直接写进 :root 自定义属性，免去页面启动时扫描数千条 CSSRule。
   const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
+  const openWithinClassesProperty = "--codey-open-within-classes";
   const openStateCssDataStateHasPattern =
     /:has\(\s*(?::is\(\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+  const openWithinDirectSelectorClassPattern =
+    /\.((?:\\[0-9a-fA-F]{1,6}\s?|\\.|[A-Za-z0-9_-])+)\s*>\s*\*\s*\)/g;
+  const openWithinAncestorSelectorClassPattern =
+    /\.((?:\\[0-9a-fA-F]{1,6}\s?|\\.|[A-Za-z0-9_-])+)(?:\)|\s)*?(?=:is\([^)]*\[data-codey-open-within\]|\[data-codey-open-within\])/g;
+  const unescapeCssClassToken = (rawToken) =>
+    String(rawToken || "")
+      .replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_, hex) => {
+        const codePoint = Number.parseInt(hex, 16);
+        return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : "";
+      })
+      .replace(/\\(.)/g, "$1");
   const patchCodexRendererCssAsset = (source) => {
     if (
       source.includes(openStateCssPatchedMarker) ||
@@ -757,12 +722,47 @@
     ) {
       return source;
     }
+    const directClasses = new Set();
+    const ancestorClasses = new Set();
+    const buttonAncestorClasses = new Set();
+    let replaced = false;
     const patched = source.replace(
       openStateCssDataStateHasPattern,
-      "[data-codey-open-within]",
+      (_match, offset) => {
+        replaced = true;
+        let start = offset;
+        while (start > 0) {
+          const ch = source.charCodeAt(start - 1);
+          if (ch === 125 || ch === 123 || ch === 59) break;
+          start -= 1;
+        }
+        const snippet = `${source.slice(start, offset)}[data-codey-open-within]`;
+        for (const match of snippet.matchAll(openWithinDirectSelectorClassPattern)) {
+          const token = unescapeCssClassToken(match[1]);
+          if (token) {
+            directClasses.add(token);
+            ancestorClasses.add(token);
+          }
+        }
+        for (const match of snippet.matchAll(openWithinAncestorSelectorClassPattern)) {
+          const token = unescapeCssClassToken(match[1]);
+          if (!token) continue;
+          if (token.includes("button[data-state=open]")) {
+            buttonAncestorClasses.add(token);
+          } else {
+            ancestorClasses.add(token);
+          }
+        }
+        return "[data-codey-open-within]";
+      },
     );
-    if (patched === source) return source;
-    return `${patched}\n:root{${openStateCssPatchedMarker}:1}\n`;
+    if (!replaced) return source;
+    const meta = encodeURIComponent(JSON.stringify({
+      d: [...directClasses],
+      a: [...ancestorClasses],
+      b: [...buttonAncestorClasses],
+    }));
+    return `${patched}\n:root{${openStateCssPatchedMarker}:1;${openWithinClassesProperty}:"${meta}"}\n`;
   };
   const isCodexRendererCssAssetUrl = (requestUrl) => {
     try {
@@ -808,7 +808,7 @@
       try {
         patched = isCodexRendererCssAssetUrl(requestUrl)
           ? patchCodexRendererCssAsset(source)
-          : patchCodexRendererAsset(source);
+          : patchCodexRendererAsset(source, requestUrl);
       } catch (error) {
         // Codex renderer bundles are minified implementation details and their
         // shapes change between releases. These UI restorations are optional:

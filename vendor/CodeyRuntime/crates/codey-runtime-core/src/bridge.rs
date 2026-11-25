@@ -283,17 +283,6 @@ pub async fn install_bridge_with_options(
         .with_handler(handler)
         .with_binding_session(session_token.clone());
 
-    session.send_command(1, "Runtime.enable", json!({})).await?;
-    session
-        .send_command(2, "Runtime.removeBinding", json!({ "name": binding_name }))
-        .await?;
-    session
-        .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
-        .await?;
-    // 文档脚本只在启用了 Page 域的会话上随新文档执行；不启用时页面重载后
-    // 桥接不会自动恢复，只能等看门狗重新注入。
-    session.send_command(4, "Page.enable", json!({})).await?;
-
     // 重复装桥先注销同一 target 上的旧持久脚本：注册标识没有枚举接口，只能由
     // 上一次装桥记下。注销失败不阻断安装，残项随下次装桥再清。
     let stale_registrations = document_script_registrations()
@@ -301,53 +290,77 @@ pub async fn install_bridge_with_options(
         .expect("document script registry poisoned")
         .remove(websocket_url)
         .unwrap_or_default();
+
+    // 流水线发送独立的会话初始化命令（单条 CDP WebSocket 按 FIFO 顺序执行），
+    // 把启动阶段多次串行 RTT 压成一次。
+    let mut setup_commands = Vec::with_capacity(4 + stale_registrations.len());
+    setup_commands.push((1, "Runtime.enable", json!({}), true));
+    setup_commands.push((
+        2,
+        "Runtime.removeBinding",
+        json!({ "name": binding_name }),
+        true,
+    ));
+    setup_commands.push((
+        3,
+        "Runtime.addBinding",
+        json!({ "name": binding_name }),
+        true,
+    ));
+    // 文档脚本只在启用了 Page 域的会话上随新文档执行；不启用时页面重载后
+    // 桥接不会自动恢复，只能等看门狗重新注入。
+    setup_commands.push((4, "Page.enable", json!({}), true));
     for identifier in stale_registrations {
-        let _ = session
-            .send_command(
-                next_message_id(),
-                "Page.removeScriptToEvaluateOnNewDocument",
-                json!({ "identifier": identifier }),
-            )
-            .await;
+        setup_commands.push((
+            next_message_id(),
+            "Page.removeScriptToEvaluateOnNewDocument",
+            json!({ "identifier": identifier }),
+            false,
+        ));
     }
+    session.send_pipelined_commands(setup_commands).await?;
 
     let bridge_script = build_bridge_script_for_session(binding_name, &session_token);
-    let response = session
-        .send_command(
-            5,
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": bridge_script }),
-        )
+    let mut bridge_responses = session
+        .send_pipelined_commands(vec![
+            (
+                5,
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": bridge_script }),
+                true,
+            ),
+            (
+                6,
+                "Runtime.evaluate",
+                runtime_evaluate_params(&bridge_script),
+                true,
+            ),
+        ])
         .await?;
-    remember_document_script(websocket_url, &response);
-    let response = session
-        .send_command(
-            6,
-            "Runtime.evaluate",
-            runtime_evaluate_params(&bridge_script),
-        )
-        .await?;
-    ensure_runtime_evaluate_succeeded(response)?;
+    remember_document_script(websocket_url, &bridge_responses[0]);
+    ensure_runtime_evaluate_succeeded(bridge_responses.pop().expect("bridge evaluate response"))?;
 
     for script in new_document_scripts {
-        let message_id = next_message_id();
-        let response = session
-            .send_command(
-                message_id,
-                "Page.addScriptToEvaluateOnNewDocument",
-                json!({ "source": script }),
-            )
+        let add_id = next_message_id();
+        let eval_id = next_message_id();
+        let mut responses = session
+            .send_pipelined_commands(vec![
+                (
+                    add_id,
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({ "source": script }),
+                    true,
+                ),
+                (
+                    eval_id,
+                    "Runtime.evaluate",
+                    runtime_evaluate_params(script),
+                    true,
+                ),
+            ])
             .await?;
-        remember_document_script(websocket_url, &response);
-        let message_id = next_message_id();
-        let response = session
-            .send_command(
-                message_id,
-                "Runtime.evaluate",
-                runtime_evaluate_params(script),
-            )
-            .await?;
-        ensure_runtime_evaluate_succeeded(response)?;
+        remember_document_script(websocket_url, &responses[0]);
+        ensure_runtime_evaluate_succeeded(responses.pop().expect("script evaluate response"))?;
     }
 
     let probe = match options.readiness_probe {
@@ -720,7 +733,12 @@ fn bridge_path_can_run_concurrently(path: &str) -> bool {
             | "/backend/status"
             | "/backend/health"
             | "/account/usage"
-            | "/session/completion-state"
+            | "/session/stats"
+            | "/session/timestamps"
+            | "/session/model"
+            | "/session/portable-compaction/status"
+            | "/internal/codey/settings-overlay/load"
+            | "/internal/codey/session-tools/load"
             | "/api/check_for_updates"
             | "/session/wake-watcher"
             | "/plugins/list"
@@ -832,6 +850,68 @@ where
     ) -> anyhow::Result<Value> {
         self.send_command_with_timeout(message_id, method, params, CDP_COMMAND_TIMEOUT)
             .await
+    }
+
+    /// 批量流水线发送一组独立命令：一次 flush 发出全部帧，再按发送顺序依次收齐应答。
+    /// `required == false` 的命令失败时忽略错误继续收齐后续应答。
+    async fn send_pipelined_commands(
+        &mut self,
+        commands: Vec<(u64, &'static str, Value, bool)>,
+    ) -> anyhow::Result<Vec<Value>> {
+        let timeout = CDP_COMMAND_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
+        for (message_id, method, params, _) in &commands {
+            tokio::time::timeout_at(
+                deadline,
+                self.socket.feed(Message::Text(
+                    json!({
+                        "id": message_id,
+                        "method": method,
+                        "params": params,
+                    })
+                    .to_string()
+                    .into(),
+                )),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "timed out waiting for CDP command {method} id {message_id} send after {}ms",
+                    timeout.as_millis()
+                )
+            })?
+            .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
+        }
+        tokio::time::timeout_at(deadline, self.socket.flush())
+            .await
+            .with_context(|| {
+                format!(
+                    "timed out flushing pipelined CDP commands after {}ms",
+                    timeout.as_millis()
+                )
+            })?
+            .context("failed to flush pipelined CDP commands")?;
+
+        let mut results = Vec::with_capacity(commands.len());
+        for (message_id, method, _, required) in commands {
+            let response = tokio::time::timeout_at(
+                deadline,
+                self.wait_for_id(message_id, method.to_string()),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "timed out waiting for CDP command {method} id {message_id} response after {}ms",
+                    timeout.as_millis()
+                )
+            })?;
+            match response {
+                Ok(value) => results.push(value),
+                Err(_) if !required => results.push(Value::Null),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(results)
     }
 
     async fn send_command_with_timeout(

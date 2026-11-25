@@ -51,6 +51,10 @@
   let composerHost = null;
   let observedHost = null;
   let hostResizeObserver = null;
+  let barPositionedForHost = null;
+  let barGeometryDirty = true;
+  let cachedAnchor = null;
+  let contextDirty = true;
   let currentDensity = "full";
   let dockedBottom = 10;
   let resizePending = false;
@@ -69,6 +73,10 @@
   let lastStatsKey = "";
   let watchUntil = 0;
   let disposed = false;
+  const invalidateContext = () => {
+    contextDirty = true;
+    barGeometryDirty = true;
+  };
   const listeners = [];
   const listen = (target, type, handler, options) => {
     target.addEventListener?.(type, handler, options);
@@ -142,6 +150,9 @@
   };
 
   const callBridge = (path, payload = {}, options = {}) => {
+    if (typeof window.__codeySharedRuntime?.callBridge === "function") {
+      return window.__codeySharedRuntime.callBridge(path, payload, options);
+    }
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload, options);
     }
@@ -183,9 +194,34 @@
     return normalizeSessionId(params.get("conversation_id") || params.get("session_id"));
   };
 
-  // 只在同一同步阶段复用查询结果；跨过桥接请求后重新确认当前 composer。
-  const resolveSessionContext = () => {
+  const cachedAnchorStillValid = (anchor) => {
+    if (!anchor || anchor.isConnected === false) return false;
+    const host = anchor.parentElement || anchor;
+    if (!host || host.isConnected === false || (composerHost && host !== composerHost)) return false;
+    const cachedInput = anchor.__codeyVisibleComposerInput;
+    if (
+      !(cachedInput instanceof HTMLElement)
+      || cachedInput.isConnected === false
+      || host.contains?.(cachedInput) === false
+      || cachedInput.closest?.("[hidden], [aria-hidden='true']")
+    ) {
+      return false;
+    }
+    return true;
+  };
+
+  // DOM 与窗口状态未变动时复用已确认的可见 composer 锚点，避免 1.1s 轮询
+  // 反复扫描全页并触发 getBoundingClientRect；sessionId 仍实时从属性读取。
+  const resolveSessionContext = (force = false) => {
+    if (!force && !contextDirty && cachedAnchorStillValid(cachedAnchor)) {
+      return {
+        anchor: cachedAnchor,
+        sessionId: normalizeSessionId(cachedAnchor.getAttribute(conversationAttribute)),
+      };
+    }
     const anchor = findVisibleComposerAnchor();
+    cachedAnchor = anchor;
+    contextDirty = false;
     return { anchor, sessionId: resolveSessionId(anchor) };
   };
 
@@ -304,6 +340,7 @@
     if (typeof Observer !== "function") return;
     hostResizeObserver ||= new Observer(() => {
       if (disposed || !statsElement || statsElement.hidden) return;
+      barGeometryDirty = true;
       resizePending = true;
       schedulePanelPosition();
     });
@@ -312,15 +349,32 @@
 
   // 状态条常驻挂载在根节点并固定在会话底部，避免随会话切换反复从旧
   // composer 容器卸载并重新插入新容器；水平范围跟随当前可见 composer。
-  const positionBar = (host = composerHost?.isConnected ? composerHost : findVisibleComposerAnchor()?.parentElement, anchor = null) => {
+  const positionBar = (
+    host = composerHost?.isConnected ? composerHost : findVisibleComposerAnchor()?.parentElement,
+    anchor = null,
+    force = false,
+  ) => {
     if (!statsElement || !host) {
       syncHostObserver(null);
+      barPositionedForHost = null;
+      barGeometryDirty = true;
       return false;
     }
     composerHost = host;
     syncHostObserver(host);
+    if (
+      !force
+      && !barGeometryDirty
+      && host === barPositionedForHost
+      && host.isConnected !== false
+      && statsElement.isConnected
+    ) {
+      return false;
+    }
     const rect = host.getBoundingClientRect?.();
     if (!rect || rect.width <= 0) return false;
+    barPositionedForHost = host;
+    barGeometryDirty = false;
     const width = Math.round(rect.width);
     const nextDensity = resolveDensity(width);
     const densityChanged = nextDensity !== currentDensity;
@@ -481,6 +535,7 @@
       }
       bar.__codeyCs = refs;
     }
+    const needsMeasure = bar.parentElement !== root || bar.hidden === true;
     if (bar.parentElement !== root) {
       if (statsElement) setExpanded(false);
       root.appendChild(bar);
@@ -491,7 +546,7 @@
       root.appendChild(overlay);
     }
     statsElement = bar;
-    positionBar(host, anchor);
+    positionBar(host, anchor, needsMeasure);
     return bar;
   };
 
@@ -543,7 +598,10 @@
   // 滚动和缩放事件可能一帧多次，合并到下一帧测量一次。
   const schedulePanelPosition = (event) => {
     if (disposed) return;
-    if (event?.type === "resize" && statsElement && !statsElement.hidden) resizePending = true;
+    if (event?.type === "resize" && statsElement && !statsElement.hidden) {
+      barGeometryDirty = true;
+      resizePending = true;
+    }
     const active = Boolean(statsElement?.__codeyCs?.active);
     if (positionFrame || (!active && !resizePending)) return;
     // 浮层内部滚动不会移动入口。
@@ -553,7 +611,7 @@
       const shouldPositionBar = resizePending;
       resizePending = false;
       if (disposed) return;
-      const densityChanged = shouldPositionBar ? positionBar() : false;
+      const densityChanged = shouldPositionBar ? positionBar(undefined, null, true) : false;
       if (densityChanged && statsElement && !clearTimer) syncSummaryText(statsElement);
       if (statsElement?.__codeyCs?.active) positionPanel();
     });
@@ -607,9 +665,10 @@
   const switchSession = (sessionId, anchor) => {
     const hadStats = stats !== null;
     resetSession(sessionId);
+    barGeometryDirty = true;
     if (hadStats && sessionId && anchor && statsElement) {
       setValue(statsElement, "hidden", false);
-      positionBar(anchor.parentElement, anchor);
+      positionBar(anchor.parentElement, anchor, true);
       clearTimer = setTimeout(() => {
         clearTimer = 0;
         if (!disposed && !fetchAttempted) render();
@@ -696,6 +755,8 @@
     const bar = ensureBar(anchor);
     if (!bar) {
       syncHostObserver(null);
+      barPositionedForHost = null;
+      barGeometryDirty = true;
       // 输入框不可见（例如离开会话页）时，若旧宿主仍在隐藏会话里，显式
       // 隐藏状态条，避免恢复可见时短暂展示过期数据。
       if (statsElement) { setValue(statsElement, "hidden", true); setExpanded(false); }
@@ -846,6 +907,7 @@
 
   // 页面重新可见、获得焦点或用户发送消息时，空闲退避作废并尽快刷新。
   const wake = (delay = 0, watch = false) => {
+    invalidateContext();
     idleStreak = 0;
     if (watch) watchUntil = Date.now() + SUBMIT_WATCH_MS;
     schedulePoll(delay);
@@ -905,10 +967,12 @@
   };
 
   const scheduleRescan = () => {
-    if (disposed || rescanTimer) return;
+    if (disposed) return;
+    invalidateContext();
+    if (rescanTimer) return;
     rescanTimer = setTimeout(() => {
       rescanTimer = 0;
-      const { anchor, sessionId } = resolveSessionContext();
+      const { anchor, sessionId } = resolveSessionContext(true);
       const changed = sessionId !== currentSessionId;
       if (changed) {
         switchSession(sessionId, anchor);
@@ -1060,6 +1124,10 @@
         statsElement?.__codeyCs?.overlay.remove();
         statsElement?.remove();
         composerHost = null;
+        barPositionedForHost = null;
+        barGeometryDirty = true;
+        cachedAnchor = null;
+        contextDirty = true;
         document.getElementById(styleId)?.remove();
         window[PROBE_KEY].installed = false;
       },

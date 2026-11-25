@@ -167,6 +167,9 @@
   };
 
   const callBridge = (path, payload = {}, options = {}) => {
+    if (typeof window.__codeySharedRuntime?.callBridge === "function") {
+      return window.__codeySharedRuntime.callBridge(path, payload, options);
+    }
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload, options);
     }
@@ -300,9 +303,17 @@
 
   const reactStateKeys = (element) => Object.keys(element).filter((key) => (
     key.startsWith("__reactFiber")
-    || key.startsWith("__reactInternalInstance")
     || key.startsWith("__reactProps")
   ));
+
+  const reactFiberFromElement = (element) => {
+    if (typeof window.__codeySharedRuntime?.reactFiberFor === "function") {
+      return window.__codeySharedRuntime.reactFiberFor(element);
+    }
+    if (!(element instanceof HTMLElement)) return null;
+    const key = Object.keys(element).find((candidate) => candidate.startsWith("__reactFiber$"));
+    return key ? element[key] : null;
+  };
 
   const ignoredReactFiberTraversalKeys = new Set([
     "child",
@@ -899,7 +910,7 @@
     .filter((row) => row.classList.contains(selectedClass));
 
   const showRuntimeToast = (message, tone = "success") => {
-    const sharedToast = window.__codeyShowRuntimeToast;
+    const sharedToast = window.__codeySharedRuntime?.showRuntimeToast || window.__codeyShowRuntimeToast;
     if (typeof sharedToast === "function" && sharedToast !== showRuntimeToast) {
       sharedToast(message, tone);
       return;
@@ -1179,13 +1190,12 @@
       if (!(archiveControl instanceof HTMLElement)) return;
       targets.push({
         archiveControl,
-        placementTarget: archivePlacementTarget(thread, archiveControl),
         thread,
       });
     });
-    targets.forEach(({ archiveControl, placementTarget, thread }) => {
-      if (placementTarget.parentElement instanceof HTMLElement && placementTarget.parentElement !== thread) {
-        placementTarget.parentElement.setAttribute("data-codey-session-action-row", "true");
+    targets.forEach(({ archiveControl, thread }) => {
+      if (archiveControl.parentElement instanceof HTMLElement && archiveControl.parentElement !== thread) {
+        archiveControl.parentElement.setAttribute("data-codey-session-action-row", "true");
       }
       const button = document.createElement("button");
       button.type = "button";
@@ -1202,7 +1212,7 @@
         stopSidebarActionEvent(event);
         void exportSession(thread, button);
       }, true);
-      placementTarget.insertAdjacentElement("beforebegin", button);
+      archiveControl.insertAdjacentElement("beforebegin", button);
     });
   };
 
@@ -1287,10 +1297,7 @@
   const projectPathFromRow = (project) => {
     const projectId = String(project.getAttribute("data-app-action-sidebar-project-id") || "").trim();
     if (isLocalProjectPath(projectId)) return projectId;
-    const reactKey = Object.keys(project).find((key) => (
-      key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
-    ));
-    let fiber = reactKey ? project[reactKey] : null;
+    let fiber = reactFiberFromElement(project);
     for (let depth = 0; fiber && depth < 18; depth += 1, fiber = fiber.return) {
       const path = projectPathFromReactValue(fiber.memoizedProps, projectId)
         || projectPathFromReactValue(fiber.pendingProps, projectId);
@@ -1335,10 +1342,7 @@
       row.getAttribute("data-app-action-sidebar-thread-id"),
     );
     if (!rowSessionId.startsWith("client-new-thread:")) return rowSessionId;
-    const reactKey = Object.keys(row).find((key) => (
-      key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
-    ));
-    let fiber = reactKey ? row[reactKey] : null;
+    let fiber = reactFiberFromElement(row);
     for (let depth = 0; fiber && depth < 18; depth += 1, fiber = fiber.return) {
       const sessionId = canonicalThreadSessionIdFromReactValue(fiber.memoizedProps)
         || canonicalThreadSessionIdFromReactValue(fiber.pendingProps);
@@ -1523,10 +1527,7 @@
     const identity = threadIdentityNode(row) || row;
     if (!(identity instanceof HTMLElement)) return null;
     const expectedTaskId = normalizeThreadSessionId(sessionId).replace(/^remote:/, "");
-    const reactKey = Object.keys(identity).find((key) => (
-      key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
-    ));
-    let fiber = reactKey ? identity[reactKey] : null;
+    let fiber = reactFiberFromElement(identity);
     for (let depth = 0; fiber && depth < 18; depth += 1, fiber = fiber.return) {
       for (const props of [fiber.memoizedProps, fiber.pendingProps]) {
         const task = props?.task ?? props?.entry?.task;
@@ -1793,10 +1794,7 @@
   const projectThreadSessionIdsFromReact = (projectList) => {
     const sessionIds = new Set();
     if (!(projectList instanceof HTMLElement)) return sessionIds;
-    const reactKey = Object.keys(projectList).find((key) => (
-      key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
-    ));
-    let fiber = reactKey ? projectList[reactKey] : null;
+    let fiber = reactFiberFromElement(projectList);
     for (let depth = 0; fiber && depth < 8; depth += 1, fiber = fiber.return) {
       for (const props of [fiber.memoizedProps, fiber.pendingProps]) {
         const threadKeys = Array.isArray(props?.threadKeys)
@@ -2093,15 +2091,6 @@
       refreshThreadUpdatedAtRow(row, now, forceRefresh);
     });
     scheduleThreadUpdatedAtFetch();
-  };
-
-  const reactFiberFromElement = (element) => {
-    if (!(element instanceof HTMLElement)) return null;
-    const key = Object.keys(element).find((candidate) => (
-      candidate.startsWith("__reactFiber$")
-      || candidate.startsWith("__reactInternalInstance$")
-    ));
-    return key ? element[key] : null;
   };
 
   const inspectAppServerScopeValue = (value) => {
@@ -2501,11 +2490,6 @@
     return state.pending;
   };
   window.__codeyLoadCodexSessionController = loadCodexSessionController;
-  window.__codeyLoadCodexRequestClient = async () => (
-    (await loadCodexSessionController({ feature: "modelRouting" })).manager.requestClient
-  );
-  // Install the request-client guard after session discovery helpers are available.
-  void window.__codeyModelWhitelistPatch?.ensureRequestGate?.().catch(() => {});
 
   const getCodexSessionController = (feature) => loadCodexSessionController({ feature });
 
@@ -2524,6 +2508,9 @@
   window.__codeyReadAccountRateLimits = readAccountRateLimits;
 
   const appServerRequestClient = () => {
+    if (typeof window.__codeySharedRuntime?.appServerRequestClient === "function") {
+      return window.__codeySharedRuntime.appServerRequestClient();
+    }
     const clients = window.__codeyAppServerRequestClients;
     if (!clients || typeof clients.get !== "function") return null;
     const local = clients.get("local");
@@ -2911,59 +2898,6 @@
     if (right > 0) button.style.right = `${right}px`;
   };
 
-  const archivePlacementByControl = new WeakMap();
-  const archiveActionRowBySignature = new Map();
-
-  const archiveWrapperSignature = (wrapper) => {
-    const parent = wrapper.parentElement;
-    const wrapperClass = String(wrapper.getAttribute("class") || "").trim();
-    const wrapperStyle = String(wrapper.getAttribute("style") || "").trim();
-    const parentTag = parent instanceof HTMLElement ? parent.tagName : "";
-    const parentClass = parent instanceof HTMLElement
-      ? String(parent.getAttribute("class") || "").trim()
-      : "";
-    if (!wrapperClass && !wrapperStyle && !parentClass && wrapper.tagName === parentTag) {
-      return "";
-    }
-    return `${wrapper.tagName}\0${wrapperClass}\0${wrapperStyle}\0${parentTag}\0${parentClass}`;
-  };
-
-  const archivePlacementTarget = (thread, archiveControl) => {
-    const wrapper = archiveControl.parentElement;
-    if (!(wrapper instanceof HTMLElement) || wrapper === thread) return archiveControl;
-    const cachedPlacement = archivePlacementByControl.get(archiveControl);
-    if (cachedPlacement?.wrapper === wrapper && cachedPlacement.target?.isConnected !== false) {
-      return cachedPlacement.target;
-    }
-    if (wrapper.getAttribute("data-codey-session-action-row") === "true") {
-      archivePlacementByControl.set(archiveControl, { target: archiveControl, wrapper });
-      return archiveControl;
-    }
-    if (wrapper.parentElement?.getAttribute?.("data-codey-session-action-row") === "true") {
-      archivePlacementByControl.set(archiveControl, { target: wrapper, wrapper });
-      return wrapper;
-    }
-    // 新版按钮直接位于浮动操作栏内；仅跳过旧版的单按钮提示包装层，
-    // 避免把整个操作栏当成按钮包装层，将图标插到聊天行下方。
-    let isActionRow = wrapper.querySelectorAll("button, [role=button]").length !== 1;
-    if (!isActionRow) {
-      const signature = archiveWrapperSignature(wrapper);
-      if (signature && archiveActionRowBySignature.has(signature)) {
-        isActionRow = archiveActionRowBySignature.get(signature);
-      } else {
-        const style = window.getComputedStyle?.(wrapper);
-        isActionRow = /^(?:inline-)?(?:flex|grid)$/.test(style?.display || "")
-          || /^(?:absolute|fixed)$/.test(style?.position || "");
-        if (signature) {
-          rememberBoundedMapValue(archiveActionRowBySignature, signature, isActionRow);
-        }
-      }
-    }
-    const target = isActionRow ? archiveControl : wrapper;
-    archivePlacementByControl.set(archiveControl, { target, wrapper });
-    return target;
-  };
-
   const installSessionDeleteButtons = (root = document) => {
     const targets = [];
     queryWithin(root,
@@ -2977,13 +2911,12 @@
       if (!(archiveControl instanceof HTMLElement)) return;
       targets.push({
         archiveControl,
-        placementTarget: archivePlacementTarget(thread, archiveControl),
         thread,
       });
     });
-    targets.forEach(({ archiveControl, placementTarget, thread }) => {
-      if (placementTarget.parentElement instanceof HTMLElement && placementTarget.parentElement !== thread) {
-        placementTarget.parentElement.setAttribute("data-codey-session-action-row", "true");
+    targets.forEach(({ archiveControl, thread }) => {
+      if (archiveControl.parentElement instanceof HTMLElement && archiveControl.parentElement !== thread) {
+        archiveControl.parentElement.setAttribute("data-codey-session-action-row", "true");
       }
       const button = document.createElement("button");
       button.type = "button";
@@ -3006,7 +2939,7 @@
           button.disabled = false;
         }
       }, true);
-      placementTarget.insertAdjacentElement("afterend", button);
+      archiveControl.insertAdjacentElement("afterend", button);
     });
   };
 
@@ -4381,6 +4314,18 @@
       window.queueMicrotask(runDeferredMutationFlush);
     }
   };
+  const isTurnInternalChildListMutation = (mutation, cache) => {
+    if (mutation?.type !== "childList") return false;
+    const target = mutation.target instanceof HTMLElement
+      ? mutation.target
+      : mutation.target?.parentElement;
+    if (!(target instanceof HTMLElement)) return false;
+    const cached = cache.get(target);
+    if (cached !== undefined) return cached;
+    const insideTurn = Boolean(target.closest?.(canonicalConversationTurnSelector));
+    cache.set(target, insideTurn);
+    return insideTurn;
+  };
   const handleSessionToolMutations = (
     mutations,
     { deferred = false, countTotals = !deferred } = {},
@@ -4398,29 +4343,57 @@
     }
     const startedAt = nowMs();
     const inputCount = mutations.length;
-    const handleCount = Math.min(inputCount, maxIncrementalMutationRecordsPerBatch);
-    const currentMutations = handleCount < inputCount
-      ? arraySlice(mutations, 0, handleCount)
-      : mutations;
-    // Sequence the records that run now before assigning a sequence to the
-    // overflow entry. Otherwise later overflow work can jump ahead of an
-    // earlier record whose large node list needs a deferred tail.
-    for (const mutation of currentMutations) mutationSequenceFor(mutation);
-    const overflowNodes = handleCount < inputCount
-      ? queueDeferredMutationInputs(mutations, handleCount)
-      : 0;
-    const taskCount = currentMutations.length;
-    const nodes = currentMutations.reduce(
-      (count, mutation) => count + mutationNodeCount(mutation),
-      0,
-    );
+    const turnTargetCache = new WeakMap();
+    const relevantMutations = [];
+    let totalNodes = 0;
+    for (let index = 0; index < inputCount; index += 1) {
+      const mutation = mutations[index];
+      if (countTotals) totalNodes += mutationNodeCount(mutation);
+      // Fast-skip streaming childList churn inside a mounted turn before
+      // boundary probing, array slicing, or deferred queue bookkeeping.
+      if (isTurnInternalChildListMutation(mutation, turnTargetCache)) continue;
+      relevantMutations.push(mutation);
+    }
     if (countTotals) {
       const initialStats = nextSessionMutationStats();
       recordSessionMutationStats({
         mutations: initialStats.mutations + inputCount,
-        nodes: initialStats.nodes + nodes + overflowNodes,
+        nodes: initialStats.nodes + totalNodes,
       });
     }
+    if (!relevantMutations.length) {
+      try {
+        codeyTimed("codey-inject.sessionToolMutations", inputCount, () => 0);
+      } finally {
+        recordSessionMutationStats({
+          timing: countTotals
+            ? { handleMs: nowMs() - startedAt }
+            : { flushMs: nowMs() - startedAt },
+        });
+        if (
+          !deferred
+          && (
+            deferredMutationBatches.length
+            || deferredMutationSourceQueue.length
+            || deferredMutationInputQueue.length
+          )
+        ) scheduleDeferredMutationFlush();
+      }
+      return;
+    }
+    const relevantCount = relevantMutations.length;
+    const handleCount = Math.min(relevantCount, maxIncrementalMutationRecordsPerBatch);
+    const currentMutations = handleCount < relevantCount
+      ? arraySlice(relevantMutations, 0, handleCount)
+      : relevantMutations;
+    // Sequence the records that run now before assigning a sequence to the
+    // overflow entry. Otherwise later overflow work can jump ahead of an
+    // earlier record whose large node list needs a deferred tail.
+    for (const mutation of currentMutations) mutationSequenceFor(mutation);
+    if (handleCount < relevantCount) {
+      queueDeferredMutationInputs(relevantMutations, handleCount);
+    }
+    const taskCount = currentMutations.length;
     try {
       const accepted = [];
       const deferredTasks = [];
@@ -4841,7 +4814,6 @@
       refreshTrackedThreadUpdatedTimes(false);
     }, threadTimestampRefreshIntervalMs));
   }
-  window.__codeyRendererInjectLoaded = true;
   window.__codeySessionToolsInjectLoaded = true;
   window.__codeySessionToolsInjectLoading = false;
   void reconcileStaleCompletedTask();
