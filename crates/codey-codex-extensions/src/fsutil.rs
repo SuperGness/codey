@@ -81,7 +81,7 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub fn safe_path(path: &Path) -> Result<()> {
+fn safe_path_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
     ensure!(path.is_absolute(), "必须使用绝对路径");
     ensure!(
         !path
@@ -104,10 +104,15 @@ pub fn safe_path(path: &Path) -> Result<()> {
                 use std::os::windows::fs::MetadataExt;
                 ensure!(meta.file_attributes() & 0x400 == 0, "拒绝重解析点");
             }
+            Ok(Some(meta))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
     }
+}
+
+pub fn safe_path(path: &Path) -> Result<()> {
+    safe_path_metadata(path)?;
     Ok(())
 }
 
@@ -130,8 +135,10 @@ fn read_limited(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("读取失败: {}", path.display())),
     };
-    ensure!(f.metadata()?.is_file(), "目标不是普通文件");
-    let mut bytes = Vec::new();
+    let meta = f.metadata()?;
+    ensure!(meta.is_file(), "目标不是普通文件");
+    let capacity = usize::try_from(meta.len().min(limit.saturating_add(1))).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
     (&mut f).take(limit + 1).read_to_end(&mut bytes)?;
     Ok(Some(bytes))
 }
@@ -222,8 +229,9 @@ pub fn walk(root: &Path) -> Result<Vec<PathBuf>> {
             entries += 1;
             ensure!(entries <= MAX_FILES, "目录条目超过限制");
             let path = entry.path();
-            safe_path(&path)?;
-            let m = fs::symlink_metadata(&path)?;
+            let Some(m) = safe_path_metadata(&path)? else {
+                continue;
+            };
             if m.is_dir() {
                 pending.push((path, depth + 1));
             } else if m.is_file() {

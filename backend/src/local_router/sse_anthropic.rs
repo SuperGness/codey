@@ -459,6 +459,55 @@ impl AnthropicSseAccumulator {
         Ok(())
     }
 
+    pub(crate) fn finish_streaming(
+        self,
+        route: &RouteTarget,
+        tool_bridge: &ResponsesToolBridge,
+    ) -> Result<(String, Value, Option<&'static str>)> {
+        if !self.stopped
+            && self
+                .stop_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            anyhow::bail!("Anthropic Messages SSE 在结束事件或 stop_reason 前断开");
+        }
+        for block in self.blocks.into_values() {
+            match block.block_type.as_str() {
+                "text" | "refusal" | "thinking" | "redacted_thinking" => {}
+                "tool_use" => {
+                    if block.id.is_empty() || block.name.is_empty() {
+                        anyhow::bail!("Anthropic 流式 tool_use 缺少 id 或 name");
+                    }
+                    if block.partial_json.trim().is_empty() {
+                        if let Some(input) = &block.input
+                            && !input.is_object()
+                        {
+                            anyhow::bail!("Anthropic 流式 tool_use.input 必须是 JSON 对象");
+                        }
+                    } else {
+                        let parsed = serde_json::from_str::<Value>(&block.partial_json)
+                            .context("Anthropic 流式 tool_use 参数不是有效 JSON")?;
+                        if !parsed.is_object() {
+                            anyhow::bail!("Anthropic 流式 tool_use.input 必须是 JSON 对象");
+                        }
+                    }
+                    let _ = tool_bridge.restore_upstream_name(&block.name)?;
+                }
+                other => anyhow::bail!("不支持的 Anthropic content block 类型 {other}"),
+            }
+        }
+        let incomplete_reason = match self.stop_reason.as_deref() {
+            Some("max_tokens") => Some("max_output_tokens"),
+            Some("refusal") => Some("content_filter"),
+            _ => None,
+        };
+        let raw_usage = Value::Object(self.usage);
+        let input_tokens = observe_anthropic_input_tokens(route, &raw_usage);
+        let usage = anthropic_usage_to_responses_usage(&raw_usage, input_tokens);
+        Ok((self.model, usage, incomplete_reason))
+    }
+
     pub(crate) fn into_message(self) -> Result<Value> {
         if !self.stopped
             && self
@@ -629,32 +678,19 @@ where
             accumulator.ingest(&event)?;
             emit_anthropic_stream_event(&mut output, downstream, &event).await?;
         }
-        // Text is already retained by output. Keep tool and unknown blocks in
-        // the existing conversion so validation and error ordering stay intact.
-        accumulator.blocks.retain(|_, block| {
-            !matches!(
-                block.block_type.as_str(),
-                "text" | "refusal" | "thinking" | "redacted_thinking"
-            )
-        });
-        let message = accumulator.into_message()?;
-        observe_upstream_response_model(request_log_probe.as_ref(), &message);
-        let completed =
-            anthropic_message_to_route_responses_body(&message, model, tool_bridge, route)?;
-        drop(message);
-        if output.output_order.is_empty() {
+        let (upstream_model, usage, incomplete_reason) =
+            accumulator.finish_streaming(route, tool_bridge)?;
+        if let Some(probe) = request_log_probe.as_ref()
+            && !upstream_model.is_empty()
+        {
+            probe.observe_upstream_response_model(&upstream_model);
+        }
+        if output.output_order.is_empty() && output.tools.is_empty() {
             let events = output.ensure_message();
             output.write_events(downstream, events).await?;
         }
-        let usage = completed.get("usage").cloned();
-        let incomplete_reason = completed
-            .get("incomplete_details")
-            .and_then(|details| details.get("reason"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        drop(completed);
         output
-            .finish(downstream, usage, incomplete_reason.as_deref())
+            .finish(downstream, Some(usage), incomplete_reason)
             .await
     }
     .await;
@@ -688,7 +724,6 @@ where
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Anthropic SSE 事件缺少 type"))?;
-    let mut events = Vec::new();
     match event_type {
         "message_start" => {
             if let Some(content) = event
@@ -697,7 +732,7 @@ where
                 .and_then(Value::as_array)
             {
                 for (index, block) in content.iter().enumerate() {
-                    events.extend(anthropic_stream_block_start(output, index, block)?);
+                    emit_anthropic_stream_block_start(output, downstream, index, block).await?;
                 }
             }
         }
@@ -706,7 +741,7 @@ where
             let block = event
                 .get("content_block")
                 .ok_or_else(|| anyhow::anyhow!("content_block_start 缺少 content_block"))?;
-            events.extend(anthropic_stream_block_start(output, index, block)?);
+            emit_anthropic_stream_block_start(output, downstream, index, block).await?;
         }
         "content_block_delta" => {
             let index = anthropic_sse_index(event)?;
@@ -715,21 +750,29 @@ where
                 .and_then(Value::as_object)
                 .ok_or_else(|| anyhow::anyhow!("content_block_delta 缺少 delta"))?;
             match delta.get("type").and_then(Value::as_str) {
-                Some("text_delta") => events.extend(
-                    output.text_delta(
-                        delta
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    ),
-                ),
-                Some("input_json_delta") => events.extend(output.tool_delta(
-                    index,
-                    None,
-                    None,
-                    delta.get("partial_json").and_then(Value::as_str),
-                    None,
-                )?),
+                Some("text_delta") => {
+                    output
+                        .emit_text_delta(
+                            downstream,
+                            delta
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        )
+                        .await?
+                }
+                Some("input_json_delta") => {
+                    output
+                        .emit_tool_delta(
+                            downstream,
+                            index,
+                            None,
+                            None,
+                            delta.get("partial_json").and_then(Value::as_str),
+                            None,
+                        )
+                        .await?
+                }
                 Some("thinking_delta" | "signature_delta" | "citations_delta") => {}
                 Some(other) => anyhow::bail!("不支持的 Anthropic content delta 类型 {other}"),
                 None => anyhow::bail!("Anthropic content delta 缺少 type"),
@@ -738,47 +781,64 @@ where
         "ping" | "content_block_stop" | "message_delta" | "message_stop" => {}
         other => anyhow::bail!("不支持的 Anthropic SSE 事件类型 {other}"),
     }
-    output.write_events(downstream, events).await
+    Ok(())
 }
 
-pub(crate) fn anthropic_stream_block_start(
+async fn emit_anthropic_stream_block_start<D>(
     output: &mut ResponsesSseState<'_>,
+    downstream: &mut D,
     index: usize,
     block: &Value,
-) -> Result<Vec<Value>> {
+) -> Result<()>
+where
+    D: ResponsesDownstream + ?Sized,
+{
     let block_type = block
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Anthropic content block 缺少 type"))?;
     match block_type {
-        "text" => Ok(output.text_delta(
-            block
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )),
-        "refusal" => Ok(output.refusal_delta(
-            block
-                .get("refusal")
-                .or_else(|| block.get("text"))
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )),
+        "text" => {
+            output
+                .emit_text_delta(
+                    downstream,
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+                .await
+        }
+        "refusal" => {
+            output
+                .emit_refusal_delta(
+                    downstream,
+                    block
+                        .get("refusal")
+                        .or_else(|| block.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+                .await
+        }
         "tool_use" => {
             let fallback_arguments = block
                 .get("input")
                 .map(serde_json::to_string)
                 .transpose()
                 .context("序列化 Anthropic tool_use.input 失败")?;
-            output.tool_delta(
-                index,
-                block.get("id").and_then(Value::as_str),
-                block.get("name").and_then(Value::as_str),
-                None,
-                fallback_arguments,
-            )
+            output
+                .emit_tool_delta(
+                    downstream,
+                    index,
+                    block.get("id").and_then(Value::as_str),
+                    block.get("name").and_then(Value::as_str),
+                    None,
+                    fallback_arguments,
+                )
+                .await
         }
-        "thinking" | "redacted_thinking" => Ok(Vec::new()),
+        "thinking" | "redacted_thinking" => Ok(()),
         other => anyhow::bail!("不支持的 Anthropic content block 类型 {other}"),
     }
 }

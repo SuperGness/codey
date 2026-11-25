@@ -357,8 +357,29 @@ pub(crate) struct PortableAttempt {
 }
 
 impl PortableAttempt {
+    #[cfg(test)]
     pub(crate) fn acquire(
         server: &RouterServer,
+        request: &HttpRequest,
+        compacting: bool,
+        snapshot: &RouterSnapshot,
+    ) -> Result<Option<Self>> {
+        let mut bindings = server
+            .bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::acquire_locked(
+            &mut bindings,
+            &server.bindings,
+            request,
+            compacting,
+            snapshot,
+        )
+    }
+
+    pub(crate) fn acquire_locked(
+        bindings: &mut RouteBindings,
+        bindings_arc: &Arc<Mutex<RouteBindings>>,
         request: &HttpRequest,
         compacting: bool,
         snapshot: &RouterSnapshot,
@@ -366,12 +387,6 @@ impl PortableAttempt {
         let Some(key) = portable_request_key(request) else {
             return Ok(None);
         };
-        let mut bindings = server
-            .bindings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let binding = bindings.routes.get(&key).cloned();
-        let source_retry = bindings.portable_source_retries.get(&key).cloned();
         let Some(ticket) = bindings.portable_tickets.get_mut(&key) else {
             return Ok(None);
         };
@@ -390,7 +405,7 @@ impl PortableAttempt {
             ticket.state == "prepared",
             "可移植摘要任务已失效或正在运行，请重新准备"
         );
-        let source_matches = binding.is_some_and(|binding| {
+        let source_matches = bindings.routes.get(&key).is_some_and(|binding| {
             binding.generation == ticket.generation
                 && binding.provider_id == ticket.source.provider_id
                 && binding.upstream_model == ticket.model
@@ -421,19 +436,22 @@ impl PortableAttempt {
         }
         ticket.state = "running";
         let retry_source = std::mem::take(&mut ticket.retry_source)
-            && source_retry.is_some_and(|retry| {
-                retry.expires_at > Instant::now()
-                    && retry.identity
-                        == retry_identity(
-                            &ticket.source,
-                            &ticket.model,
-                            &ticket.target,
-                            &ticket.target_model,
-                            ticket.generation,
-                        )
-            });
+            && bindings
+                .portable_source_retries
+                .get(&key)
+                .is_some_and(|retry| {
+                    retry.expires_at > Instant::now()
+                        && retry.identity
+                            == retry_identity(
+                                &ticket.source,
+                                &ticket.model,
+                                &ticket.target,
+                                &ticket.target_model,
+                                ticket.generation,
+                            )
+                });
         let attempt = Self {
-            bindings: Arc::clone(&server.bindings),
+            bindings: Arc::clone(bindings_arc),
             key,
             token: ticket.token.clone(),
             generation: ticket.generation,
@@ -530,12 +548,11 @@ impl PortableAttempt {
         true
     }
 
-    pub(crate) fn target_metadata(
+    pub(crate) async fn target_metadata(
         &self,
         snapshot: &RouterSnapshot,
     ) -> Option<serde_json::Map<String, Value>> {
-        let metadata =
-            crate::model_catalog::runtime_context_metadata(crate::codex_config::codex_home());
+        let metadata = load_runtime_context_metadata().await;
         let mut value = gateway_compaction_model_metadata(
             &metadata,
             &self.target.provider_id,
@@ -2853,7 +2870,8 @@ mod tests {
     }
 
     fn client() -> reqwest::Client {
-        reqwest::Client::builder()
+        test_http_client_builder()
+            .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap()

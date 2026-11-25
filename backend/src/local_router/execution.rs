@@ -97,7 +97,7 @@ pub(super) struct HttpResponseHead {
 
 impl HttpResponseHead {
     fn capture(response: &reqwest::Response, probe: Option<&RouteRequestLogProbe>) -> Self {
-        if let Some(probe) = probe {
+        if let Some(probe) = probe.filter(|probe| probe.records_diagnostics()) {
             probe.set_upstream_response_headers(&responses::format_upstream_response_headers(
                 response.headers(),
             ));
@@ -105,7 +105,9 @@ impl HttpResponseHead {
         Self {
             status: response.status().as_u16(),
             request_id: upstream_request_id_from_headers(response.headers()),
-            retry_advice: ResponseRetryAdvice::from_headers(response.headers()),
+            retry_advice: (!response.status().is_success())
+                .then(|| ResponseRetryAdvice::from_headers(response.headers()))
+                .flatten(),
         }
     }
 

@@ -29,6 +29,7 @@ pub(crate) struct RuntimeRouterEndpoint {
     pub token: String,
     pub supports_websockets: bool,
     /// 至少一条线路支持原生远程压缩；不影响统一 Provider 的选择。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub supports_remote_compaction: bool,
     /// Official ChatGPT routes are available this launch. Codex keeps its
     /// native OpenAI login for this provider; the independent router header
@@ -106,7 +107,10 @@ pub(crate) const ROUTER_PORT_START: u16 = 26_958;
 pub(crate) const ROUTER_PORT_PROBES: u16 = 64;
 
 const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
 const ROUTER_RESTART_INITIAL_DELAY: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const ROUTER_RESTART_INITIAL_DELAY: Duration = Duration::from_millis(10);
 const ROUTER_RESTART_MAX_DELAY: Duration = Duration::from_secs(5);
 const ROUTER_RESTART_STABLE_PERIOD: Duration = Duration::from_secs(60);
 
@@ -770,7 +774,6 @@ impl LocalRouter {
                 stats.shutdown_timeouts,
             );
         }
-        crate::appserver_call::shutdown().await;
         task_result
     }
 }
@@ -778,7 +781,7 @@ impl LocalRouter {
 /// 上游 HTTP 客户端的统一构造参数；默认客户端和线路代理客户端共用，
 /// 避免两者的连接与协议行为出现差异。
 pub(crate) fn upstream_http_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
         // Reuse a warm TLS connection across normal tool turns while
         // TCP probes evict half-open sockets before the next request.
@@ -800,7 +803,10 @@ pub(crate) fn upstream_http_client_builder() -> reqwest::ClientBuilder {
         .tcp_keepalive(Some(UPSTREAM_TCP_KEEPALIVE_IDLE))
         .tcp_keepalive_interval(Some(UPSTREAM_TCP_KEEPALIVE_INTERVAL))
         .tcp_keepalive_retries(Some(UPSTREAM_TCP_KEEPALIVE_RETRIES))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    #[cfg(test)]
+    let builder = builder.no_proxy().tls_built_in_root_certs(false);
+    builder
 }
 
 #[cfg(not(test))]
@@ -895,6 +901,7 @@ pub(crate) fn enable_downstream_keepalive(stream: &TcpStream) {
 }
 
 pub(crate) struct RouterServer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) endpoint: RuntimeRouterEndpoint,
     pub(crate) token: String,
     pub(crate) bearer_token: String,
@@ -1131,10 +1138,15 @@ impl RouterSnapshot {
                 profile.official_account,
                 &profile.upstream_protocol,
             );
+            let upstream_url = prepare_upstream_url(protocol, &base_url);
+            let is_xai = upstream_url.as_deref().is_ok_and(upstream_is_xai);
+            let replays_reasoning_text = upstream_url
+                .as_deref()
+                .is_ok_and(upstream_replays_reasoning_text);
             let mut target = RouteTarget {
                 provider_id: provider_id.to_string(),
                 route_name: profile.name.trim().to_string(),
-                upstream_url: prepare_upstream_url(protocol, &base_url),
+                upstream_url,
                 upstream_compact_url: prepare_upstream_compact_url(protocol, &base_url),
                 upstream_websocket_url: prepare_upstream_websocket_url(protocol, &base_url),
                 upstream_headers: prepare_upstream_headers(profile, protocol),
@@ -1143,6 +1155,8 @@ impl RouterSnapshot {
                     .filter(|proxy| !proxy.is_empty()),
                 protocol,
                 official_account: profile.official_account,
+                is_xai,
+                replays_reasoning_text,
                 concurrency_key: profile.official_account.then(|| {
                     profile
                         .official_account_id
@@ -1658,6 +1672,8 @@ pub(crate) struct RouteTarget {
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) protocol: UpstreamProtocol,
     pub(crate) official_account: bool,
+    pub(crate) is_xai: bool,
+    pub(crate) replays_reasoning_text: bool,
     pub(crate) concurrency_key: Option<String>,
     pub(crate) max_concurrency: u32,
     pub(crate) official_auth: Option<OfficialRouteAuth>,
@@ -1726,18 +1742,36 @@ fn official_route_auth(
     })
 }
 
-/// 排序默认账号所在的官方线路。凭据文档就是 Codex 登录本身的那条线路，以及
-/// 升级前直接复用 Codex 登录的旧线路，都代表客户端当前的身份；其余存储账号
-/// 的线路排在后面，页头额度和审批复核只认第一条。
+/// 排序默认账号所在的官方线路。凭据文档就是 Codex 登录本身的那条线路排在
+/// 最前，其余存储账号或未绑定凭据的线路排在后面，页头额度和审批复核只认第一条。
 pub(crate) fn default_route_rank(auth: Option<&OfficialRouteAuth>) -> u8 {
     match auth {
         Some(auth) if auth.accepts_incoming_authorization => 0,
-        None => 0,
-        Some(_) => 1,
+        _ => 1,
     }
 }
 
 impl RouteTarget {
+    pub(crate) fn needs_xai_compat(&self, upstream_model: &str) -> bool {
+        self.is_xai || model_is_grok(upstream_model)
+    }
+
+    pub(crate) fn should_replay_reasoning_text(
+        &self,
+        bridge: ProtocolBridge,
+        request_kind: ResponsesRequestKind,
+        compacting: bool,
+    ) -> bool {
+        !self.official_account
+            && !compacting
+            && request_kind == ResponsesRequestKind::Create
+            && matches!(
+                bridge,
+                ProtocolBridge::NativeResponses | ProtocolBridge::ResponsesToChatCompletions
+            )
+            && self.replays_reasoning_text
+    }
+
     /// 该线路是否处于 SIWC 直连平面：上游是 OpenAI 公开 API，凭据来自账号的
     /// SIWC 槽位，与 Codex backend-api 线路的请求头、请求体规则都不同。
     pub(crate) fn uses_siwc(&self) -> bool {

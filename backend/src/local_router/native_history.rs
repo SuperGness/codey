@@ -17,9 +17,13 @@ const NATIVE_HISTORY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 // rather than history items inside one request.
 const NATIVE_HISTORY_CACHE_ENTRIES: usize = 64;
 
+static NATIVE_HISTORY_REJECTION_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 struct NativeHistoryEntry {
     scope: [u8; 32],
     owner: [u8; 32],
+    response_id_hash: Option<[u8; 32]>,
     expires_at: Instant,
     history: Arc<AdaptedResponsesHistory>,
     continuation_rejected: bool,
@@ -82,15 +86,19 @@ impl NativeHistoryCache {
 
     fn mark_requires_http(&mut self, scope: [u8; 32], owner: [u8; 32], id: [u8; 32]) {
         self.prune(Instant::now());
+        let mut marked = false;
         for entry in &mut self.entries {
             if entry.scope == scope
                 && entry.owner == owner
-                && entry.history.last.as_ref().is_some_and(|(response_id, _)| {
-                    <[u8; 32]>::from(Sha256::digest(response_id.as_bytes())) == id
-                })
+                && entry.response_id_hash == Some(id)
+                && !entry.continuation_rejected
             {
                 entry.continuation_rejected = true;
+                marked = true;
             }
+        }
+        if marked {
+            NATIVE_HISTORY_REJECTION_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -100,6 +108,7 @@ impl NativeHistoryCache {
         owner: [u8; 32],
         history: Arc<AdaptedResponsesHistory>,
         continuation_rejected: bool,
+        supersedes: Option<[u8; 32]>,
     ) {
         let now = Instant::now();
         self.prune(now);
@@ -107,6 +116,21 @@ impl NativeHistoryCache {
         if bytes > NATIVE_HISTORY_CACHE_BYTES {
             return;
         }
+        let response_id_hash = history.last_response_id_hash();
+        // 线性续接或同 response_id 写入时淘汰该 (scope, owner) 的被取代快照，
+        // 避免单条长会话占满全局缓存并挤掉其它会话。
+        let mut removed_bytes = 0_usize;
+        self.entries.retain(|entry| {
+            let duplicate = entry.scope == scope
+                && entry.owner == owner
+                && ((response_id_hash.is_some() && entry.response_id_hash == response_id_hash)
+                    || (supersedes.is_some() && entry.response_id_hash == supersedes));
+            if duplicate {
+                removed_bytes += entry.history.retained_bytes();
+            }
+            !duplicate
+        });
+        self.bytes = self.bytes.saturating_sub(removed_bytes);
         while self.entries.len() >= NATIVE_HISTORY_CACHE_ENTRIES
             || self.bytes.saturating_add(bytes) > NATIVE_HISTORY_CACHE_BYTES
         {
@@ -116,6 +140,7 @@ impl NativeHistoryCache {
         self.entries.push_back(NativeHistoryEntry {
             scope,
             owner,
+            response_id_hash,
             expires_at: now + NATIVE_HISTORY_CACHE_TTL,
             continuation_rejected,
             history,
@@ -133,6 +158,7 @@ pub(crate) struct NativeResponsesHistory {
     cache: Arc<Mutex<NativeHistoryCache>>,
     latest: Option<Arc<AdaptedResponsesHistory>>,
     latest_continuation_rejected: bool,
+    observed_rejection_epoch: u64,
     history: AdaptedResponsesHistory,
     unavailable: Option<anyhow::Error>,
 }
@@ -281,6 +307,8 @@ impl NativeResponsesHistory {
             self.refresh_scope = None;
             self.continuation_rejected = false;
         }
+        let current_rejection_epoch =
+            NATIVE_HISTORY_REJECTION_EPOCH.load(std::sync::atomic::Ordering::Acquire);
         let previous = responses_previous_response_id(body)
             .map(|id| {
                 let latest = self.latest.as_ref().filter(|history| {
@@ -289,6 +317,15 @@ impl NativeResponsesHistory {
                         .as_ref()
                         .is_some_and(|(response_id, _)| response_id == id)
                 });
+                if let Some(history) = latest
+                    && (self.latest_continuation_rejected
+                        || self.observed_rejection_epoch == current_rejection_epoch)
+                {
+                    return Ok(Some((
+                        Arc::clone(history),
+                        self.latest_continuation_rejected,
+                    )));
+                }
                 let cached = self.scope.map_or(Ok(None), |scope| {
                     self.cache
                         .lock()
@@ -301,15 +338,15 @@ impl NativeResponsesHistory {
                     Err(_) if latest.is_some() => None,
                     Err(error) => return Err(error),
                 };
+                self.observed_rejection_epoch = current_rejection_epoch;
                 Ok(latest
                     .map(|history| {
-                        (
-                            Arc::clone(history),
-                            self.latest_continuation_rejected
-                                || cached.as_ref().is_some_and(|(_, continuation_rejected)| {
-                                    *continuation_rejected
-                                }),
-                        )
+                        let rejected = self.latest_continuation_rejected
+                            || cached
+                                .as_ref()
+                                .is_some_and(|(_, continuation_rejected)| *continuation_rejected);
+                        self.latest_continuation_rejected = rejected;
+                        (Arc::clone(history), rejected)
                     })
                     .or(cached))
             })
@@ -369,7 +406,7 @@ impl NativeResponsesHistory {
         &self,
         owner: [u8; 32],
         allow_native_compaction: bool,
-    ) -> Result<&[Value]> {
+    ) -> Result<&[Arc<Value>]> {
         if self.owner != Some(owner) {
             anyhow::bail!("上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文");
         }
@@ -409,11 +446,11 @@ impl NativeResponsesHistory {
             return;
         };
         self.continuation_rejected = true;
-        if self.latest.as_ref().is_some_and(|history| {
-            history.last.as_ref().is_some_and(|(response_id, _)| {
-                <[u8; 32]>::from(Sha256::digest(response_id.as_bytes())) == id
-            })
-        }) {
+        if self
+            .latest
+            .as_ref()
+            .is_some_and(|history| history.last_response_id_hash() == Some(id))
+        {
             self.latest_continuation_rejected = true;
         }
         if let (Some(scope), Some(owner)) = (self.scope, self.owner) {
@@ -425,25 +462,50 @@ impl NativeResponsesHistory {
     }
 
     pub(crate) fn observe(&mut self, event: &Value) {
-        if [
-            event.pointer("/error/code"),
-            event.pointer("/error/codey/originalCode"),
-            event.pointer("/response/error/code"),
-            event.pointer("/response/error/codey/originalCode"),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|code| code.as_str() == Some("unsupported_persisted_item_context"))
+        if (event.get("error").is_some() || event.get("response").is_some())
+            && [
+                event.get("error").and_then(|e| e.get("code")),
+                event
+                    .get("error")
+                    .and_then(|e| e.get("codey"))
+                    .and_then(|c| c.get("originalCode")),
+                event
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("code")),
+                event
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("codey"))
+                    .and_then(|c| c.get("originalCode")),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|code| code.as_str() == Some("unsupported_persisted_item_context"))
         {
             self.mark_continuation_rejected();
         }
         if self.history.pending_input.is_none() {
             return;
         }
-        if !responses_event_is_terminal(event) {
+        let event_type = event.get("type").and_then(Value::as_str);
+        if !matches!(
+            event_type,
+            Some("response.completed" | "response.failed" | "response.incomplete" | "error")
+        ) {
             // A streaming upstream reports tool calls here and may still omit
             // them from the terminal output; keep them for the replay.
-            self.history.record_output_item(event);
+            if matches!(
+                event_type,
+                Some(
+                    "response.output_item.added"
+                        | "response.output_item.done"
+                        | "response.function_call_arguments.done"
+                        | "response.custom_tool_call_input.done"
+                )
+            ) {
+                self.history.record_output_item(event);
+            }
             return;
         }
         let response = &event["response"];
@@ -455,7 +517,7 @@ impl NativeResponsesHistory {
         let status = response.get("status").and_then(Value::as_str);
         // 被中断或截断的响应仍由上游保存，Codex 会直接以它的 id 续接；
         // 未完成的压缩不是完整窗口，必须保留上一份历史。
-        let complete = match event.get("type").and_then(Value::as_str) {
+        let complete = match event_type {
             Some("response.completed") => status.is_none_or(|status| {
                 status == "completed" || (!compacting && status == "incomplete")
             }),
@@ -467,6 +529,7 @@ impl NativeResponsesHistory {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty() && id.len() <= 1024);
         let mut remembered = false;
+        let supersedes = self.pending_previous_response;
         if complete && let Some(id) = id {
             let terminal_output = response.get("output").and_then(Value::as_array);
             if terminal_output.is_some() || self.history.has_streamed_output() {
@@ -475,7 +538,7 @@ impl NativeResponsesHistory {
                 let output = terminal_output.map_or(&[][..], Vec::as_slice);
                 if compacting {
                     // 显式压缩的 output 是完整的新窗口，不能再拼接旧历史与触发项。
-                    self.history.pending_input = Some(Vec::new());
+                    self.history.reset_pending_input_for_compaction();
                 }
                 self.unavailable = self.history.remember(id, output).err();
                 remembered = self.unavailable.is_none();
@@ -493,9 +556,12 @@ impl NativeResponsesHistory {
                         owner,
                         Arc::clone(&history),
                         self.continuation_rejected,
+                        supersedes,
                     );
             }
             self.latest_continuation_rejected = self.continuation_rejected;
+            self.observed_rejection_epoch =
+                NATIVE_HISTORY_REJECTION_EPOCH.load(std::sync::atomic::Ordering::Acquire);
             self.latest = Some(history);
         }
     }
@@ -572,11 +638,11 @@ fn replayable_native_agent_message(item: &Value) -> bool {
 }
 
 fn validate_native_tool_history_for_restore(
-    input: &[Value],
+    input: &[Arc<Value>],
     allow_native_compaction: bool,
 ) -> Result<()> {
     if !allow_native_compaction {
-        return validate_native_tool_history(input, true);
+        return validate_native_tool_history_iter(input.iter().map(Arc::as_ref), true);
     }
     for item in input {
         match item.get("type").and_then(Value::as_str) {
@@ -597,7 +663,7 @@ fn validate_native_tool_history_for_restore(
             _ => {}
         }
     }
-    validate_native_tool_history(input, false)
+    validate_native_tool_history_iter(input.iter().map(Arc::as_ref), false)
 }
 
 fn tool_name_label(item: &Value) -> String {
@@ -614,14 +680,14 @@ fn tool_name_label(item: &Value) -> String {
 /// upstream already answered. Reasoning with nothing replayable is dropped
 /// instead; the per-route normalization that follows decides how the
 /// surviving items travel.
-fn replayable_native_history(input: &[Value]) -> Vec<Value> {
+fn replayable_native_history(input: &[Arc<Value>]) -> Vec<Value> {
     input
         .iter()
         .filter(|item| {
             item.get("type").and_then(Value::as_str) != Some("reasoning")
                 || replayable_reasoning_item(item)
         })
-        .cloned()
+        .map(|item| (**item).clone())
         .collect()
 }
 
@@ -634,9 +700,16 @@ fn replayable_reasoning_item(item: &Value) -> bool {
 }
 
 fn validate_native_tool_history(input: &[Value], restoring: bool) -> Result<()> {
+    validate_native_tool_history_iter(input.iter(), restoring)
+}
+
+fn validate_native_tool_history_iter<'a>(
+    input: impl Iterator<Item = &'a Value>,
+    restoring: bool,
+) -> Result<()> {
     let mut calls = HashSet::new();
     for item in input {
-        if codey_summary_message(item)?.is_some() {
+        if has_valid_codey_summary_marker(item)? {
             continue;
         }
         let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();

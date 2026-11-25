@@ -31,6 +31,8 @@ impl RejectedReasoningItems {
 
 static REJECTED_REASONING_ITEMS: LazyLock<Mutex<RejectedReasoningItems>> =
     LazyLock::new(Mutex::default);
+static HAS_REJECTED_REASONING_ITEMS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn rejected_reasoning_items() -> std::sync::MutexGuard<'static, RejectedReasoningItems> {
     REJECTED_REASONING_ITEMS
@@ -78,6 +80,7 @@ pub(crate) fn record_rejected_reasoning_item(id: &str) {
     if !rejected_reasoning_items().insert(id) {
         return;
     }
+    HAS_REJECTED_REASONING_ITEMS.store(true, std::sync::atomic::Ordering::Release);
     record_router_failure_nonblocking(
         "local_router_reasoning_item_rejected",
         "strip_rejected_reasoning_item",
@@ -89,6 +92,9 @@ pub(crate) fn record_rejected_reasoning_item(id: &str) {
 /// 去掉上游拒绝过的 reasoning 项：保留可见摘要并删除 id 与密文，
 /// 没有可见文本时整项删除。其它条目即使 id 相同也不改动。
 pub(crate) fn strip_rejected_reasoning_items(body: &mut Value) -> bool {
+    if !HAS_REJECTED_REASONING_ITEMS.load(std::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
     let rejected_items = rejected_reasoning_items();
     if rejected_items.ids.is_empty() {
         return false;
@@ -280,7 +286,7 @@ mod tests {
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
         for _ in 0..2 {
-            let response = reqwest::Client::new()
+            let response = test_http_client()
                 .post(format!("{}/responses", endpoint.base_url))
                 .bearer_auth(&endpoint.token)
                 .json(&json!({

@@ -1143,7 +1143,7 @@ async fn plugin_retry_keeps_the_body_when_plugins_are_disabled_during_upload() {
     let body = Bytes::from_static(br#"{"input":"same"}"#);
     with_test_plugins(Vec::new(), async {
         assert!(!has_plugins());
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = test_http_client_builder().no_proxy().build().unwrap();
         let mut headers = HeaderMap::new();
         let mut downstream = CapturedDownstream::default();
         let mut attempts = AttemptBudget::default();

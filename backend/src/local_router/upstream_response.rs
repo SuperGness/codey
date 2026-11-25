@@ -58,11 +58,6 @@ pub(crate) async fn prepare_upstream_response(
 ) -> Result<PreparedUpstreamResponse> {
     let retry_advice = ResponseRetryAdvice::from_headers(response.headers());
     let deadline = upstream_response_body_deadline();
-    if let Some(probe) = probe {
-        probe.set_upstream_response_headers(&super::responses::format_upstream_response_headers(
-            response.headers(),
-        ));
-    }
     if response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -338,7 +333,6 @@ pub(crate) async fn write_proxy_response(
 ) -> Result<()> {
     let status = response.status().as_u16();
     let reason = reason_phrase(status);
-    let retry_advice = ResponseRetryAdvice::from_headers(response.headers());
     let original_content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -359,8 +353,8 @@ pub(crate) async fn write_proxy_response(
         forwarded_headers.push_str("\r\n");
     }
     let mut prepared = prepare_upstream_response(response, "读取上游响应失败", probe).await?;
+    let retry_advice = prepared.retry_advice.take();
     let upstream_is_sse = prepared.is_sse;
-    let mut terminal = (upstream_is_sse && validate_responses).then(NativeSseTerminal::default);
     let content_type = if upstream_is_sse {
         "text/event-stream"
     } else {
@@ -383,11 +377,16 @@ pub(crate) async fn write_proxy_response(
     let response_fix = current_native_response_fix();
     let mut sse_rewriter = (upstream_is_sse && (validate_responses || response_fix.is_some()))
         .then(|| {
-            ResponsesSseRewriter::new(
+            let rewriter = ResponsesSseRewriter::new(
                 response_fix.as_ref(),
                 validate_responses,
                 retry_advice.as_ref(),
-            )
+            );
+            if validate_responses {
+                rewriter.with_terminal_validation()
+            } else {
+                rewriter
+            }
         });
     let mut buffered_json = response_fix
         .as_ref()
@@ -414,23 +413,22 @@ pub(crate) async fn write_proxy_response(
             buffered.extend_from_slice(&chunk);
             continue;
         }
-        let rewritten = sse_rewriter
-            .as_mut()
-            .map(|rewriter| rewriter.push(&chunk))
-            .transpose()?;
-        let output = rewritten.as_deref().unwrap_or(&chunk);
+        let output = match sse_rewriter.as_mut() {
+            Some(rewriter) => {
+                let Some(output) = rewriter.push_bytes(chunk)? else {
+                    continue;
+                };
+                finished = rewriter.terminal();
+                output
+            }
+            None => chunk,
+        };
         if output.is_empty() {
             continue;
         }
-        finished = match terminal.as_mut() {
-            Some(terminal) => terminal.observe(output)?,
-            None => false,
-        };
-        write_chunked_frame(stream, output, "写入上游响应块失败").await?;
+        write_chunked_frame(stream, &output, "写入上游响应块失败").await?;
         if let Some(tap) = log_tap.as_mut() {
-            // 下游写入完成后再共享缓冲区，关闭日志时无需创建共享所有权。
-            let observed = rewritten.map(Bytes::from).unwrap_or(chunk);
-            tap.observe(&observed);
+            tap.observe(&output);
         }
         if !upstream_is_sse && let Some(probe) = probe {
             probe.mark_first_downstream_content();
@@ -440,16 +438,14 @@ pub(crate) async fn write_proxy_response(
         }
     }
     if !finished && let Some(rewriter) = sse_rewriter.as_mut() {
-        let tail = rewriter.finish();
+        let tail = rewriter.finish_tail()?;
         if !tail.is_empty() {
-            if let Some(terminal) = terminal.as_mut() {
-                terminal.observe(&tail)?;
-            }
             write_chunked_frame(stream, &tail, "写入上游响应块失败").await?;
             if let Some(tap) = log_tap.as_mut() {
                 tap.observe(&Bytes::from(tail));
             }
         }
+        rewriter.ensure_terminal()?;
     }
     if let Some(buffered) = buffered_json {
         let output = response_fix
@@ -465,9 +461,6 @@ pub(crate) async fn write_proxy_response(
                 probe.mark_first_downstream_content();
             }
         }
-    }
-    if let Some(terminal) = terminal.as_mut() {
-        terminal.finish()?;
     }
     if let Some(tap) = log_tap.as_mut() {
         tap.finish();
@@ -509,7 +502,7 @@ mod tests {
             stream.write_all(headers.as_bytes()).await.unwrap();
             stream.write_all(&body).await.unwrap();
         });
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .get(format!("http://{upstream_address}/responses"))
             .send()
             .await

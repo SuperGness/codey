@@ -500,7 +500,7 @@ fn send_request(
     let token = router.endpoint.token.clone();
     let model = model.to_string();
     tokio::spawn(async move {
-        reqwest::Client::builder()
+        super::test_http_client_builder()
             .no_proxy()
             .build()
             .unwrap()
@@ -771,7 +771,7 @@ async fn compact_and_image_requests_share_the_generation_queue() {
         let url = format!("{}/{path}", router.endpoint.base_url);
         let token = router.endpoint.token.clone();
         let second = tokio::spawn(async move {
-            reqwest::Client::builder()
+            super::test_http_client_builder()
                 .no_proxy()
                 .build()
                 .unwrap()

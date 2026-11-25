@@ -417,6 +417,68 @@ impl ChatSseAccumulator {
         Ok(())
     }
 
+    pub(crate) fn finish_streaming(
+        mut self,
+        done: bool,
+        tool_bridge: &ResponsesToolBridge,
+    ) -> Result<(String, Option<Value>, Option<&'static str>)> {
+        if !done
+            && self
+                .finish_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            anyhow::bail!("Chat Completions SSE 在 [DONE] 或 finish_reason 前断开");
+        }
+        self.tool_calls.retain(|_, tool| {
+            !(tool.name.is_empty() && tool.arguments.is_empty() && tool.id.is_empty())
+        });
+        if let Some((target, source)) =
+            chat_tool_merge_pair(&self.tool_calls, |tool| tool.name.is_empty())
+            && let Some(merged) = self.tool_calls.remove(&source)
+        {
+            let tool = self
+                .tool_calls
+                .get_mut(&target)
+                .expect("named tool call exists");
+            if tool.id.is_empty() {
+                tool.id = merged.id;
+            }
+            if tool.arguments.is_empty() {
+                tool.arguments = merged.arguments;
+            } else {
+                tool.arguments.push_str(&merged.arguments);
+            }
+        }
+        let finish_reason = self.finish_reason.as_deref().unwrap_or("unknown");
+        for tool_call in self.tool_calls.values() {
+            if tool_call.name.is_empty() {
+                anyhow::bail!("Chat stream tool_call 缺少 function.name");
+            }
+            let tool_name = tool_bridge
+                .restore_upstream_name(&tool_call.name)
+                .with_context(|| {
+                    format!("转换 Chat Completions 流式结果失败（finish_reason={finish_reason}）")
+                })?;
+            if tool_name.is_custom() {
+                custom_tool_input_from_arguments(
+                    &tool_call.arguments,
+                    "Chat custom tool_call.function.arguments",
+                )
+                .with_context(|| {
+                    format!("转换 Chat Completions 流式结果失败（finish_reason={finish_reason}）")
+                })?;
+            }
+        }
+        let incomplete_reason = match self.finish_reason.as_deref() {
+            Some("length") => Some("max_output_tokens"),
+            Some("content_filter") => Some("content_filter"),
+            _ => None,
+        };
+        let usage = self.usage.as_ref().map(chat_usage_to_responses_usage);
+        Ok((self.model, usage, incomplete_reason))
+    }
+
     pub(crate) fn into_chat_completion(mut self, done: bool) -> Result<Value> {
         if !done
             && self
@@ -581,32 +643,18 @@ where
                 emit_chat_stream_event(&mut output, downstream, &event).await?;
             }
         }
-        let chat = accumulator.into_chat_completion(done)?;
-        observe_upstream_response_model(request_log_probe.as_ref(), &chat);
-        let finish_reason = chat
-            .pointer("/choices/0/finish_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
-        let completed =
-            chat_completion_to_responses_body_with_tool_bridge(chat, model, tool_bridge)
-                .with_context(|| {
-                    format!("转换 Chat Completions 流式结果失败（finish_reason={finish_reason}）")
-                })?;
-        if output.output_order.is_empty() {
+        let (upstream_model, usage, incomplete_reason) =
+            accumulator.finish_streaming(done, tool_bridge)?;
+        if let Some(probe) = request_log_probe.as_ref()
+            && !upstream_model.is_empty()
+        {
+            probe.observe_upstream_response_model(&upstream_model);
+        }
+        if output.output_order.is_empty() && output.tools.is_empty() {
             let events = output.ensure_message();
             output.write_events(downstream, events).await?;
         }
-        let usage = completed.get("usage").cloned();
-        let incomplete_reason = completed
-            .get("incomplete_details")
-            .and_then(|details| details.get("reason"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        drop(completed);
-        output
-            .finish(downstream, usage, incomplete_reason.as_deref())
-            .await
+        output.finish(downstream, usage, incomplete_reason).await
     }
     .await;
     if let Err(error) = result {
@@ -700,7 +748,6 @@ pub(crate) async fn emit_chat_stream_event<D>(
 where
     D: ResponsesDownstream + ?Sized,
 {
-    let mut events = Vec::new();
     check_upstream_stream_failure(event)?;
     let Some(choices) = event.get("choices").and_then(Value::as_array) else {
         return Ok(());
@@ -717,13 +764,20 @@ where
             continue;
         };
         if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
-            events.extend(output.reasoning_delta(reasoning));
+            let events = output.reasoning_delta(reasoning);
+            output.write_events(downstream, events).await?;
         }
         if let Some(content) = delta.get("content") {
-            events.extend(output.text_delta(&chat_message_content_text(content)));
+            match content {
+                Value::String(text) => output.emit_text_delta(downstream, text).await?,
+                other => {
+                    let text = chat_message_content_text(other);
+                    output.emit_text_delta(downstream, &text).await?;
+                }
+            }
         }
         if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
-            events.extend(output.refusal_delta(refusal));
+            output.emit_refusal_delta(downstream, refusal).await?;
         }
         if let Some(tool_calls) = delta
             .get("tool_calls")
@@ -742,8 +796,9 @@ where
                 let arguments_delta = function
                     .and_then(|function| function.get("arguments"))
                     .and_then(|arguments| json_value_as_chat_string(Some(arguments)));
-                events.extend(
-                    output.tool_delta(
+                output
+                    .emit_tool_delta(
+                        downstream,
                         index,
                         tool_call.get("id").and_then(Value::as_str),
                         function
@@ -751,8 +806,8 @@ where
                             .and_then(Value::as_str),
                         arguments_delta.as_deref(),
                         None,
-                    )?,
-                );
+                    )
+                    .await?;
             }
         }
         if let Some(function_call) = delta.get("function_call") {
@@ -762,16 +817,19 @@ where
             let arguments_delta = function_call
                 .get("arguments")
                 .and_then(|arguments| json_value_as_chat_string(Some(arguments)));
-            events.extend(output.tool_delta(
-                chat_legacy_tool_slot(output.tools.get(&0).map(|tool| tool.name.as_str())),
-                None,
-                function_call.get("name").and_then(Value::as_str),
-                arguments_delta.as_deref(),
-                None,
-            )?);
+            output
+                .emit_tool_delta(
+                    downstream,
+                    chat_legacy_tool_slot(output.tools.get(&0).map(|tool| tool.name.as_str())),
+                    None,
+                    function_call.get("name").and_then(Value::as_str),
+                    arguments_delta.as_deref(),
+                    None,
+                )
+                .await?;
         }
     }
-    output.write_events(downstream, events).await
+    Ok(())
 }
 
 pub(crate) fn parse_chat_completion_sse_bytes(bytes: &[u8], model: &str) -> Result<Value> {

@@ -108,6 +108,27 @@ struct ProjectedDeltaCounter {
 }
 
 impl ProjectedDeltaCounter {
+    fn observe_plain_bytes(&mut self, mut bytes: &[u8]) {
+        if self.escaped || self.unicode_remaining > 0 {
+            while let Some((&byte, rest)) = bytes.split_first() {
+                self.observe(byte);
+                bytes = rest;
+                if !self.escaped && self.unicode_remaining == 0 {
+                    break;
+                }
+            }
+        }
+        let mut added = 0_u64;
+        for &byte in bytes {
+            if byte < 128 {
+                added += 1;
+            } else if byte >= 0xc2 {
+                added += 4;
+            }
+        }
+        self.quarters = self.quarters.saturating_add(added);
+    }
+
     fn observe(&mut self, byte: u8) {
         if self.unicode_remaining > 0 {
             let Some(digit) = (byte as char).to_digit(16) else {
@@ -581,9 +602,11 @@ impl RequestLogMetadataProjector {
         probe: &RouteRequestLogProbe,
         written_at: Instant,
     ) -> std::result::Result<(), &'static str> {
-        for &byte in bytes {
+        let mut idx = 0;
+        while idx < bytes.len() {
             if let Some(capture) = self.usage.as_mut() {
-                let complete = capture.observe_byte(byte)?;
+                let complete = capture.observe_byte(bytes[idx])?;
+                idx += 1;
                 if complete {
                     let capture = self.usage.take().expect("usage capture exists");
                     probe.observe_event_at(&json!({"usage": capture.into_value()}), written_at);
@@ -592,14 +615,49 @@ impl RequestLogMetadataProjector {
             }
 
             if self.in_string {
-                if matches!(self.capturing_scalar, Some(ProjectedMetadataScalar::Delta)) {
+                let is_delta =
+                    matches!(self.capturing_scalar, Some(ProjectedMetadataScalar::Delta));
+                if self.escaped {
+                    let byte = bytes[idx];
+                    idx += 1;
+                    if is_delta {
+                        self.delta_counter.observe(byte);
+                    }
+                    self.escaped = false;
+                    continue;
+                }
+                let rest = &bytes[idx..];
+                let special = memchr::memchr2(b'"', b'\\', rest);
+                let span = match special {
+                    Some(rel) => &rest[..rel],
+                    None => rest,
+                };
+                if !span.is_empty() {
+                    if is_delta {
+                        self.delta_counter.observe_plain_bytes(span);
+                        self.string_overflow = true;
+                    } else if !self.string_overflow {
+                        let remaining = REQUEST_LOG_METADATA_STRING_BYTES - self.string.len();
+                        if span.len() <= remaining {
+                            self.string.extend_from_slice(span);
+                        } else {
+                            self.string.extend_from_slice(&span[..remaining]);
+                            self.string_overflow = true;
+                        }
+                    }
+                    idx += span.len();
+                }
+                let Some(rel) = special else {
+                    break;
+                };
+                let byte = rest[rel];
+                idx += 1;
+                if is_delta {
                     self.delta_counter.observe(byte);
                 }
-                if self.escaped {
-                    self.escaped = false;
-                } else if byte == b'\\' {
+                if byte == b'\\' {
                     self.escaped = true;
-                } else if byte == b'"' {
+                } else {
                     self.in_string = false;
                     if let Some(field) = self.capturing_scalar.take() {
                         match field {
@@ -652,14 +710,12 @@ impl RequestLogMetadataProjector {
                             .then(|| projected_metadata_key(&self.string))
                             .flatten();
                     }
-                } else if self.string.len() < REQUEST_LOG_METADATA_STRING_BYTES {
-                    self.string.push(byte);
-                } else {
-                    self.string_overflow = true;
                 }
                 continue;
             }
 
+            let byte = bytes[idx];
+            idx += 1;
             match byte {
                 b'"' => {
                     self.in_string = true;

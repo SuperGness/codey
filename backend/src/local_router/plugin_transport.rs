@@ -146,9 +146,13 @@ async fn send_inner(
         }
     }
     drop(body);
+    let mut pending_backoff = Duration::from_millis(1);
     let (status, response_headers) = loop {
         match request.frame().await? {
-            Frame::Pending => tokio::time::sleep(Duration::from_millis(10)).await,
+            Frame::Pending => {
+                tokio::time::sleep(pending_backoff).await;
+                pending_backoff = (pending_backoff * 2).min(Duration::from_millis(10));
+            }
             Frame::Headers { status, headers } if (200..=599).contains(&status) => {
                 break (status, headers);
             }
@@ -161,11 +165,14 @@ async fn send_inner(
         response = response.header(name, value);
     }
     let stream = futures_util::stream::try_unfold(
-        (request, 0usize),
-        |(mut request, mut received)| async move {
+        (request, 0usize, Duration::from_millis(1)),
+        |(mut request, mut received, mut pending_backoff)| async move {
             loop {
                 match request.frame().await.map_err(std::io::Error::other)? {
-                    Frame::Pending => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Frame::Pending => {
+                        tokio::time::sleep(pending_backoff).await;
+                        pending_backoff = (pending_backoff * 2).min(Duration::from_millis(10));
+                    }
                     Frame::Data { data } => {
                         if data.len() > wire::CHUNK_BYTES * 2 {
                             return Err(std::io::Error::other("plugin_chunk_too_large"));
@@ -182,7 +189,10 @@ async fn send_inner(
                         if received > wire::MAX_BODY_BYTES {
                             return Err(std::io::Error::other("upstream_body_too_large"));
                         }
-                        return Ok(Some((Bytes::from(bytes), (request, received))));
+                        return Ok(Some((
+                            Bytes::from(bytes),
+                            (request, received, Duration::from_millis(1)),
+                        )));
                     }
                     Frame::End => {
                         request.finish();

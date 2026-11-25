@@ -75,7 +75,7 @@ impl std::fmt::Display for AccountUsageUnauthorized {
 
 impl std::error::Error for AccountUsageUnauthorized {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OfficialAuthFingerprint {
     len: u64,
     modified: SystemTime,
@@ -89,50 +89,105 @@ pub(crate) fn official_auth_fingerprint(path: &Path) -> Option<OfficialAuthFinge
     })
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct OfficialAuthCache {
-    cached: Option<std::result::Result<Arc<OfficialAuth>, String>>,
+#[derive(Debug)]
+pub(crate) struct FileCredentialCache<T> {
+    cached: Option<std::result::Result<Arc<T>, String>>,
     fingerprint: Option<OfficialAuthFingerprint>,
     expires_at: Option<Instant>,
     last_used: u64,
 }
 
-impl OfficialAuthCache {
-    /// Returns the cached auth (or cached read failure) without reading the file
-    /// contents. After the short TTL, a matching size/mtime fingerprint still
-    /// reuses the cache so unchanged credentials skip JSON parsing.
-    pub(crate) fn get(
-        &mut self,
-        path: &Path,
-        now: Instant,
-    ) -> Option<std::result::Result<Arc<OfficialAuth>, String>> {
-        if self.expires_at.is_some_and(|expires_at| now < expires_at) {
-            return self.cached.clone();
+impl<T> Default for FileCredentialCache<T> {
+    fn default() -> Self {
+        Self {
+            cached: None,
+            fingerprint: None,
+            expires_at: None,
+            last_used: 0,
         }
-        if self.cached.is_none() || self.fingerprint.is_none() {
-            return None;
+    }
+}
+
+pub(crate) enum CredentialCacheLookup<T> {
+    Hit(std::result::Result<Arc<T>, String>),
+    Revalidate {
+        cached: std::result::Result<Arc<T>, String>,
+        fingerprint: OfficialAuthFingerprint,
+    },
+    Miss,
+}
+
+impl<T> FileCredentialCache<T> {
+    /// Checks in-memory TTL without performing filesystem I/O under a lock.
+    pub(crate) fn lookup_without_io(&self, now: Instant) -> CredentialCacheLookup<T> {
+        if self.expires_at.is_some_and(|expires_at| now < expires_at)
+            && let Some(cached) = &self.cached
+        {
+            return CredentialCacheLookup::Hit(cached.clone());
         }
-        if official_auth_fingerprint(path) != self.fingerprint {
-            return None;
+        if let (Some(cached), Some(fingerprint)) = (&self.cached, self.fingerprint) {
+            return CredentialCacheLookup::Revalidate {
+                cached: cached.clone(),
+                fingerprint,
+            };
         }
-        self.expires_at = Some(now + OFFICIAL_AUTH_REVALIDATE_TTL);
-        self.cached.clone()
+        CredentialCacheLookup::Miss
     }
 
-    /// Stores an auth-file read result for the short revalidation interval.
-    pub(crate) fn store(
+    pub(crate) fn extend_if_unchanged(
         &mut self,
-        path: &Path,
-        result: Result<OfficialAuth>,
+        expected: OfficialAuthFingerprint,
         now: Instant,
-    ) -> Result<Arc<OfficialAuth>> {
+    ) -> Option<std::result::Result<Arc<T>, String>> {
+        if self.fingerprint == Some(expected) {
+            self.expires_at = Some(now + OFFICIAL_AUTH_REVALIDATE_TTL);
+            return self.cached.clone();
+        }
+        None
+    }
+
+    pub(crate) fn store_with_fingerprint(
+        &mut self,
+        fingerprint: Option<OfficialAuthFingerprint>,
+        result: Result<T>,
+        now: Instant,
+    ) -> Result<Arc<T>> {
         let result = result.map(Arc::new).map_err(|error| error.to_string());
-        self.fingerprint = official_auth_fingerprint(path);
+        self.fingerprint = fingerprint;
         self.cached = Some(result.clone());
         self.expires_at = Some(now + OFFICIAL_AUTH_REVALIDATE_TTL);
         result.map_err(anyhow::Error::msg)
     }
 
+    /// Returns the cached credential (or cached read failure) without reading the file
+    /// contents. After the short TTL, a matching size/mtime fingerprint still
+    /// reuses the cache so unchanged credentials skip JSON parsing.
+    #[cfg(test)]
+    pub(crate) fn get(
+        &mut self,
+        path: &Path,
+        now: Instant,
+    ) -> Option<std::result::Result<Arc<T>, String>> {
+        match self.lookup_without_io(now) {
+            CredentialCacheLookup::Hit(cached) => Some(cached),
+            CredentialCacheLookup::Revalidate { fingerprint, .. } => {
+                if official_auth_fingerprint(path) != Some(fingerprint) {
+                    return None;
+                }
+                self.extend_if_unchanged(fingerprint, now)
+            }
+            CredentialCacheLookup::Miss => None,
+        }
+    }
+
+    /// Stores a credential-file read result for the short revalidation interval.
+    #[cfg(test)]
+    pub(crate) fn store(&mut self, path: &Path, result: Result<T>, now: Instant) -> Result<Arc<T>> {
+        self.store_with_fingerprint(official_auth_fingerprint(path), result, now)
+    }
+}
+
+impl FileCredentialCache<OfficialAuth> {
     #[cfg(test)]
     fn read_at(&mut self, path: &Path, now: Instant) -> Result<OfficialAuth> {
         match self.get(path, now) {
@@ -146,17 +201,26 @@ impl OfficialAuthCache {
     }
 }
 
-/// Credential reads of several official accounts at once. Every account reads
+/// Credential reads of several accounts at once. Every account reads
 /// its own document, so one account never answers with another account's
 /// token.
-#[derive(Debug, Default)]
-pub(crate) struct OfficialAuthCaches {
-    caches: HashMap<String, OfficialAuthCache>,
+#[derive(Debug)]
+pub(crate) struct FileCredentialCaches<T> {
+    caches: HashMap<String, FileCredentialCache<T>>,
     usage_clock: u64,
 }
 
-impl OfficialAuthCaches {
-    pub(crate) fn for_path(&mut self, auth_path: &Path) -> &mut OfficialAuthCache {
+impl<T> Default for FileCredentialCaches<T> {
+    fn default() -> Self {
+        Self {
+            caches: HashMap::new(),
+            usage_clock: 0,
+        }
+    }
+}
+
+impl<T> FileCredentialCaches<T> {
+    pub(crate) fn for_path(&mut self, auth_path: &Path) -> &mut FileCredentialCache<T> {
         let key = auth_path.to_string_lossy().into_owned();
         if !self.caches.contains_key(&key) && self.caches.len() >= MAX_ACCOUNT_USAGE_CACHES {
             evict_least_recently_used(&mut self.caches, |cache| cache.last_used);
@@ -166,6 +230,79 @@ impl OfficialAuthCaches {
         let cache = self.caches.entry(key).or_default();
         cache.last_used = last_used;
         cache
+    }
+}
+
+#[cfg(test)]
+pub(crate) type OfficialAuthCache = FileCredentialCache<OfficialAuth>;
+pub(crate) type OfficialAuthCaches = FileCredentialCaches<OfficialAuth>;
+
+/// Reads a file-backed credential through the shared TTL/fingerprint cache
+/// without performing any filesystem I/O while holding `caches` or on Tokio
+/// worker threads.
+pub(crate) async fn read_cached_file_credential<T, F>(
+    path: &Path,
+    caches: &std::sync::Mutex<FileCredentialCaches<T>>,
+    task_error: &'static str,
+    read: F,
+) -> Result<Arc<T>>
+where
+    T: Send + Sync + 'static,
+    F: FnOnce(&Path) -> Result<T> + Send + 'static,
+{
+    let now = Instant::now();
+    let lookup = caches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .for_path(path)
+        .lookup_without_io(now);
+    let expected_fingerprint = match lookup {
+        CredentialCacheLookup::Hit(result) => return result.map_err(anyhow::Error::msg),
+        CredentialCacheLookup::Revalidate {
+            cached,
+            fingerprint,
+        } => Some((cached, fingerprint)),
+        CredentialCacheLookup::Miss => None,
+    };
+
+    let read_path = path.to_path_buf();
+    let expected_fp = expected_fingerprint.as_ref().map(|(_, fp)| *fp);
+    enum IoOutcome<T> {
+        Unchanged(OfficialAuthFingerprint),
+        Reloaded(Result<T>, Option<OfficialAuthFingerprint>),
+    }
+    let outcome = tokio::task::spawn_blocking(move || {
+        if let Some(expected) = expected_fp
+            && official_auth_fingerprint(&read_path) == Some(expected)
+        {
+            return IoOutcome::Unchanged(expected);
+        }
+        let result = read(&read_path);
+        let fingerprint = official_auth_fingerprint(&read_path);
+        IoOutcome::Reloaded(result, fingerprint)
+    })
+    .await
+    .context(task_error)?;
+
+    let now = Instant::now();
+    let mut caches = caches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = caches.for_path(path);
+    match outcome {
+        IoOutcome::Unchanged(expected) => {
+            if let Some(result) = cache.extend_if_unchanged(expected, now) {
+                return result.map_err(anyhow::Error::msg);
+            }
+            let (cached, _) = expected_fingerprint.expect("revalidation had cached entry");
+            cached.map_err(anyhow::Error::msg)
+        }
+        IoOutcome::Reloaded(result, fingerprint) => {
+            if let CredentialCacheLookup::Hit(cached) = cache.lookup_without_io(now) {
+                return cached.map_err(anyhow::Error::msg);
+            }
+            cache.store_with_fingerprint(fingerprint, result, now)
+        }
     }
 }
 
@@ -356,7 +493,12 @@ impl AccountUsageCache {
         force_refresh: bool,
         upstream_proxy: Option<&str>,
     ) -> Result<AccountUsageSnapshot> {
-        self.observe_auth_fingerprint(official_auth_fingerprint(auth_path));
+        let fp_path = auth_path.to_path_buf();
+        let initial_fp = tokio::task::spawn_blocking(move || official_auth_fingerprint(&fp_path))
+            .await
+            .ok()
+            .flatten();
+        self.observe_auth_fingerprint(initial_fp);
         let generation = self.auth_generation;
         if force_refresh {
             self.expires_at = None;
@@ -365,17 +507,19 @@ impl AccountUsageCache {
             return cached.map_err(anyhow::Error::msg);
         }
 
-        // reqwest snapshots the current system proxy when a client is built. Rebuild the
-        // dedicated usage client for each network refresh so proxy changes do not require
-        // restarting Codey. Cached results still avoid unnecessary requests and rebuilds.
-        // 官方线路配置了上游代理时，额度查询走同一出口，避免同一账号同时从
-        // 两个地区访问。
-        let result = match account_usage_http_client(upstream_proxy) {
+        // 默认走共享的 SystemProxyClient 跟随系统代理变化，配置了上游代理时按
+        // 代理地址复用客户端，避免每次刷新都重新构建 reqwest::Client 与加载证书。
+        let result = match account_usage_http_client(upstream_proxy).await {
             Ok(client) => fetch_official_account_usage(&client, auth_path).await,
             Err(error) => Err(error),
         };
 
-        self.observe_auth_fingerprint(official_auth_fingerprint(auth_path));
+        let fp_path = auth_path.to_path_buf();
+        let final_fp = tokio::task::spawn_blocking(move || official_auth_fingerprint(&fp_path))
+            .await
+            .ok()
+            .flatten();
+        self.observe_auth_fingerprint(final_fp);
         if generation != self.auth_generation {
             bail!("官方登录状态已变化，请重新读取额度");
         }
@@ -516,17 +660,55 @@ pub(crate) async fn query_snapshot_at(
     value
 }
 
-fn account_usage_http_client(upstream_proxy: Option<&str>) -> Result<Client> {
-    let mut builder = Client::builder()
+fn account_usage_default_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
         .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(ACCOUNT_USAGE_CONNECT_TIMEOUT);
+        .connect_timeout(ACCOUNT_USAGE_CONNECT_TIMEOUT)
+}
+
+async fn account_usage_http_client(upstream_proxy: Option<&str>) -> Result<Client> {
     if let Some(proxy) = upstream_proxy
         .map(str::trim)
         .filter(|proxy| !proxy.is_empty())
     {
-        builder = builder.proxy(reqwest::Proxy::all(proxy).context("官方线路的上游代理地址无效")?);
+        static PROXIED_CLIENTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Client>>> =
+            std::sync::OnceLock::new();
+        let clients = PROXIED_CLIENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        if let Some(client) = clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(proxy)
+            .cloned()
+        {
+            return Ok(client);
+        }
+        let proxy_owned = proxy.to_string();
+        let client = tokio::task::spawn_blocking(move || {
+            account_usage_default_client_builder()
+                .proxy(reqwest::Proxy::all(&proxy_owned).context("官方线路的上游代理地址无效")?)
+                .build()
+                .context("创建官方额度网络客户端失败")
+        })
+        .await
+        .context("创建官方额度网络客户端任务异常退出")??;
+        let mut guard = clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.len() >= MAX_ACCOUNT_USAGE_CACHES && !guard.contains_key(proxy) {
+            guard.clear();
+        }
+        guard.insert(proxy.to_string(), client.clone());
+        return Ok(client);
     }
-    builder.build().context("创建官方额度网络客户端失败")
+
+    static DEFAULT_CLIENT: tokio::sync::OnceCell<crate::system_proxy_client::SystemProxyClient> =
+        tokio::sync::OnceCell::const_new();
+    let shared = DEFAULT_CLIENT
+        .get_or_try_init(|| {
+            crate::system_proxy_client::SystemProxyClient::new(account_usage_default_client_builder)
+        })
+        .await?;
+    Ok(shared.current(USAGE_ENDPOINTS[0]).await)
 }
 
 fn account_usage_failure_backoff(consecutive_failures: u32) -> Duration {
@@ -1044,7 +1226,11 @@ mod tests {
             .await
             .unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .tls_built_in_root_certs(false)
+            .build()
+            .unwrap();
         for force in [false, true] {
             // Force-refresh must fail locally; this test never contacts the official service.
             shared

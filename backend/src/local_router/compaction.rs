@@ -27,12 +27,32 @@ pub(crate) async fn write_gateway_compaction_http_error<D: ResponsesDownstream +
     .await
 }
 
+pub(crate) fn has_valid_codey_summary_marker(item: &Value) -> Result<bool> {
+    if item.get("type").and_then(Value::as_str) != Some("compaction") {
+        return Ok(false);
+    }
+    let Some(encoded) = item
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .and_then(|text| text.strip_prefix(CODEY_SUMMARY_PREFIX))
+    else {
+        return Ok(false);
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("Codey 压缩摘要编码无效")?;
+    let text = std::str::from_utf8(&bytes).context("Codey 压缩摘要不是有效 UTF-8")?;
+    anyhow::ensure!(!text.trim().is_empty(), "Codey 压缩摘要为空");
+    Ok(true)
+}
+
 pub(crate) fn codey_summary_message(item: &Value) -> Result<Option<Value>> {
-    if item["type"] != "compaction" {
+    if item.get("type").and_then(Value::as_str) != Some("compaction") {
         return Ok(None);
     }
-    let Some(encoded) = item["encrypted_content"]
-        .as_str()
+    let Some(encoded) = item
+        .get("encrypted_content")
+        .and_then(Value::as_str)
         .and_then(|text| text.strip_prefix(CODEY_SUMMARY_PREFIX))
     else {
         return Ok(None);
@@ -258,7 +278,7 @@ fn validate_portable_context_items(items: &[Value], allow_trigger: bool) -> Resu
         {
             continue;
         }
-        if codey_summary_message(item)?.is_some() {
+        if has_valid_codey_summary_marker(item)? {
             continue;
         }
         let content = item.get("content");
@@ -312,12 +332,47 @@ pub(crate) fn normalize_native_responses_context(
     discard_opaque_reasoning: bool,
 ) -> bool {
     let mut changed = restore_codey_compaction_summaries(body).unwrap_or(false);
-    changed |= normalize_encrypted_agent_payloads(body);
+    changed |= normalize_native_responses_context_without_summaries(body, discard_opaque_reasoning);
+    changed
+}
+
+pub(crate) fn normalize_native_responses_context_without_summaries(
+    body: &mut Value,
+    discard_opaque_reasoning: bool,
+) -> bool {
+    let mut changed = normalize_encrypted_agent_payloads(body);
     changed |= strip_rejected_reasoning_items(body);
     // 同一线路必须原样回传 reasoning，包括第三方 thinking 模式需要的明文内容。
     // 换线路时只去掉上一供应商的密文，可见摘要改成官方可接受的 summary。
     if discard_opaque_reasoning {
         changed |= port_reasoning_history(body);
+    }
+    changed
+}
+
+/// 幂等的原生 Responses 请求体整理：统一执行密文载荷、已拒推理剥离、工具清单还原、
+/// 第三方/官方历史整理与可选协作命名空间改名。调用方在摘要已还原后只需执行一次，
+/// 仅在实际展开了新历史后才再次调用。
+pub(crate) fn prepare_native_responses_body(
+    body: &mut Value,
+    official_account: bool,
+    compacting: bool,
+    discard_opaque_reasoning: bool,
+    collaboration_alias: Option<&CollaborationAlias>,
+) -> bool {
+    let mut changed =
+        normalize_native_responses_context_without_summaries(body, discard_opaque_reasoning);
+    if !compacting && !official_account {
+        changed |= rehydrate_native_tool_manifest(body);
+    }
+    if !official_account {
+        changed |= replay_third_party_agent_messages(body);
+    }
+    if official_account {
+        changed |= sanitize_official_upstream_history(body);
+    }
+    if let Some(alias) = collaboration_alias {
+        changed |= alias.alias_history(body);
     }
     changed
 }
@@ -348,6 +403,7 @@ pub(crate) fn upstream_replays_reasoning_text(upstream_url: &str) -> bool {
     host == "deepseek.com" || host.ends_with(".deepseek.com")
 }
 
+#[cfg(test)]
 pub(crate) fn should_replay_reasoning_text(
     official_account: bool,
     bridge: ProtocolBridge,
@@ -707,12 +763,33 @@ fn encrypted_content_rewrite(part: &Value) -> EncryptedContentRewrite {
 }
 
 fn is_codex_encrypted_payload(value: &str) -> bool {
+    const MIN_FERNET_BYTES: usize = FERNET_PREFIX_BYTES + FERNET_SUFFIX_BYTES + FERNET_BLOCK_BYTES;
+    const MIN_FERNET_BASE64_LEN: usize = (MIN_FERNET_BYTES * 4).div_ceil(3);
     let encoded = value.trim().trim_end_matches('=');
+    let bytes = encoded.as_bytes();
+    // O(1) 前缀与长度过滤：Fernet 版本字节 0x80 的 base64url 首字符必为 'g'，
+    // 次字符高两位必为 00（即 'A'..='P'）。先拦截绝大多数普通明文，避免无谓解码分配。
+    if bytes.len() < MIN_FERNET_BASE64_LEN || bytes[0] != b'g' || !matches!(bytes[1], b'A'..=b'P') {
+        return false;
+    }
+    let remainder = match bytes.len() % 4 {
+        0 => 0,
+        2 => 1,
+        3 => 2,
+        _ => return false,
+    };
+    let decoded_len = (bytes.len() / 4) * 3 + remainder;
+    if decoded_len < MIN_FERNET_BYTES
+        || !(decoded_len - FERNET_PREFIX_BYTES - FERNET_SUFFIX_BYTES)
+            .is_multiple_of(FERNET_BLOCK_BYTES)
+    {
+        return false;
+    }
     let Ok(decoded) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
         return false;
     };
     decoded.first() == Some(&0x80)
-        && decoded.len() >= FERNET_PREFIX_BYTES + FERNET_SUFFIX_BYTES + FERNET_BLOCK_BYTES
+        && decoded.len() >= MIN_FERNET_BYTES
         && (decoded.len() - FERNET_PREFIX_BYTES - FERNET_SUFFIX_BYTES)
             .is_multiple_of(FERNET_BLOCK_BYTES)
 }
@@ -1189,6 +1266,291 @@ pub(crate) fn validate_compaction_result(value: &Value, v2: bool) -> Result<()> 
         anyhow::bail!("远程压缩必须返回且仅返回一个 compaction 项，实际收到 {count} 个");
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct CompactionAccumulator {
+    response: Option<Value>,
+    output: BTreeMap<u64, Value>,
+    output_count: u64,
+    ordinary_response: bool,
+}
+impl SseFrameAccumulator for CompactionAccumulator {
+    const PROTOCOL_LABEL: &'static str = "Responses compaction";
+    const READ_OPERATION: &'static str = "读取远程压缩响应失败";
+    // A compaction item carries the complete encrypted snapshot in one frame.
+    // collect_sse_frames still enforces the cumulative response/memory budgets.
+    const MAX_BUFFER_BYTES: usize = MAX_UPSTREAM_RESPONSE_BYTES;
+    fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
+        let event = sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?;
+        check_context_length_error(&event)?;
+        if self.ordinary_response {
+            check_gateway_summary_failure(&event)?;
+        }
+        match event.get("type").and_then(Value::as_str) {
+            Some("response.output_item.added" | "response.output_item.done") => {
+                let index = event["output_index"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("远程压缩输出项缺少有效的 output_index"))?;
+                self.output_count = self.output_count.max(
+                    index
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("远程压缩 output_index 超过上限"))?,
+                );
+                if event["type"] == "response.output_item.added" {
+                    return Ok(());
+                }
+                if let Some(previous) = self.output.get(&index)
+                    && previous != &event["item"]
+                {
+                    anyhow::bail!("远程压缩包含冲突的 output_index");
+                }
+                self.output.insert(index, event["item"].clone());
+            }
+            Some("response.completed") => {
+                let mut response = event["response"].clone();
+                if !response.is_object() {
+                    anyhow::bail!("远程压缩完成事件缺少有效的 response");
+                }
+                // Completed events may omit the output already sent in item.done.
+                // Never restore item.added: its encrypted content may be incomplete.
+                if response.get("output").is_none()
+                    || response["output"].as_array().is_some_and(Vec::is_empty)
+                {
+                    if self.output.keys().copied().ne(0..self.output_count) {
+                        anyhow::bail!("远程压缩输出项不连续，无法恢复完整结果");
+                    }
+                    response["output"] =
+                        Value::Array(std::mem::take(&mut self.output).into_values().collect());
+                }
+                // The event itself establishes completion, even if a provider
+                // omits the redundant response.status field.
+                if response.get("status").is_none() {
+                    response["status"] = json!("completed");
+                }
+                if self.ordinary_response {
+                    check_gateway_summary_failure(&response)?;
+                } else {
+                    validate_compaction_result(&response, true)?;
+                }
+                self.response = Some(response);
+            }
+            Some("response.failed" | "response.incomplete" | "error") => {
+                anyhow::bail!("远程压缩返回失败或未完成终态")
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn finished(&self) -> bool {
+        self.response.is_some()
+    }
+}
+
+fn check_gateway_summary_failure(value: &Value) -> Result<()> {
+    check_context_length_error(value)?;
+    if value.get("error").is_some_and(|error| !error.is_null())
+        || value
+            .pointer("/response/error")
+            .is_some_and(|error| !error.is_null())
+        || matches!(
+            value["type"].as_str(),
+            Some("response.failed" | "response.incomplete" | "error")
+        )
+        || matches!(
+            value["status"].as_str(),
+            Some("failed" | "incomplete" | "in_progress" | "cancelled")
+        )
+    {
+        return Err(UpstreamStreamFailure(value.clone()).into());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_gateway_compaction<D: ResponsesDownstream + ?Sized>(
+    downstream: &mut D,
+    response: reqwest::Response,
+    bridge: ProtocolBridge,
+    model: &str,
+    stream: bool,
+    route: &RouteTarget,
+    tool_bridge: &ResponsesToolBridge,
+    mut portable_attempt: Option<&mut PortableAttempt>,
+    phase: GatewayCompactionPhase,
+) -> Result<()> {
+    let probe = downstream.request_log_probe().cloned();
+    let upstream_request_id = upstream_request_id_from_headers(response.headers());
+    let mut retry_advice = None;
+    let result = await_upstream(downstream, async {
+        let mut prepared =
+            prepare_upstream_response(response, "读取压缩摘要响应失败", probe.as_ref()).await?;
+        retry_advice = prepared.retry_advice.take();
+        let value = match bridge {
+            _ if !prepared.is_sse => {
+                let bytes = read_bounded_prepared_upstream_body(&mut prepared, MAX_UPSTREAM_RESPONSE_BYTES, "读取压缩摘要响应失败", probe.as_ref()).await?;
+                let value = match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(value) => value,
+                    Err(_) if bridge == ProtocolBridge::ResponsesToChatCompletions
+                        && (bytes.starts_with(b"data:") || bytes.windows(6).any(|window| window == b"\ndata:")) => {
+                        parse_chat_completion_sse_bytes(&bytes, model)?
+                    }
+                    Err(_) if bridge == ProtocolBridge::ResponsesToAnthropicMessages
+                        && (bytes.starts_with(b"event:") || bytes.starts_with(b"data:")
+                            || bytes.windows(7).any(|window| window == b"\nevent:")
+                            || bytes.windows(6).any(|window| window == b"\ndata:")) => {
+                        parse_anthropic_message_sse_bytes(&bytes, model)?
+                    }
+                    Err(error) => return Err(error).context("压缩摘要返回无效 JSON"),
+                };
+                // 在协议转换前保存失败对象，避免适配器只留下通用解析错误。
+                check_gateway_summary_failure(&value)?;
+                observe_upstream_response_model(probe.as_ref(), &value);
+                match bridge {
+                    ProtocolBridge::ResponsesToChatCompletions => chat_completion_to_responses_body_with_tool_bridge(value, model, tool_bridge)?,
+                    ProtocolBridge::ResponsesToAnthropicMessages => anthropic_message_to_route_responses_body(&value, model, tool_bridge, route)?,
+                    _ => value,
+                }
+            }
+            ProtocolBridge::ResponsesToChatCompletions => read_chat_completions_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
+            ProtocolBridge::ResponsesToAnthropicMessages => read_anthropic_messages_as_responses(&mut prepared, model, route, tool_bridge, probe.as_ref()).await?,
+            _ => {
+                let mut accumulator = CompactionAccumulator { ordinary_response: true, ..Default::default() };
+                collect_sse_frames(&mut prepared, &mut accumulator, probe.as_ref()).await?;
+                accumulator.response.context("压缩摘要未返回完成事件")?
+            }
+        };
+        check_gateway_summary_failure(&value)?;
+        let text = value["output"].as_array().into_iter().flatten()
+            .filter(|item| item["type"] == "message" && item["role"] == "assistant")
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "output_text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>().join("\n");
+        anyhow::ensure!(!text.trim().is_empty(), "上游未返回可用的压缩摘要");
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text.as_bytes());
+        let value = json!({"id":format!("resp_codey_{}", uuid::Uuid::new_v4()), "object":"response", "status":"completed", "model":model,
+            "output":[{"type":"compaction","id":format!("cmp_codey_{}", uuid::Uuid::new_v4()),"encrypted_content":format!("{CODEY_SUMMARY_PREFIX}{encoded}")}]});
+        validate_compaction_result(&value, true)?;
+        Ok(value)
+    }).await?;
+    match result {
+        Ok(value) => {
+            if stream {
+                write_compaction_response_as_events(downstream, &value).await?;
+            } else {
+                downstream.write_json(200, &value).await?;
+            }
+            if let Some(attempt) = portable_attempt {
+                attempt.complete();
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if error.is::<ContextLengthExceeded>()
+                && let Some(attempt) = portable_attempt.as_mut()
+            {
+                attempt.target_context_rejected();
+            }
+            write_gateway_compaction_response_error(
+                downstream,
+                error,
+                route,
+                phase,
+                upstream_request_id.as_deref(),
+                retry_advice,
+            )
+            .await
+        }
+    }
+}
+
+pub(crate) async fn write_validated_compaction<D: ResponsesDownstream + ?Sized>(
+    downstream: &mut D,
+    response: reqwest::Response,
+    format: CompactionResponseFormat,
+    stream: bool,
+    route: &RouteTarget,
+    checkpoint: Option<(PortableHistoryCheckpoint, Arc<Mutex<PortableHistoryCache>>)>,
+) -> Result<()> {
+    let v2 = matches!(format, CompactionResponseFormat::Responses);
+    let probe = downstream.request_log_probe().cloned();
+    let result = await_upstream(downstream, async {
+        let mut prepared =
+            prepare_upstream_response(response, "读取远程压缩响应失败", probe.as_ref()).await?;
+        if prepared.is_sse {
+            if !v2 {
+                anyhow::bail!("旧版压缩端点必须返回 JSON");
+            }
+            let mut accumulator = CompactionAccumulator::default();
+            collect_sse_frames(&mut prepared, &mut accumulator, probe.as_ref()).await?;
+            accumulator
+                .response
+                .ok_or_else(|| anyhow::anyhow!("远程压缩未返回完成事件"))
+        } else {
+            let bytes = read_bounded_prepared_upstream_body(
+                &mut prepared,
+                MAX_REQUEST_BYTES,
+                "读取远程压缩响应失败",
+                probe.as_ref(),
+            )
+            .await?;
+            let mut value: Value =
+                serde_json::from_slice(&bytes).context("远程压缩返回无效 JSON")?;
+            validate_compaction_result(&value, v2)?;
+            if matches!(format, CompactionResponseFormat::CompactToResponses) {
+                // 先校验旧接口的完整结果，再补 Responses 终态；output 与密文原样保留。
+                value["object"] = json!("response");
+                value["status"] = json!("completed");
+            }
+            Ok(value)
+        }
+    })
+    .await?;
+    match result {
+        Ok(value) => {
+            if stream {
+                write_compaction_response_as_events(downstream, &value).await?;
+            } else {
+                downstream.write_json(200, &value).await?;
+            }
+            if let Some((checkpoint, cache)) = checkpoint
+                && let Some(entry) = checkpoint.finish(&value)
+            {
+                cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(entry);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let timeout = is_upstream_timeout_error(&error);
+            let (status, code) = if timeout {
+                (504, "compaction_timeout")
+            } else if error.is::<ContextLengthExceeded>() {
+                (400, CONTEXT_LENGTH_EXCEEDED)
+            } else {
+                (502, "invalid_compaction_response")
+            };
+            // 上游断流、超时与本地校验失败此前都只打印最外层上下文，压缩失败
+            // 因此难以定位；这里保留脱敏后的完整原因链。
+            let detail = sanitize_upstream_error_text(&format!("{error:#}"), route, 512)
+                .unwrap_or_else(|| "上游未返回可用的压缩结果".to_string());
+            let message = if timeout {
+                format!(
+                    "远程压缩读取上游响应超时（{detail}），原始会话历史未被 Codey 修改，请稍后重试"
+                )
+            } else if status == 400 {
+                error.to_string()
+            } else {
+                format!("远程压缩上游响应未能完成：{detail}")
+            };
+            downstream
+                .write_error(status, code, message, Some(route))
+                .await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2330,288 +2692,5 @@ mod tests {
         assert!(!is_context_length_error(
             &json!({"error":{"message":"image too large","code":"invalid_request_error"}})
         ));
-    }
-}
-
-#[derive(Default)]
-struct CompactionAccumulator {
-    response: Option<Value>,
-    output: BTreeMap<u64, Value>,
-    output_count: u64,
-    ordinary_response: bool,
-}
-impl SseFrameAccumulator for CompactionAccumulator {
-    const PROTOCOL_LABEL: &'static str = "Responses compaction";
-    const READ_OPERATION: &'static str = "读取远程压缩响应失败";
-    // A compaction item carries the complete encrypted snapshot in one frame.
-    // collect_sse_frames still enforces the cumulative response/memory budgets.
-    const MAX_BUFFER_BYTES: usize = MAX_UPSTREAM_RESPONSE_BYTES;
-    fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
-        let event = sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?;
-        check_context_length_error(&event)?;
-        if self.ordinary_response {
-            check_gateway_summary_failure(&event)?;
-        }
-        match event.get("type").and_then(Value::as_str) {
-            Some("response.output_item.added" | "response.output_item.done") => {
-                let index = event["output_index"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("远程压缩输出项缺少有效的 output_index"))?;
-                self.output_count = self.output_count.max(
-                    index
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("远程压缩 output_index 超过上限"))?,
-                );
-                if event["type"] == "response.output_item.added" {
-                    return Ok(());
-                }
-                if let Some(previous) = self.output.get(&index)
-                    && previous != &event["item"]
-                {
-                    anyhow::bail!("远程压缩包含冲突的 output_index");
-                }
-                self.output.insert(index, event["item"].clone());
-            }
-            Some("response.completed") => {
-                let mut response = event["response"].clone();
-                if !response.is_object() {
-                    anyhow::bail!("远程压缩完成事件缺少有效的 response");
-                }
-                // Completed events may omit the output already sent in item.done.
-                // Never restore item.added: its encrypted content may be incomplete.
-                if response.get("output").is_none()
-                    || response["output"].as_array().is_some_and(Vec::is_empty)
-                {
-                    if self.output.keys().copied().ne(0..self.output_count) {
-                        anyhow::bail!("远程压缩输出项不连续，无法恢复完整结果");
-                    }
-                    response["output"] =
-                        Value::Array(std::mem::take(&mut self.output).into_values().collect());
-                }
-                // The event itself establishes completion, even if a provider
-                // omits the redundant response.status field.
-                if response.get("status").is_none() {
-                    response["status"] = json!("completed");
-                }
-                if self.ordinary_response {
-                    check_gateway_summary_failure(&response)?;
-                } else {
-                    validate_compaction_result(&response, true)?;
-                }
-                self.response = Some(response);
-            }
-            Some("response.failed" | "response.incomplete" | "error") => {
-                anyhow::bail!("远程压缩返回失败或未完成终态")
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    fn finished(&self) -> bool {
-        self.response.is_some()
-    }
-}
-
-fn check_gateway_summary_failure(value: &Value) -> Result<()> {
-    check_context_length_error(value)?;
-    if value.get("error").is_some_and(|error| !error.is_null())
-        || value
-            .pointer("/response/error")
-            .is_some_and(|error| !error.is_null())
-        || matches!(
-            value["type"].as_str(),
-            Some("response.failed" | "response.incomplete" | "error")
-        )
-        || matches!(
-            value["status"].as_str(),
-            Some("failed" | "incomplete" | "in_progress" | "cancelled")
-        )
-    {
-        return Err(UpstreamStreamFailure(value.clone()).into());
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn write_gateway_compaction<D: ResponsesDownstream + ?Sized>(
-    downstream: &mut D,
-    response: reqwest::Response,
-    bridge: ProtocolBridge,
-    model: &str,
-    stream: bool,
-    route: &RouteTarget,
-    tool_bridge: &ResponsesToolBridge,
-    mut portable_attempt: Option<&mut PortableAttempt>,
-    phase: GatewayCompactionPhase,
-) -> Result<()> {
-    let probe = downstream.request_log_probe().cloned();
-    let upstream_request_id = upstream_request_id_from_headers(response.headers());
-    let retry_advice = ResponseRetryAdvice::from_headers(response.headers());
-    let result = await_upstream(downstream, async {
-        let mut prepared = prepare_upstream_response(response, "读取压缩摘要响应失败", probe.as_ref()).await?;
-        let value = match bridge {
-            _ if !prepared.is_sse => {
-                let bytes = read_bounded_prepared_upstream_body(&mut prepared, MAX_UPSTREAM_RESPONSE_BYTES, "读取压缩摘要响应失败", probe.as_ref()).await?;
-                let value = match serde_json::from_slice::<Value>(&bytes) {
-                    Ok(value) => value,
-                    Err(_) if bridge == ProtocolBridge::ResponsesToChatCompletions
-                        && (bytes.starts_with(b"data:") || bytes.windows(6).any(|window| window == b"\ndata:")) => {
-                        parse_chat_completion_sse_bytes(&bytes, model)?
-                    }
-                    Err(_) if bridge == ProtocolBridge::ResponsesToAnthropicMessages
-                        && (bytes.starts_with(b"event:") || bytes.starts_with(b"data:")
-                            || bytes.windows(7).any(|window| window == b"\nevent:")
-                            || bytes.windows(6).any(|window| window == b"\ndata:")) => {
-                        parse_anthropic_message_sse_bytes(&bytes, model)?
-                    }
-                    Err(error) => return Err(error).context("压缩摘要返回无效 JSON"),
-                };
-                // 在协议转换前保存失败对象，避免适配器只留下通用解析错误。
-                check_gateway_summary_failure(&value)?;
-                observe_upstream_response_model(probe.as_ref(), &value);
-                match bridge {
-                    ProtocolBridge::ResponsesToChatCompletions => chat_completion_to_responses_body_with_tool_bridge(value, model, tool_bridge)?,
-                    ProtocolBridge::ResponsesToAnthropicMessages => anthropic_message_to_route_responses_body(&value, model, tool_bridge, route)?,
-                    _ => value,
-                }
-            }
-            ProtocolBridge::ResponsesToChatCompletions => read_chat_completions_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
-            ProtocolBridge::ResponsesToAnthropicMessages => read_anthropic_messages_as_responses(&mut prepared, model, route, tool_bridge, probe.as_ref()).await?,
-            _ => {
-                let mut accumulator = CompactionAccumulator { ordinary_response: true, ..Default::default() };
-                collect_sse_frames(&mut prepared, &mut accumulator, probe.as_ref()).await?;
-                accumulator.response.context("压缩摘要未返回完成事件")?
-            }
-        };
-        check_gateway_summary_failure(&value)?;
-        let text = value["output"].as_array().into_iter().flatten()
-            .filter(|item| item["type"] == "message" && item["role"] == "assistant")
-            .flat_map(|item| item["content"].as_array().into_iter().flatten())
-            .filter(|part| part["type"] == "output_text")
-            .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>().join("\n");
-        anyhow::ensure!(!text.trim().is_empty(), "上游未返回可用的压缩摘要");
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text.as_bytes());
-        let value = json!({"id":format!("resp_codey_{}", uuid::Uuid::new_v4()), "object":"response", "status":"completed", "model":model,
-            "output":[{"type":"compaction","id":format!("cmp_codey_{}", uuid::Uuid::new_v4()),"encrypted_content":format!("{CODEY_SUMMARY_PREFIX}{encoded}")}]});
-        validate_compaction_result(&value, true)?;
-        Ok(value)
-    }).await?;
-    match result {
-        Ok(value) => {
-            if stream {
-                write_compaction_response_as_events(downstream, &value).await?;
-            } else {
-                downstream.write_json(200, &value).await?;
-            }
-            if let Some(attempt) = portable_attempt {
-                attempt.complete();
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if error.is::<ContextLengthExceeded>()
-                && let Some(attempt) = portable_attempt.as_mut()
-            {
-                attempt.target_context_rejected();
-            }
-            write_gateway_compaction_response_error(
-                downstream,
-                error,
-                route,
-                phase,
-                upstream_request_id.as_deref(),
-                retry_advice,
-            )
-            .await
-        }
-    }
-}
-
-pub(crate) async fn write_validated_compaction<D: ResponsesDownstream + ?Sized>(
-    downstream: &mut D,
-    response: reqwest::Response,
-    format: CompactionResponseFormat,
-    stream: bool,
-    route: &RouteTarget,
-    checkpoint: Option<(PortableHistoryCheckpoint, Arc<Mutex<PortableHistoryCache>>)>,
-) -> Result<()> {
-    let v2 = matches!(format, CompactionResponseFormat::Responses);
-    let probe = downstream.request_log_probe().cloned();
-    let result = await_upstream(downstream, async {
-        let mut prepared =
-            prepare_upstream_response(response, "读取远程压缩响应失败", probe.as_ref()).await?;
-        if prepared.is_sse {
-            if !v2 {
-                anyhow::bail!("旧版压缩端点必须返回 JSON");
-            }
-            let mut accumulator = CompactionAccumulator::default();
-            collect_sse_frames(&mut prepared, &mut accumulator, probe.as_ref()).await?;
-            accumulator
-                .response
-                .ok_or_else(|| anyhow::anyhow!("远程压缩未返回完成事件"))
-        } else {
-            let bytes = read_bounded_prepared_upstream_body(
-                &mut prepared,
-                MAX_REQUEST_BYTES,
-                "读取远程压缩响应失败",
-                probe.as_ref(),
-            )
-            .await?;
-            let mut value: Value =
-                serde_json::from_slice(&bytes).context("远程压缩返回无效 JSON")?;
-            validate_compaction_result(&value, v2)?;
-            if matches!(format, CompactionResponseFormat::CompactToResponses) {
-                // 先校验旧接口的完整结果，再补 Responses 终态；output 与密文原样保留。
-                value["object"] = json!("response");
-                value["status"] = json!("completed");
-            }
-            Ok(value)
-        }
-    })
-    .await?;
-    match result {
-        Ok(value) => {
-            if stream {
-                write_compaction_response_as_events(downstream, &value).await?;
-            } else {
-                downstream.write_json(200, &value).await?;
-            }
-            if let Some((checkpoint, cache)) = checkpoint
-                && let Some(entry) = checkpoint.finish(&value)
-            {
-                cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(entry);
-            }
-            Ok(())
-        }
-        Err(error) => {
-            let timeout = is_upstream_timeout_error(&error);
-            let (status, code) = if timeout {
-                (504, "compaction_timeout")
-            } else if error.is::<ContextLengthExceeded>() {
-                (400, CONTEXT_LENGTH_EXCEEDED)
-            } else {
-                (502, "invalid_compaction_response")
-            };
-            // 上游断流、超时与本地校验失败此前都只打印最外层上下文，压缩失败
-            // 因此难以定位；这里保留脱敏后的完整原因链。
-            let detail = sanitize_upstream_error_text(&format!("{error:#}"), route, 512)
-                .unwrap_or_else(|| "上游未返回可用的压缩结果".to_string());
-            let message = if timeout {
-                format!(
-                    "远程压缩读取上游响应超时（{detail}），原始会话历史未被 Codey 修改，请稍后重试"
-                )
-            } else if status == 400 {
-                error.to_string()
-            } else {
-                format!("远程压缩上游响应未能完成：{detail}")
-            };
-            downstream
-                .write_error(status, code, message, Some(route))
-                .await
-        }
     }
 }

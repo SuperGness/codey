@@ -1,22 +1,27 @@
 use super::*;
 
-pub(crate) fn append_chat_messages_from_responses_input(
-    input: Option<&Value>,
+pub(crate) enum NormalizedResponsesInput<'a> {
+    Empty,
+    Text(&'a str),
+    Single(&'a Value),
+    Items(Vec<&'a Value>),
+}
+
+pub(crate) fn append_chat_messages_from_normalized_input(
+    input: NormalizedResponsesInput<'_>,
     messages: &mut Vec<Value>,
     tool_bridge: &mut ResponsesToolBridge,
 ) -> Result<Vec<Option<String>>> {
-    let Some(input) = input else {
-        return Ok(Vec::new());
-    };
     let mut replay = ChatReasoningReplay::default();
     match input {
-        Value::String(text) => {
+        NormalizedResponsesInput::Empty => Ok(Vec::new()),
+        NormalizedResponsesInput::Text(text) => {
             let start = messages.len();
             push_chat_text_message(messages, "user", text)?;
             replay.observe(None, messages, start);
             Ok(replay.missing)
         }
-        Value::Array(items) => {
+        NormalizedResponsesInput::Items(items) => {
             let mut deferred_tool_user_indices = HashSet::new();
             for item in items {
                 let start = messages.len();
@@ -33,13 +38,12 @@ pub(crate) fn append_chat_messages_from_responses_input(
             move_tool_auxiliary_messages_after_tool_results(messages, &deferred_tool_user_indices);
             Ok(replay.missing)
         }
-        Value::Object(_) => {
+        NormalizedResponsesInput::Single(item) => {
             let start = messages.len();
-            append_chat_message_item(input, messages, tool_bridge)?;
-            replay.observe(Some(input), messages, start);
+            append_chat_message_item(item, messages, tool_bridge)?;
+            replay.observe(Some(item), messages, start);
             Ok(replay.missing)
         }
-        _ => anyhow::bail!("input 必须是字符串、对象或数组"),
     }
 }
 
@@ -103,9 +107,7 @@ fn move_tool_auxiliary_messages_after_tool_results(
     let mut in_tool_turn = false;
     for (index, message) in messages.drain(..).enumerate() {
         let role = message.get("role").and_then(Value::as_str);
-        if role == Some("assistant")
-            && (message.get("tool_calls").is_some() || message.get("function_call").is_some())
-        {
+        if role == Some("assistant") && message.get("tool_calls").is_some() {
             if !pending.is_empty() {
                 ordered.append(&mut pending);
             }
@@ -147,7 +149,6 @@ pub(crate) fn normalize_trailing_chat_assistant(
     while let Some(last) = messages.last() {
         if last.get("role").and_then(Value::as_str) != Some("assistant")
             || last.get("tool_calls").is_some()
-            || last.get("function_call").is_some()
         {
             return;
         }
@@ -277,7 +278,6 @@ pub(crate) fn looks_like_message_object(object: &serde_json::Map<String, Value>)
     object.contains_key("role")
         || object.contains_key("content")
         || object.contains_key("tool_calls")
-        || object.contains_key("function_call")
 }
 
 pub(crate) fn append_responses_agent_message_object(
@@ -490,7 +490,6 @@ pub(crate) fn append_responses_message_object(
                 && last.get("reasoning_content").is_some()
                 && last["content"].is_null()
                 && last.get("tool_calls").is_none()
-                && last.get("function_call").is_none()
         }) {
             message.insert(
                 "reasoning_content".to_string(),
@@ -519,16 +518,8 @@ pub(crate) fn append_responses_message_object(
         );
         message.entry("content".to_string()).or_insert(Value::Null);
     }
-    if let Some(function_call) = object.get("function_call") {
-        message.insert(
-            "function_call".to_string(),
-            normalize_chat_legacy_function_call(function_call, tool_bridge)?,
-        );
-        message.entry("content".to_string()).or_insert(Value::Null);
-    }
     if message.contains_key("content")
         || message.contains_key("tool_calls")
-        || message.contains_key("function_call")
         || message.contains_key("reasoning_content")
     {
         message.entry("content".to_string()).or_insert(Value::Null);
@@ -846,7 +837,6 @@ pub(crate) fn append_chat_assistant_tool_call(
                 || content.as_str() == Some("")
                 || last.contains_key("reasoning_content")
         })
-        && !last.contains_key("function_call")
     {
         last.entry("content".to_string()).or_insert(Value::Null);
         match last.get_mut("tool_calls") {
@@ -1086,23 +1076,6 @@ pub(crate) fn normalize_chat_tool_calls(
         }));
     }
     Ok(Value::Array(normalized))
-}
-
-pub(crate) fn normalize_chat_legacy_function_call(
-    function_call: &Value,
-    tool_bridge: &mut ResponsesToolBridge,
-) -> Result<Value> {
-    match function_call {
-        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
-            Ok(Value::String(choice.clone()))
-        }
-        Value::Object(object) => {
-            let tool_name = responses_tool_name_from_call_object(object, "function_call")?;
-            let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
-            Ok(json!({"name": upstream_name}))
-        }
-        _ => anyhow::bail!("function_call 必须是 auto/none 或包含 name 的对象"),
-    }
 }
 
 pub(crate) const NAMESPACE_UPSTREAM_TOOL_PREFIX: &str = "codey_ns__";
@@ -1814,18 +1787,15 @@ pub(crate) fn restrict_tool_parameter_schema_to_object(schema: &mut Value) -> Op
     }
 }
 
-pub(crate) fn responses_tools_to_chat_tools_with_bridge(
-    tools: &Value,
+pub(crate) fn responses_tools_slice_to_chat_tools_with_bridge(
+    tools: &[&Value],
     tool_bridge: &mut ResponsesToolBridge,
 ) -> Result<ResponsesChatTools> {
-    let tools = tools
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("tools 必须是数组"))?;
     let mut conversion = ResponsesChatToolsConversion {
         tool_bridge,
         upstream_names: HashMap::new(),
         bridged_definitions: HashMap::new(),
-        converted: Vec::new(),
+        converted: Vec::with_capacity(tools.len()),
         web_search_options: None,
         web_search_tool_seen: false,
     };
@@ -1854,9 +1824,16 @@ pub(crate) fn append_responses_tool_to_chat_tools(
     {
         let mut function = responses_function_tool_map(object)?;
         let name = response_function_name(&function, "function tool")?.to_string();
-        // 冲突判定比较客户端原始定义；展平说明只写进发往上游的副本。
-        let original_definition = Value::Object(function.clone());
-        if !namespace_path.is_empty() {
+        let should_push = if namespace_path.is_empty() {
+            register_plain_tool_name(
+                &name,
+                conversion.tool_bridge,
+                &mut conversion.upstream_names,
+            )?;
+            true
+        } else {
+            // 冲突判定比较客户端原始定义；展平说明只写进发往上游的副本。
+            let original_definition = Value::Object(function.clone());
             let description = flattened_tool_description(
                 namespace_path,
                 &name,
@@ -1867,20 +1844,11 @@ pub(crate) fn append_responses_tool_to_chat_tools(
                     .unwrap_or(""),
             );
             function.insert("description".to_string(), Value::String(description));
-        }
-        let tool_name = ResponsesToolName {
-            kind: ResponsesToolKind::Function,
-            namespace: namespace_path.to_vec(),
-            name: name.clone(),
-        };
-        let should_push = if namespace_path.is_empty() {
-            register_plain_tool_name(
-                &name,
-                conversion.tool_bridge,
-                &mut conversion.upstream_names,
-            )?;
-            true
-        } else {
+            let tool_name = ResponsesToolName {
+                kind: ResponsesToolKind::Function,
+                namespace: namespace_path.to_vec(),
+                name: name.clone(),
+            };
             validate_namespaced_function_name(&name)?;
             match register_namespaced_tool_name(
                 tool_name,
@@ -2604,23 +2572,6 @@ pub(crate) fn responses_tool_choice_to_chat_tool_choice(
             Ok(json!({"type":"function","function":{"name":upstream_name}}))
         }
         _ => anyhow::bail!("tool_choice 必须是 auto/none/required 或 function 对象"),
-    }
-}
-
-pub(crate) fn responses_function_call_choice_to_chat(
-    function_call: &Value,
-    tool_bridge: &mut ResponsesToolBridge,
-) -> Result<Value> {
-    match function_call {
-        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
-            Ok(Value::String(choice.clone()))
-        }
-        Value::Object(object) => {
-            let tool_name = responses_tool_name_from_call_object(object, "function_call")?;
-            let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
-            Ok(json!({"name":upstream_name}))
-        }
-        _ => anyhow::bail!("function_call 必须是 auto/none 或 function name 对象"),
     }
 }
 

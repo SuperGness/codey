@@ -118,7 +118,7 @@ async fn listener_worker_exit_restores_original_endpoint_without_logging_probes(
             .to_string()
             .contains("401")
     );
-    let response = reqwest::Client::builder()
+    let response = test_http_client_builder()
         .no_proxy()
         .build()
         .unwrap()
@@ -164,14 +164,14 @@ async fn stopping_router_interrupts_fixed_port_rebind_without_restarting() {
     })
     .await
     .expect("failed worker should release its original listener");
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert_eq!(listener_worker(&router).id(), worker.id());
     tokio::time::timeout(Duration::from_secs(1), router.stop())
         .await
         .expect("shutdown should interrupt rebind backoff")
         .unwrap();
     drop(occupied);
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
     assert_eq!(listener_worker(&router).id(), worker.id());
     let _released = TcpListener::bind(address).await.unwrap();
 }
@@ -191,7 +191,7 @@ async fn dropping_router_cancels_its_supervised_listener() {
     .await
     .expect("dropping the supervisor should also drop its listener worker");
     let released = TcpListener::bind(address).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(worker.is_finished());
     drop(released);
 }
@@ -252,7 +252,7 @@ async fn request_size_errors_are_413_and_damaged_compression_is_400() {
         (oversized, 413, "request_too_large"),
         (b"invalid zstd".to_vec(), 400, "invalid_request_body"),
     ] {
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .header(CONTENT_ENCODING, "zstd")
@@ -321,7 +321,7 @@ async fn large_request_budget_is_released_before_native_response_finishes() {
     .unwrap();
     std::io::Write::write_all(&mut encoder, b"\"}").unwrap();
     let compressed = encoder.finish().unwrap();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(20))
         .build()
         .unwrap();
@@ -529,7 +529,7 @@ async fn upstream_response(
         }
         socket.write_all(b"0\r\n\r\n").await.unwrap();
     });
-    let response = reqwest::Client::builder()
+    let response = test_http_client_builder()
         .no_proxy()
         .build()
         .unwrap()

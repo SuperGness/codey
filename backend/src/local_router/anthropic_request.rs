@@ -119,11 +119,6 @@ pub(crate) fn responses_to_anthropic_messages_request(
             .get("tool_choice")
             .map(chat_tool_choice_to_anthropic_tool_choice)
             .transpose()?;
-        if tool_choice.is_none()
-            && let Some(function_call) = chat.get("function_call")
-        {
-            tool_choice = Some(chat_function_call_to_anthropic_tool_choice(function_call)?);
-        }
         if tool_choice
             .as_ref()
             .is_some_and(|choice| choice.get("type").and_then(Value::as_str) == Some("none"))
@@ -254,11 +249,6 @@ pub(crate) fn append_anthropic_message_from_chat(
         .unwrap_or_default();
     if let Some(tool_calls) = message.get("tool_calls") {
         blocks.extend(chat_tool_calls_to_anthropic_blocks(tool_calls)?);
-    }
-    if let Some(function_call) = message.get("function_call") {
-        blocks.extend(chat_legacy_function_call_to_anthropic_blocks(
-            function_call,
-        )?);
     }
     if blocks.is_empty() {
         return Ok(());
@@ -393,25 +383,6 @@ pub(crate) fn chat_tool_calls_to_anthropic_blocks(tool_calls: &Value) -> Result<
         .collect()
 }
 
-pub(crate) fn chat_legacy_function_call_to_anthropic_blocks(
-    function_call: &Value,
-) -> Result<Vec<Value>> {
-    let function_call = function_call
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("function_call 必须是对象"))?;
-    let name = function_call
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("function_call 缺少 name"))?;
-    Ok(vec![json!({
-        "type":"tool_use",
-        "id":format!("call_codey_{}", Uuid::new_v4()),
-        "name":name,
-        "input":parse_anthropic_tool_input(function_call.get("arguments"))?,
-    })])
-}
-
 pub(crate) fn parse_anthropic_tool_input(arguments: Option<&Value>) -> Result<Value> {
     let input = match arguments {
         None | Some(Value::Null) => json!({}),
@@ -489,22 +460,6 @@ pub(crate) fn chat_tool_choice_to_anthropic_tool_choice(tool_choice: &Value) -> 
             Ok(json!({"type":"tool","name":name}))
         }
         _ => anyhow::bail!("tool_choice 必须是字符串或 function 对象"),
-    }
-}
-
-pub(crate) fn chat_function_call_to_anthropic_tool_choice(function_call: &Value) -> Result<Value> {
-    match function_call {
-        Value::String(choice) if choice == "auto" => Ok(json!({"type":"auto"})),
-        Value::String(choice) if choice == "none" => Ok(json!({"type":"none"})),
-        Value::Object(function) => {
-            let name = function
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("function_call 缺少 name"))?;
-            Ok(json!({"type":"tool","name":name}))
-        }
-        _ => anyhow::bail!("function_call 不能转换为 Anthropic tool_choice"),
     }
 }
 

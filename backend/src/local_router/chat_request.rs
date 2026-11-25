@@ -34,20 +34,19 @@ pub(crate) fn responses_to_chat_completions_request(
     let merged_tools = merge_responses_tools(object.get("tools"), additional_tools)?;
     let mut tool_bridge = ResponsesToolBridge::default();
     let chat_tools = merged_tools
-        .as_ref()
-        .map(|tools| responses_tools_to_chat_tools_with_bridge(tools, &mut tool_bridge))
+        .as_deref()
+        .map(|tools| responses_tools_slice_to_chat_tools_with_bridge(tools, &mut tool_bridge))
         .transpose()?;
-    let mut chat_reasoning_summaries = append_chat_messages_from_responses_input(
-        normalized_input.as_ref(),
+    let mut chat_reasoning_summaries = append_chat_messages_from_normalized_input(
+        normalized_input,
         &mut messages,
         &mut tool_bridge,
     )?;
     // 尾部 assistant 消息会被部分上游当成续写前缀（OpenRouter 会把结尾的
     // assistant 映射为 DeepSeek prefix），而 prefix 与函数调用互斥。只在
     // 请求涉及函数调用时归一化，普通多轮对话的结尾保持不变。
-    let function_calling = merged_tools.is_some()
-        || object.contains_key("function_call")
-        || messages.iter().any(chat_message_carries_function_call);
+    let function_calling =
+        merged_tools.is_some() || messages.iter().any(chat_message_carries_function_call);
     if function_calling {
         normalize_trailing_chat_assistant(&mut messages, &mut chat_reasoning_summaries);
     }
@@ -158,12 +157,6 @@ pub(crate) fn responses_to_chat_completions_request(
             parallel_tool_calls.clone(),
         );
     }
-    if let Some(function_call) = object.get("function_call") {
-        chat.insert(
-            "function_call".to_string(),
-            responses_function_call_choice_to_chat(function_call, &mut tool_bridge)?,
-        );
-    }
     Ok(ConvertedResponsesRequest {
         body: Value::Object(chat),
         tool_bridge,
@@ -174,14 +167,13 @@ pub(crate) fn responses_to_chat_completions_request(
 fn chat_message_carries_function_call(message: &Value) -> bool {
     message.get("role").and_then(Value::as_str) == Some("tool")
         || message.get("tool_calls").is_some()
-        || message.get("function_call").is_some()
 }
 
-pub(crate) fn responses_input_without_additional_tools(
-    input: Option<&Value>,
-) -> Result<(Option<Value>, Vec<Value>)> {
+pub(crate) fn responses_input_without_additional_tools<'a>(
+    input: Option<&'a Value>,
+) -> Result<(NormalizedResponsesInput<'a>, Vec<&'a Value>)> {
     let Some(input) = input else {
-        return Ok((None, Vec::new()));
+        return Ok((NormalizedResponsesInput::Empty, Vec::new()));
     };
     let mut additional_tools = Vec::new();
     match input {
@@ -199,12 +191,15 @@ pub(crate) fn responses_input_without_additional_tools(
                 {
                     continue;
                 }
-                normalized.push(item.clone());
+                normalized.push(item);
             }
-            Ok((Some(Value::Array(normalized)), additional_tools))
+            Ok((
+                NormalizedResponsesInput::Items(normalized),
+                additional_tools,
+            ))
         }
         Value::Object(_) if append_responses_additional_tools(input, &mut additional_tools)? => {
-            Ok((None, additional_tools))
+            Ok((NormalizedResponsesInput::Empty, additional_tools))
         }
         Value::Object(_)
             if input
@@ -212,19 +207,20 @@ pub(crate) fn responses_input_without_additional_tools(
                 .and_then(Value::as_str)
                 .is_some_and(is_opaque_responses_input_item_type) =>
         {
-            Ok((None, additional_tools))
+            Ok((NormalizedResponsesInput::Empty, additional_tools))
         }
         Value::Object(_) => {
             append_responses_tool_search_output_tools(input, &mut additional_tools)?;
-            Ok((Some(input.clone()), additional_tools))
+            Ok((NormalizedResponsesInput::Single(input), additional_tools))
         }
-        _ => Ok((Some(input.clone()), additional_tools)),
+        Value::String(text) => Ok((NormalizedResponsesInput::Text(text), additional_tools)),
+        _ => anyhow::bail!("input 必须是字符串、对象或数组"),
     }
 }
 
-pub(crate) fn append_responses_tool_search_output_tools(
-    item: &Value,
-    tools: &mut Vec<Value>,
+pub(crate) fn append_responses_tool_search_output_tools<'a>(
+    item: &'a Value,
+    tools: &mut Vec<&'a Value>,
 ) -> Result<()> {
     let Some(object) = item.as_object() else {
         return Ok(());
@@ -237,13 +233,13 @@ pub(crate) fn append_responses_tool_search_output_tools(
         .get("tools")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("tool_search_output.tools 必须是数组"))?;
-    tools.extend(loaded.iter().cloned());
+    tools.extend(loaded.iter());
     Ok(())
 }
 
-pub(crate) fn append_responses_additional_tools(
-    item: &Value,
-    tools: &mut Vec<Value>,
+pub(crate) fn append_responses_additional_tools<'a>(
+    item: &'a Value,
+    tools: &mut Vec<&'a Value>,
 ) -> Result<bool> {
     let Some(object) = item.as_object() else {
         return Ok(false);
@@ -258,14 +254,14 @@ pub(crate) fn append_responses_additional_tools(
         .get("tools")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("additional_tools.tools 必须是数组"))?;
-    tools.extend(additional.iter().cloned());
+    tools.extend(additional.iter());
     Ok(true)
 }
 
-pub(crate) fn merge_responses_tools(
-    configured: Option<&Value>,
-    additional: Vec<Value>,
-) -> Result<Option<Value>> {
+pub(crate) fn merge_responses_tools<'a>(
+    configured: Option<&'a Value>,
+    additional: Vec<&'a Value>,
+) -> Result<Option<Vec<&'a Value>>> {
     if configured.is_none() && additional.is_empty() {
         return Ok(None);
     }
@@ -274,7 +270,7 @@ pub(crate) fn merge_responses_tools(
         Some(_) => anyhow::bail!("tools 必须是数组"),
         None => &[],
     };
-    let mut merged = Vec::with_capacity(configured.len() + additional.len());
+    let mut merged: Vec<&'a Value> = Vec::with_capacity(configured.len() + additional.len());
     let mut identities = HashMap::with_capacity(configured.len() + additional.len());
     for tool in configured {
         if let Some(identity) = responses_tool_identity(tool) {
@@ -282,16 +278,17 @@ pub(crate) fn merge_responses_tools(
                 && identities
                     .get(&identity)
                     .and_then(|index| merged.get(*index))
+                    .copied()
                     == Some(tool)
             {
                 continue;
             }
             identities.entry(identity).or_insert(merged.len());
         }
-        merged.push(tool.clone());
+        merged.push(tool);
     }
     for tool in additional {
-        if let Some(identity) = responses_tool_identity(&tool) {
+        if let Some(identity) = responses_tool_identity(tool) {
             if let Some(index) = identities.get(&identity).copied() {
                 if merged[index] == tool {
                     continue;
@@ -302,7 +299,7 @@ pub(crate) fn merge_responses_tools(
         }
         merged.push(tool);
     }
-    Ok(Some(Value::Array(merged)))
+    Ok(Some(merged))
 }
 
 pub(crate) fn responses_tool_identity(tool: &Value) -> Option<String> {

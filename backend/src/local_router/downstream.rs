@@ -102,6 +102,34 @@ pub(crate) trait ResponsesDownstream: Send {
     async fn write_json(&mut self, status: u16, value: &Value) -> Result<()>;
     async fn start_event_stream(&mut self) -> Result<()>;
     async fn write_event(&mut self, event: &Value) -> Result<()>;
+    async fn write_borrowed_delta(
+        &mut self,
+        event_type: &'static str,
+        response_id: &str,
+        item_id: &str,
+        output_index: usize,
+        content_index: Option<usize>,
+        delta: &str,
+    ) -> Result<()> {
+        let event = match content_index {
+            Some(content_index) => json!({
+                "type": event_type,
+                "response_id": response_id,
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": content_index,
+                "delta": delta,
+            }),
+            None => json!({
+                "type": event_type,
+                "response_id": response_id,
+                "item_id": item_id,
+                "output_index": output_index,
+                "delta": delta,
+            }),
+        };
+        self.write_event(&event).await
+    }
     async fn finish_event_stream(&mut self) -> Result<()>;
     /// 仅用于已成功交付并提交的压缩响应，传输收尾不再决定逻辑结果。
     async fn finish_delivered_compaction_stream(&mut self) {
@@ -393,6 +421,43 @@ where
             if result.is_ok() {
                 probe.mark_response_started(200);
                 if responses_event_has_user_content(event) {
+                    probe.mark_first_downstream_content();
+                }
+            } else {
+                probe.mark_cancelled("downstream_event_write_failed");
+                probe.finish_cancelled();
+            }
+        }
+        result
+    }
+
+    async fn write_borrowed_delta(
+        &mut self,
+        event_type: &'static str,
+        response_id: &str,
+        item_id: &str,
+        output_index: usize,
+        content_index: Option<usize>,
+        delta: &str,
+    ) -> Result<()> {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.observe_delta_event(event_type, Some(delta));
+        }
+        let result = self
+            .inner
+            .write_borrowed_delta(
+                event_type,
+                response_id,
+                item_id,
+                output_index,
+                content_index,
+                delta,
+            )
+            .await;
+        if let Some(probe) = self.probe.as_ref() {
+            if result.is_ok() {
+                probe.mark_response_started(200);
+                if !delta.is_empty() && responses_event_type_has_user_content(event_type) {
                     probe.mark_first_downstream_content();
                 }
             } else {
@@ -702,6 +767,28 @@ impl ResponsesDownstream for HttpResponsesDownstream {
         write_responses_sse_event(&mut self.stream, &event).await
     }
 
+    async fn write_borrowed_delta(
+        &mut self,
+        event_type: &'static str,
+        response_id: &str,
+        item_id: &str,
+        output_index: usize,
+        content_index: Option<usize>,
+        delta: &str,
+    ) -> Result<()> {
+        begin_compaction_delivery();
+        write_responses_sse_delta_event(
+            &mut self.stream,
+            event_type,
+            response_id,
+            item_id,
+            output_index,
+            content_index,
+            delta,
+        )
+        .await
+    }
+
     async fn finish_event_stream(&mut self) -> Result<()> {
         finish_chunked_response(&mut self.stream).await
     }
@@ -773,9 +860,12 @@ fn same_history_item(left: &Value, right: &Value) -> bool {
 
 #[derive(Debug, Default)]
 pub(crate) struct AdaptedResponsesHistory {
-    pub(crate) last: Option<(String, Vec<Value>)>,
-    pub(crate) pending_input: Option<Vec<Value>>,
+    pub(crate) last: Option<(String, Vec<Arc<Value>>)>,
+    pub(crate) last_id_hash: Option<[u8; 32]>,
+    pub(crate) pending_input: Option<Vec<Arc<Value>>>,
+    pending_input_bytes: usize,
     pub(crate) requires_native_http: bool,
+    last_requires_native_http: bool,
     /// Items the upstream streamed for the current turn. Streaming upstreams
     /// announce tool calls through output-item events and may omit them from
     /// the terminal `response.output`, so the terminal array alone cannot be
@@ -785,6 +875,21 @@ pub(crate) struct AdaptedResponsesHistory {
     pending_output_overflowed: bool,
     last_bytes: usize,
     budget: RetainedMemoryBudget,
+}
+
+fn combine_json_array_bytes(
+    existing_len: usize,
+    existing_bytes: usize,
+    added_len: usize,
+    added_bytes: usize,
+) -> usize {
+    if existing_len == 0 {
+        added_bytes
+    } else if added_len == 0 {
+        existing_bytes
+    } else {
+        existing_bytes.saturating_add(added_bytes).saturating_sub(1)
+    }
 }
 
 const STREAMED_OUTPUT_ITEM_LIMIT: usize = 512;
@@ -805,11 +910,25 @@ fn should_offload_history_preparation(body: &Value) -> bool {
 impl AdaptedResponsesHistory {
     pub(crate) fn clear_pending(&mut self) {
         self.pending_input = None;
+        self.pending_input_bytes = 0;
         self.pending_output.clear();
         self.pending_output_overflowed = false;
         self.budget
             .resize(self.last_bytes)
             .expect("releasing retained history budget cannot fail");
+    }
+
+    pub(crate) fn reset_pending_input_for_compaction(&mut self) {
+        self.pending_input = Some(Vec::new());
+        self.pending_input_bytes = 2;
+    }
+
+    pub(crate) fn last_response_id_hash(&self) -> Option<[u8; 32]> {
+        self.last_id_hash.or_else(|| {
+            self.last
+                .as_ref()
+                .map(|(response_id, _)| Sha256::digest(response_id.as_bytes()).into())
+        })
     }
 
     /// Retain the output items of the turn being built. A streaming upstream
@@ -975,11 +1094,12 @@ impl AdaptedResponsesHistory {
         previous_history: Option<&Self>,
     ) -> Result<bool> {
         self.pending_input = None;
+        self.pending_input_bytes = 0;
         self.pending_output.clear();
         self.pending_output_overflowed = false;
         self.budget.resize(self.last_bytes)?;
         // Count without allocating a second encoded request. Reserve before
-        // cloning history into pending state and the expanded request body.
+        // retaining history in pending state and (for adapted routes) expanding the body.
         let request_bytes = bounded_json_bytes(body, MAX_REQUEST_BYTES)?;
         let Some(object) = body.as_object_mut() else {
             return Ok(false);
@@ -989,10 +1109,16 @@ impl AdaptedResponsesHistory {
             .filter(|value| !value.is_null())
             .and_then(Value::as_str)
             .map(str::trim);
-        let (last, previous_bytes) = previous_history
-            .map_or((&self.last, self.last_bytes), |history| {
-                (&history.last, history.last_bytes)
-            });
+        let (last, previous_bytes, previous_requires_http) = previous_history.map_or(
+            (&self.last, self.last_bytes, self.last_requires_native_http),
+            |history| {
+                (
+                    &history.last,
+                    history.last_bytes,
+                    history.requires_native_http,
+                )
+            },
+        );
         let previous = if let Some(previous_response_id) = previous_response_id {
             if !native && !is_codey_synthetic_response_id(previous_response_id) {
                 return Ok(false);
@@ -1026,22 +1152,35 @@ impl AdaptedResponsesHistory {
             Some(input @ (Value::String(_) | Value::Object(_))) => vec![input.clone()],
             Some(_) => return Ok(false),
         };
-        self.requires_native_http = previous_history
-            .is_some_and(|history| history.requires_native_http)
-            // A matched external snapshot already classified its full history.
-            // The local flag may instead describe an abandoned pending turn.
-            || (previous_history.is_none()
-                && previous.is_some_and(|context| context.iter().any(native_item_requires_http)))
+        let input_bytes = bounded_json_bytes(&input, MAX_REQUEST_BYTES)?;
+        self.requires_native_http = (previous.is_some() && previous_requires_http)
             || input.iter().any(native_item_requires_http);
-        let mut context = previous.cloned().unwrap_or_default();
-        context.extend(input);
+        let prev_len = previous.map_or(0, Vec::len);
+        let mut context = Vec::with_capacity(prev_len + input.len());
+        if let Some(prev) = previous {
+            context.extend(prev.iter().cloned());
+        }
+        context.extend(input.into_iter().map(Arc::new));
+        let pending_bytes = if previous.is_some() {
+            combine_json_array_bytes(
+                prev_len,
+                previous_bytes,
+                context.len() - prev_len,
+                input_bytes,
+            )
+        } else {
+            input_bytes
+        };
         if !expand || previous_response_id.is_none() {
             self.pending_input = Some(context);
+            self.pending_input_bytes = pending_bytes;
             return Ok(false);
         }
-        self.pending_input = Some(context.clone());
+        let expanded: Vec<Value> = context.iter().map(|item| (**item).clone()).collect();
+        self.pending_input = Some(context);
+        self.pending_input_bytes = pending_bytes;
         object.remove("previous_response_id");
-        object.insert("input".to_string(), Value::Array(context));
+        object.insert("input".to_string(), Value::Array(expanded));
         Ok(true)
     }
 
@@ -1055,13 +1194,18 @@ impl AdaptedResponsesHistory {
         }
         let output = self.take_streamed_output(output);
         self.requires_native_http |= output.iter().any(native_item_requires_http);
-        let bytes = bounded_json_bytes(
-            self.pending_input
-                .as_ref()
-                .expect("pending input was checked"),
-            MAX_REQUEST_BYTES,
-        )?
-        .saturating_add(bounded_json_bytes(&output, MAX_REQUEST_BYTES)?);
+        let output_bytes = bounded_json_bytes(&output, MAX_REQUEST_BYTES)?;
+        let pending_len = self
+            .pending_input
+            .as_ref()
+            .expect("pending input was checked")
+            .len();
+        let bytes = combine_json_array_bytes(
+            pending_len,
+            self.pending_input_bytes,
+            output.len(),
+            output_bytes,
+        );
         if bytes > MAX_REQUEST_BYTES {
             anyhow::bail!("会话历史超过上限，请先压缩上下文");
         }
@@ -1071,9 +1215,12 @@ impl AdaptedResponsesHistory {
             .pending_input
             .take()
             .expect("pending input was checked");
-        context.extend(output);
+        self.pending_input_bytes = 0;
+        context.extend(output.into_iter().map(Arc::new));
         // ponytail: Codex continuations are linear; retain branches only if a client needs them.
+        self.last_id_hash = Some(Sha256::digest(response_id.as_bytes()).into());
         self.last = Some((response_id.to_string(), context));
+        self.last_requires_native_http = self.requires_native_http;
         self.last_bytes = bytes;
         self.budget.resize(bytes)?;
         Ok(())
@@ -1159,7 +1306,7 @@ mod history_tests {
                 assert!(!next.requires_native_http);
                 assert_eq!(
                     next.pending_input.unwrap(),
-                    vec![json!({"role":"user","content":"fresh"})]
+                    vec![Arc::new(json!({"role":"user","content":"fresh"}))]
                 );
             }
         }
@@ -1312,7 +1459,7 @@ mod history_tests {
             let mut history = AdaptedResponsesHistory {
                 last: Some((
                     "resp-retained".into(),
-                    vec![json!({"role":"assistant","content":"retained"})],
+                    vec![Arc::new(json!({"role":"assistant","content":"retained"}))],
                 )),
                 last_bytes: RETAINED_RESPONSE_BUDGET_BYTES,
                 ..Default::default()

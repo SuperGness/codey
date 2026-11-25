@@ -96,7 +96,7 @@ async fn header_deletions_and_content_type_survive_every_http_protocol_and_confi
         ]);
         let router = LocalRouter::start(&config).await.unwrap();
         let endpoint = router.endpoint();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = test_http_client_builder().no_proxy().build().unwrap();
         for updated in [false, true] {
             if updated {
                 config.profiles[0]

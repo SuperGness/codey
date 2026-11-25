@@ -150,12 +150,17 @@ impl<'a> ResponsesSseState<'a> {
         })]
     }
 
-    pub(crate) fn text_delta(&mut self, delta: &str) -> Vec<Value> {
+    pub(crate) async fn emit_text_delta<D>(&mut self, downstream: &mut D, delta: &str) -> Result<()>
+    where
+        D: ResponsesDownstream + ?Sized,
+    {
         if delta.is_empty() {
-            return Vec::new();
+            return Ok(());
         }
-        let mut events = self.ensure_message();
-        let response_id = self.response_id.clone();
+        let added_message = self.ensure_message();
+        for event in added_message {
+            downstream.write_event(&event).await?;
+        }
         let message = self
             .message
             .as_mut()
@@ -165,34 +170,49 @@ impl<'a> ResponsesSseState<'a> {
             message.next_content_index += 1;
             index
         });
-        if message.text.is_empty() {
-            events.push(json!({
-                "type":"response.content_part.added",
-                "response_id":response_id,
-                "item_id":message.item_id,
-                "output_index":message.output_index,
-                "content_index":content_index,
-                "part":{"type":"output_text","text":"","annotations":[]},
-            }));
-        }
+        let needs_part_added = message.text.is_empty();
         message.text.push_str(delta);
-        events.push(json!({
-            "type":"response.output_text.delta",
-            "response_id":response_id,
-            "item_id":message.item_id,
-            "output_index":message.output_index,
-            "content_index":content_index,
-            "delta":delta,
-        }));
-        events
+        if needs_part_added {
+            let message = self.message.as_ref().expect("message exists");
+            downstream
+                .write_event(&json!({
+                    "type":"response.content_part.added",
+                    "response_id":self.response_id,
+                    "item_id":message.item_id,
+                    "output_index":message.output_index,
+                    "content_index":content_index,
+                    "part":{"type":"output_text","text":"","annotations":[]},
+                }))
+                .await?;
+        }
+        let message = self.message.as_ref().expect("message exists");
+        downstream
+            .write_borrowed_delta(
+                "response.output_text.delta",
+                &self.response_id,
+                &message.item_id,
+                message.output_index,
+                Some(content_index),
+                delta,
+            )
+            .await
     }
 
-    pub(crate) fn refusal_delta(&mut self, delta: &str) -> Vec<Value> {
+    pub(crate) async fn emit_refusal_delta<D>(
+        &mut self,
+        downstream: &mut D,
+        delta: &str,
+    ) -> Result<()>
+    where
+        D: ResponsesDownstream + ?Sized,
+    {
         if delta.is_empty() {
-            return Vec::new();
+            return Ok(());
         }
-        let mut events = self.ensure_message();
-        let response_id = self.response_id.clone();
+        let added_message = self.ensure_message();
+        for event in added_message {
+            downstream.write_event(&event).await?;
+        }
         let message = self
             .message
             .as_mut()
@@ -202,28 +222,147 @@ impl<'a> ResponsesSseState<'a> {
             message.next_content_index += 1;
             index
         });
-        if message.refusal.is_empty() {
-            events.push(json!({
-                "type":"response.content_part.added",
-                "response_id":response_id,
-                "item_id":message.item_id,
-                "output_index":message.output_index,
-                "content_index":content_index,
-                "part":{"type":"refusal","refusal":""},
-            }));
-        }
+        let needs_part_added = message.refusal.is_empty();
         message.refusal.push_str(delta);
-        events.push(json!({
-            "type":"response.refusal.delta",
-            "response_id":response_id,
-            "item_id":message.item_id,
-            "output_index":message.output_index,
-            "content_index":content_index,
-            "delta":delta,
-        }));
-        events
+        if needs_part_added {
+            let message = self.message.as_ref().expect("message exists");
+            downstream
+                .write_event(&json!({
+                    "type":"response.content_part.added",
+                    "response_id":self.response_id,
+                    "item_id":message.item_id,
+                    "output_index":message.output_index,
+                    "content_index":content_index,
+                    "part":{"type":"refusal","refusal":""},
+                }))
+                .await?;
+        }
+        let message = self.message.as_ref().expect("message exists");
+        downstream
+            .write_borrowed_delta(
+                "response.refusal.delta",
+                &self.response_id,
+                &message.item_id,
+                message.output_index,
+                Some(content_index),
+                delta,
+            )
+            .await
     }
 
+    pub(crate) async fn emit_tool_delta<D>(
+        &mut self,
+        downstream: &mut D,
+        upstream_index: usize,
+        call_id: Option<&str>,
+        name_delta: Option<&str>,
+        arguments_delta: Option<&str>,
+        fallback_arguments: Option<String>,
+    ) -> Result<()>
+    where
+        D: ResponsesDownstream + ?Sized,
+    {
+        let tool = self
+            .tools
+            .entry(upstream_index)
+            .or_insert_with(|| ResponsesStreamTool {
+                item_id: String::new(),
+                output_index: None,
+                call_id: String::new(),
+                name: String::new(),
+                response_name: None,
+                arguments: String::new(),
+                response_input: None,
+                emitted_arguments: 0,
+                fallback_arguments: None,
+                added: false,
+            });
+        if tool.call_id.is_empty()
+            && let Some(call_id) = call_id.filter(|value| !value.is_empty())
+        {
+            tool.call_id = call_id.to_string();
+        }
+        if let Some(name_delta) = name_delta {
+            tool.name.push_str(name_delta);
+        }
+        if tool.fallback_arguments.is_none() {
+            tool.fallback_arguments = fallback_arguments;
+        }
+        if let Some(arguments_delta) = arguments_delta {
+            tool.arguments.push_str(arguments_delta);
+        }
+        if tool.response_name.is_none()
+            && !tool.name.is_empty()
+            && let Some(response_name) = self
+                .tool_bridge
+                .restore_stream_upstream_name(&tool.name, false)?
+        {
+            tool.response_name = Some(response_name);
+        }
+
+        let added_event = if !tool.added
+            && let Some(response_name) = tool.response_name.as_ref()
+        {
+            if tool.call_id.is_empty() {
+                tool.call_id = format!("call_codey_{}", Uuid::new_v4());
+            }
+            if tool.item_id.is_empty() {
+                tool.item_id = responses_tool_call_item_id(response_name);
+            }
+            let output_index = self.next_output_index;
+            self.next_output_index += 1;
+            tool.output_index = Some(output_index);
+            tool.added = true;
+            self.output_order
+                .push(StreamOutputKind::Tool(upstream_index));
+            Some(json!({
+                "type":"response.output_item.added",
+                "response_id":self.response_id,
+                "output_index":output_index,
+                "item":responses_tool_call_item_with_id(
+                    response_name,
+                    tool.item_id.clone(),
+                    tool.call_id.clone(),
+                    responses_tool_call_initial_payload(response_name),
+                    "in_progress",
+                )
+            }))
+        } else {
+            None
+        };
+        if let Some(event) = added_event {
+            downstream.write_event(&event).await?;
+        }
+        let tool = self
+            .tools
+            .get_mut(&upstream_index)
+            .expect("tool entry exists");
+        if tool.added
+            && tool
+                .response_name
+                .as_ref()
+                .is_some_and(ResponsesToolName::is_function)
+            && tool.emitted_arguments < tool.arguments.len()
+        {
+            let start = tool.emitted_arguments;
+            tool.emitted_arguments = tool.arguments.len();
+            let output_index = tool.output_index.expect("added tool owns an output index");
+            let tool = self.tools.get(&upstream_index).expect("tool entry exists");
+            downstream
+                .write_borrowed_delta(
+                    "response.function_call_arguments.delta",
+                    &self.response_id,
+                    &tool.item_id,
+                    output_index,
+                    None,
+                    &tool.arguments[start..],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn tool_delta(
         &mut self,
         upstream_index: usize,
@@ -688,6 +827,71 @@ pub(crate) fn stream_tool_item(tool: &ResponsesStreamTool) -> Result<Value> {
         payload,
         "completed",
     ))
+}
+
+#[derive(serde::Serialize)]
+struct BorrowedResponsesDeltaEvent<'a> {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    response_id: &'a str,
+    item_id: &'a str,
+    output_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_index: Option<usize>,
+    delta: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_id: Option<&'a str>,
+}
+
+pub(crate) fn encode_responses_websocket_delta_event(
+    event_type: &'static str,
+    response_id: &str,
+    item_id: &str,
+    output_index: usize,
+    content_index: Option<usize>,
+    delta: &str,
+    stream_id: Option<&str>,
+) -> Result<String> {
+    serde_json::to_string(&BorrowedResponsesDeltaEvent {
+        event_type,
+        response_id,
+        item_id,
+        output_index,
+        content_index,
+        delta,
+        stream_id,
+    })
+    .context("序列化 Responses WebSocket delta 事件失败")
+}
+
+pub(crate) async fn write_responses_sse_delta_event(
+    stream: &mut TcpStream,
+    event_type: &'static str,
+    response_id: &str,
+    item_id: &str,
+    output_index: usize,
+    content_index: Option<usize>,
+    delta: &str,
+) -> Result<()> {
+    let mut payload = Vec::with_capacity(160 + delta.len());
+    payload.extend_from_slice(b"event: ");
+    payload.extend_from_slice(event_type.as_bytes());
+    payload.extend_from_slice(b"\ndata: ");
+    serde_json::to_writer(
+        &mut payload,
+        &BorrowedResponsesDeltaEvent {
+            event_type,
+            response_id,
+            item_id,
+            output_index,
+            content_index,
+            delta,
+            stream_id: None,
+        },
+    )
+    .context("序列化 Responses SSE delta 事件失败")?;
+    payload.extend_from_slice(b"\n\n");
+    write_chunked_frame(stream, &payload, "写入 Responses SSE 事件失败").await
 }
 
 pub(crate) async fn write_responses_sse_event(stream: &mut TcpStream, event: &Value) -> Result<()> {

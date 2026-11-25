@@ -97,7 +97,7 @@ async fn native_sse_forwards_first_delta_before_completion_and_keeps_log_usage()
             .unwrap();
         socket.write_all(b"0\r\n\r\n").await.unwrap();
     });
-    let response = reqwest::Client::builder()
+    let response = test_http_client_builder()
         .no_proxy()
         .build()
         .unwrap()

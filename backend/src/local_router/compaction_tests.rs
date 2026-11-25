@@ -241,7 +241,7 @@ async fn compaction_compatibility_hot_reload_preserves_http_and_sse_results() {
         .await
         .unwrap();
     });
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
@@ -304,7 +304,7 @@ async fn compaction_compatibility_rejects_invalid_payloads_before_upstream() {
     config.profiles[0].remote_compaction_protocol = RemoteCompactionProtocol::CompactEndpoint;
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::new();
+    let client = test_http_client();
     for mut body in unsupported_compaction_bodies() {
         body["model"] = json!(model_alias(&provider, &model));
         body["stream"] = json!(true);
@@ -398,7 +398,7 @@ async fn compaction_compatibility_rejects_bad_results_and_does_not_retry() {
     });
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
@@ -451,7 +451,7 @@ async fn gateway_compaction_logs_the_resolved_route_and_model() {
     .await
     .unwrap();
     let endpoint = router.endpoint();
-    let response = reqwest::Client::new().post(format!("{}/responses", endpoint.base_url))
+    let response = test_http_client().post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .json(&json!({"model":model_alias(&provider, &model),"input":[{"type":"compaction_trigger"}]}))
         .send().await.unwrap();
@@ -516,7 +516,7 @@ async fn gateway_compaction_returns_portable_summary_on_all_protocols() {
                 assert!(body.get("tools").is_none());
             }
         });
-        let client = reqwest::Client::new();
+        let client = test_http_client();
         let response = client.post(format!("{}/responses", endpoint.base_url)).bearer_auth(&endpoint.token)
             .json(&json!({"model":model_alias(&provider, &model),"stream":index == 0,"input":[{"role":"user","content":"继续实现"},{"type":"compaction_trigger"}],"tools":[{"type":"function","name":"unused","parameters":{"type":"object"}}],"tool_choice":"auto","parallel_tool_calls":true})).send().await.unwrap();
         assert_eq!(response.status().as_u16(), 200);
@@ -607,7 +607,7 @@ async fn gateway_compaction_rejects_truncated_summaries_on_all_protocols() {
                 .await
                 .unwrap();
         });
-        let response = reqwest::Client::new().post(format!("{}/responses", endpoint.base_url)).bearer_auth(&endpoint.token)
+        let response = test_http_client().post(format!("{}/responses", endpoint.base_url)).bearer_auth(&endpoint.token)
             .json(&json!({"model":model_alias(&provider, &model),"max_output_tokens":128,"input":[{"role":"user","content":"preserve this"},{"type":"compaction_trigger"}]})).send().await.unwrap();
         assert_eq!(response.status().as_u16(), 502, "{protocol}");
         assert_eq!(
@@ -646,7 +646,7 @@ async fn gateway_compaction_http_errors_preserve_status_retry_and_diagnostics() 
             config.profiles[0].normalize();
             let router = LocalRouter::start(&config).await.unwrap();
             let endpoint = router.endpoint();
-            let client = reqwest::Client::builder()
+            let client = test_http_client_builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -838,7 +838,7 @@ async fn gateway_compaction_collects_native_sse_and_rejects_empty_or_failed_summ
         (400, CONTEXT_LENGTH_EXCEEDED),
         (500, "upstream_http_error"),
     ] {
-        let response = reqwest::Client::new()
+        let response = test_http_client()
             .post(format!("{}/responses/compact", endpoint.base_url))
             .bearer_auth(&endpoint.token)
             .json(&json!({"model":model_alias(&provider, &model),"input":"继续任务"}))
@@ -884,7 +884,7 @@ async fn gateway_compaction_http_200_failures_keep_upstream_diagnostics() {
                 config.profiles[0].normalize();
                 let router = LocalRouter::start(&config).await.unwrap();
                 let endpoint = router.endpoint();
-                let response = reqwest::Client::new()
+                let response = test_http_client()
                     .post(format!("{}/responses/compact", endpoint.base_url))
                     .bearer_auth(&endpoint.token)
                     .json(&json!({"model":model_alias(&provider,&model),"input":"continue"}))
@@ -1076,7 +1076,7 @@ async fn gateway_compaction_handoff_failures_keep_json_and_stream_contracts() {
                     "rate_limit_error"
                 };
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let client = reqwest::Client::builder().no_proxy().build().unwrap();
+                let client = test_http_client_builder().no_proxy().build().unwrap();
                 let request = client
                     .get(format!("http://{}/", listener.local_addr().unwrap()))
                     .send();
@@ -1246,7 +1246,7 @@ async fn concurrent_compaction_across_parent_and_subagents_with_shared_session_s
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
     let alias = model_alias(&provider, &model);
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
@@ -1443,7 +1443,7 @@ async fn subagent_compaction_does_not_block_parent_portable_compaction_prepare()
     );
 
     let endpoint = router.endpoint();
-    let client = reqwest::Client::builder()
+    let client = test_http_client_builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()

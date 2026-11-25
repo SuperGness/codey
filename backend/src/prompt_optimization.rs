@@ -846,22 +846,24 @@ fn missing_text_detail(value: &Value, protocol: OptimizationUpstreamProtocol) ->
 
 fn extract_responses_stream_optimized_text(body: &[u8]) -> Result<String, String> {
     let body = strip_utf8_bom(body);
-    let mut cursor = 0;
+    let mut cursor = crate::local_router::SseCursor::default();
     let mut text = String::new();
     let mut final_text = None;
-    while cursor < body.len() {
-        let (frame, trailing) = match take_next_sse_frame(body, &mut cursor) {
+    while cursor.consumed < body.len() {
+        let (frame, trailing) = match crate::local_router::take_next_sse_frame(body, &mut cursor) {
             Some(frame) => (frame, false),
             None => {
-                let frame = &body[cursor..];
-                cursor = body.len();
+                let frame = &body[cursor.consumed..];
+                cursor.consumed = body.len();
                 (frame, true)
             }
         };
         if frame.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Some(data) = sse_frame_data(frame)? else {
+        let Some(data) = crate::local_router::sse_frame_data(frame)
+            .map_err(|_| "Responses SSE 不是 UTF-8".to_string())?
+        else {
             continue;
         };
         let data = data.trim();
@@ -951,36 +953,6 @@ fn responses_stream_error_message(event: &Value) -> Option<String> {
         .or_else(|| Some(event.to_string()))
 }
 
-fn take_next_sse_frame<'a>(buffer: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
-    let remaining = buffer.get(*cursor..)?;
-    let mut delimiter = None;
-    for index in 0..remaining.len() {
-        if remaining.get(index..index + 4) == Some(b"\r\n\r\n") {
-            delimiter = Some((index, 4));
-            break;
-        }
-        if remaining.get(index..index + 2) == Some(b"\n\n") {
-            delimiter = Some((index, 2));
-            break;
-        }
-    }
-    let (index, length) = delimiter?;
-    let frame_start = *cursor;
-    let frame_end = frame_start + index;
-    *cursor = frame_end + length;
-    Some(&buffer[frame_start..frame_end])
-}
-
-fn sse_frame_data(frame: &[u8]) -> Result<Option<String>, String> {
-    let frame = std::str::from_utf8(frame).map_err(|_| "Responses SSE 不是 UTF-8".to_string())?;
-    let data = frame
-        .lines()
-        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
-        .map(str::trim_start)
-        .collect::<Vec<_>>();
-    Ok((!data.is_empty()).then(|| data.join("\n")))
-}
-
 fn extract_responses_optimized_text(response: &Value) -> Option<String> {
     if let Some(text) = response.get("output_text").and_then(Value::as_str) {
         return Some(text.to_string());
@@ -1068,39 +1040,21 @@ fn extract_optimized_text(
 }
 
 async fn read_bounded_body(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max_bytes: usize,
     label: &str,
     api_key: &str,
 ) -> Result<Vec<u8>, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err(format!("{label}过大，已停止读取"));
-    }
-
-    let initial_capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or_default()
-        .min(max_bytes);
-    let mut body = Vec::with_capacity(initial_capacity);
-    while let Some(chunk) = response
-        .chunk()
+    crate::http_response::read_bounded_body(response, max_bytes, label)
         .await
-        .map_err(|error| sanitize_error(&format!("读取{label}失败：{error}"), api_key))?
-    {
-        let next_length = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| format!("{label}过大，已停止读取"))?;
-        if next_length > max_bytes {
-            return Err(format!("{label}过大，已停止读取"));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains("超过安全上限") {
+                format!("{label}过大，已停止读取")
+            } else {
+                sanitize_error(&message, api_key)
+            }
+        })
 }
 
 async fn response_body_preview(

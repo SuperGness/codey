@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use rusqlite::{
@@ -16,8 +16,8 @@ use super::{
     RouteRequestLogCursor, RouteRequestLogDailyTrend, RouteRequestLogGroup,
     RouteRequestLogModelPage, RouteRequestLogModelQuery, RouteRequestLogQuery,
     RouteRequestLogQueryItem, RouteRequestLogQueryPage, RouteRequestLogSummary,
-    RouteRequestLogTrend, SQLITE_BUSY_TIMEOUT, SQLITE_FILE_NAME, SessionGenerationTotals,
-    lock_unpoisoned, to_i64, unix_timestamp_ms,
+    RouteRequestLogTrend, SQLITE_BUSY_TIMEOUT, SQLITE_FILE_NAME, SessionGenerationTotals, to_i64,
+    unix_timestamp_ms,
 };
 use crate::config::RouteRequestLogBackend;
 use crate::sqlite_util::table_columns;
@@ -1092,7 +1092,7 @@ pub(crate) fn query_route_request_log_stats_with_model_aliases(
     Ok(result)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct RouteRequestLogOptionalColumns {
     diagnostics: bool,
     /// Billing tier columns used by the pricing estimate.
@@ -1108,6 +1108,28 @@ struct RouteRequestLogOptionalColumns {
     concurrency_wait: bool,
 }
 
+impl RouteRequestLogOptionalColumns {
+    fn all_known(self) -> bool {
+        self.diagnostics
+            && self.tiers
+            && self.official_account
+            && self.request_shape
+            && self.response_headers
+            && self.response_model
+            && self.concurrency_wait
+    }
+
+    fn merge(&mut self, detected: Self) {
+        self.diagnostics |= detected.diagnostics;
+        self.tiers |= detected.tiers;
+        self.official_account |= detected.official_account;
+        self.request_shape |= detected.request_shape;
+        self.response_headers |= detected.response_headers;
+        self.response_model |= detected.response_model;
+        self.concurrency_wait |= detected.concurrency_wait;
+    }
+}
+
 /// These columns are added by the writer at open time and never dropped, so a
 /// positive probe can be remembered per database path. Negative results keep
 /// probing: the writer may add the columns while this process is running.
@@ -1115,91 +1137,36 @@ fn sqlite_optional_columns(
     connection: &Connection,
     path: &Path,
 ) -> rusqlite::Result<RouteRequestLogOptionalColumns> {
-    static TIERED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    static ACCOUNTED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    static SHAPED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    static RESPONSE_HEADER_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    static RESPONSE_MODEL_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    static CONCURRENCY_WAIT_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    static DIAGNOSTIC_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    let tiers_known = sqlite_path_known(&TIERED_PATHS, path);
-    let official_known = sqlite_path_known(&ACCOUNTED_PATHS, path);
-    let shape_known = sqlite_path_known(&SHAPED_PATHS, path);
-    let headers_known = sqlite_path_known(&RESPONSE_HEADER_PATHS, path);
-    let model_known = sqlite_path_known(&RESPONSE_MODEL_PATHS, path);
-    let wait_known = sqlite_path_known(&CONCURRENCY_WAIT_PATHS, path);
-    let diagnostics_known = sqlite_path_known(&DIAGNOSTIC_PATHS, path);
-    if tiers_known
-        && official_known
-        && shape_known
-        && headers_known
-        && model_known
-        && wait_known
-        && diagnostics_known
+    static OPTIONAL_COLUMNS_BY_PATH: OnceLock<
+        RwLock<HashMap<PathBuf, RouteRequestLogOptionalColumns>>,
+    > = OnceLock::new();
+    let cache = OPTIONAL_COLUMNS_BY_PATH.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(known) = cache
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .copied()
+        && known.all_known()
     {
-        return Ok(RouteRequestLogOptionalColumns {
-            diagnostics: true,
-            tiers: true,
-            official_account: true,
-            request_shape: true,
-            response_headers: true,
-            response_model: true,
-            concurrency_wait: true,
-        });
+        return Ok(known);
     }
     let columns = table_columns(connection, "route_request_logs")?;
-    Ok(RouteRequestLogOptionalColumns {
-        diagnostics: sqlite_remember_column(
-            &DIAGNOSTIC_PATHS,
-            path,
-            ["route_decision", "upstream_attempts", "attempts_omitted"]
-                .iter()
-                .all(|column| columns.contains(*column)),
-        ),
-        concurrency_wait: sqlite_remember_column(
-            &CONCURRENCY_WAIT_PATHS,
-            path,
-            columns.contains("concurrency_wait_ms"),
-        ),
-        tiers: sqlite_remember_column(&TIERED_PATHS, path, columns.contains("service_tier")),
-        official_account: sqlite_remember_column(
-            &ACCOUNTED_PATHS,
-            path,
-            columns.contains("official_account_id"),
-        ),
-        request_shape: sqlite_remember_column(
-            &SHAPED_PATHS,
-            path,
-            columns.contains("request_bytes"),
-        ),
-        response_headers: sqlite_remember_column(
-            &RESPONSE_HEADER_PATHS,
-            path,
-            columns.contains("upstream_response_headers"),
-        ),
-        response_model: sqlite_remember_column(
-            &RESPONSE_MODEL_PATHS,
-            path,
-            columns.contains("upstream_response_model"),
-        ),
-    })
-}
-
-fn sqlite_path_known(known_paths: &OnceLock<Mutex<HashSet<PathBuf>>>, path: &Path) -> bool {
-    let known = known_paths.get_or_init(|| Mutex::new(HashSet::new()));
-    lock_unpoisoned(known).contains(path)
-}
-
-fn sqlite_remember_column(
-    known_paths: &OnceLock<Mutex<HashSet<PathBuf>>>,
-    path: &Path,
-    exists: bool,
-) -> bool {
-    if exists {
-        let known = known_paths.get_or_init(|| Mutex::new(HashSet::new()));
-        lock_unpoisoned(known).insert(path.to_path_buf());
-    }
-    exists
+    let detected = RouteRequestLogOptionalColumns {
+        diagnostics: ["route_decision", "upstream_attempts", "attempts_omitted"]
+            .iter()
+            .all(|column| columns.contains(*column)),
+        concurrency_wait: columns.contains("concurrency_wait_ms"),
+        tiers: columns.contains("service_tier"),
+        official_account: columns.contains("official_account_id"),
+        request_shape: columns.contains("request_bytes"),
+        response_headers: columns.contains("upstream_response_headers"),
+        response_model: columns.contains("upstream_response_model"),
+    };
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.entry(path.to_path_buf()).or_default().merge(detected);
+    Ok(detected)
 }
 
 fn open_query_connection(path: &Path) -> rusqlite::Result<Connection> {
