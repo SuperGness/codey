@@ -229,12 +229,27 @@ pub fn export(root: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn push_unique_warning(warnings: &mut Vec<String>, message: String) {
+    if !warnings.iter().any(|existing| existing == &message) {
+        warnings.push(message);
+    }
+}
+
+fn push_discover_path_warning(warnings: &mut Vec<String>, path: &Path, err: anyhow::Error) {
+    let message = if fsutil::is_symlink_target(path) {
+        format!("已跳过符号链接: {}", path.display())
+    } else {
+        err.to_string()
+    };
+    push_unique_warning(warnings, message);
+}
+
 fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
     if !root.exists() {
         return vec![];
     }
     if let Err(e) = fsutil::safe_path(root) {
-        warnings.push(e.to_string());
+        push_discover_path_warning(warnings, root, e);
         return vec![];
     }
     let mut pending = vec![(root.to_path_buf(), 0)];
@@ -242,37 +257,38 @@ fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
     let mut count = 0usize;
     while let Some((dir, depth)) = pending.pop() {
         if depth > 20 {
-            warnings.push("部分 Skill 目录超过层级限制".to_owned());
+            push_unique_warning(warnings, "部分 Skill 目录超过层级限制".to_owned());
             continue;
         }
         let listing = match fs::read_dir(&dir) {
             Ok(v) => v,
             Err(e) => {
-                warnings.push(format!("无法读取 {}: {e}", dir.display()));
+                push_unique_warning(warnings, format!("无法读取 {}: {e}", dir.display()));
                 continue;
             }
         };
+        let mut child_paths = Vec::new();
         for entry in listing {
             count += 1;
             if count > 20000 {
-                warnings.push("Skill 发现达到条目限制，部分目录未展示".to_owned());
+                push_unique_warning(warnings, "Skill 发现达到条目限制，部分目录未展示".to_owned());
+                found.sort();
                 return found;
             }
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warnings.push(e.to_string());
-                    continue;
-                }
-            };
-            let path = entry.path();
+            match entry {
+                Ok(e) => child_paths.push(e.path()),
+                Err(e) => push_unique_warning(warnings, e.to_string()),
+            }
+        }
+        child_paths.sort();
+        for path in child_paths {
             if let Err(e) = fsutil::safe_path(&path) {
-                warnings.push(e.to_string());
+                push_discover_path_warning(warnings, &path, e);
                 continue;
             }
             if path.is_dir() {
                 if depth + 1 > 20 {
-                    warnings.push("部分 Skill 目录超过层级限制".to_owned());
+                    push_unique_warning(warnings, "部分 Skill 目录超过层级限制".to_owned());
                 } else {
                     pending.push((path, depth + 1));
                 }

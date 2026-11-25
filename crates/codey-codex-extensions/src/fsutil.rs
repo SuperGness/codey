@@ -102,7 +102,11 @@ fn safe_path_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
-                ensure!(meta.file_attributes() & 0x400 == 0, "拒绝重解析点");
+                ensure!(
+                    meta.file_attributes() & 0x400 == 0,
+                    "拒绝重解析点: {}",
+                    path.display()
+                );
             }
             Ok(Some(meta))
         }
@@ -114,6 +118,25 @@ fn safe_path_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
 pub fn safe_path(path: &Path) -> Result<()> {
     safe_path_metadata(path)?;
     Ok(())
+}
+
+pub fn is_symlink_target(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return true;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & 0x400 != 0 {
+                    return true;
+                }
+            }
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn read(path: &Path) -> Result<Option<Vec<u8>>> {

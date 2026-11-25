@@ -658,6 +658,14 @@ fn linked_content_inside_managed_skill_keeps_list_and_uninstall_available() {
     assert_eq!(entry["canEdit"], false);
     assert_eq!(entry["canToggle"], false);
     assert_eq!(entry["canRemove"], true);
+    assert!(inventory["mcpWarnings"].as_array().unwrap().is_empty());
+    assert!(
+        inventory["skillWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("无法完整校验"))
+    );
     assert!(
         inventory["warnings"]
             .as_array()
@@ -1048,9 +1056,32 @@ fn rejects_symbolic_links_without_hiding_other_skills() {
     let root = f.home.join("skills");
     fs::create_dir_all(root.join("safe")).unwrap();
     fs::copy(f.source.join("SKILL.md"), root.join("safe/SKILL.md")).unwrap();
-    symlink(&f.source, root.join("link")).unwrap();
-    assert_eq!(f.list()["skills"].as_array().unwrap().len(), 1);
-    assert!(f.list()["warnings"].as_array().unwrap().len() > 1);
+    let clean = f.list();
+    assert!(clean["warnings"].as_array().unwrap().is_empty());
+    assert!(clean["mcpWarnings"].as_array().unwrap().is_empty());
+    assert!(clean["skillWarnings"].as_array().unwrap().is_empty());
+    assert!(
+        clean["applyNotice"]
+            .as_str()
+            .unwrap()
+            .contains("当前会话和 Codey 启动参数可能覆盖这里的配置")
+    );
+    symlink(&f.source, root.join("z-link")).unwrap();
+    symlink(&f.source, root.join("a-link")).unwrap();
+    let listed = f.list();
+    assert_eq!(listed["skills"].as_array().unwrap().len(), 1);
+    assert!(listed["mcpWarnings"].as_array().unwrap().is_empty());
+    let skill_warnings: Vec<&str> = listed["skillWarnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect();
+    assert_eq!(skill_warnings.len(), 2);
+    assert!(skill_warnings[0].starts_with("已跳过符号链接: "));
+    assert!(skill_warnings[0].ends_with("a-link"));
+    assert!(skill_warnings[1].ends_with("z-link"));
+    assert_eq!(listed["warnings"], listed["skillWarnings"]);
     let actual = f.home.join("real.toml");
     fs::rename(f.home.join("config.toml"), &actual).unwrap();
     symlink(actual, f.home.join("config.toml")).unwrap();

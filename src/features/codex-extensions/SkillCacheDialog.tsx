@@ -11,6 +11,7 @@ import {
 } from "@tabler/icons-react";
 import { ConfirmationDialog } from "./ConfirmationDialog";
 import { ExtensionError } from "./ExtensionError";
+import { ExtensionWarnings } from "./ExtensionWarnings";
 import { getSkillCacheRequests } from "./requests";
 import { causeText } from "./state";
 import type { ExtensionTransport, SkillCacheInventory, SkillEntry } from "./types";
@@ -106,7 +107,7 @@ export function SkillCacheDialog({ open, request, container, onClose }: {
             {error && <ExtensionError message={error} />}
             {blocked && cache && <p role="status" className="m-0 text-xs text-warning">请刷新缓存确认当前状态，再继续删除。</p>}
             {notice && <p role="status" className="m-0 text-xs text-muted">{notice}</p>}
-            {cache?.warnings.map((warning, index) => <p key={index} role="status" className="m-0 break-words text-xs text-warning">{warning}</p>)}
+            <ExtensionWarnings warnings={cache?.warnings} />
             {busy && <p role="status" className="m-0 text-xs text-muted">{busy === "list" ? "正在读取缓存…" : busy === "remove" ? "正在删除缓存…" : "正在读取 SKILL.md…"}</p>}
             {cache?.skills.length === 0 && (
               <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--codey-border-strong)] bg-[var(--codey-panel)] py-10 text-center">

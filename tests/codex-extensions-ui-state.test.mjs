@@ -10,6 +10,8 @@ const {
   canToggle,
   batchTargets,
   dependencyStatus,
+  getScopedWarnings,
+  summarizeWarnings,
 } = await loadTypeScriptModule(
   new URL("../src/features/codex-extensions/state.ts", import.meta.url),
 );
@@ -179,4 +181,46 @@ test("declared dependencies distinguish scope, ambiguous names, unknown state an
     }),
     /多个/,
   );
+});
+
+test("warnings isolate MCP and Skill scopes and fall back for legacy payloads", () => {
+  const scoped = {
+    warnings: ["已跳过符号链接: /Users/demo/.agents/skills/a"],
+    mcpWarnings: [],
+    skillWarnings: [
+      "已跳过符号链接: /Users/demo/.agents/skills/a",
+      "已跳过符号链接: /Users/demo/.agents/skills/a",
+      "  ",
+    ],
+  };
+  assert.deepEqual(getScopedWarnings(scoped, "mcp"), []);
+  assert.deepEqual(getScopedWarnings(scoped, "skill"), [
+    "已跳过符号链接: /Users/demo/.agents/skills/a",
+  ]);
+  const legacy = { warnings: ["开发预览：仅修改内存数据。"] };
+  assert.deepEqual(getScopedWarnings(legacy, "mcp"), [
+    "开发预览：仅修改内存数据。",
+  ]);
+  assert.deepEqual(getScopedWarnings(legacy, "skill"), [
+    "开发预览：仅修改内存数据。",
+  ]);
+  assert.deepEqual(getScopedWarnings(null, "mcp"), []);
+});
+
+test("summarizeWarnings groups skipped symlink formats separately from other warnings", () => {
+  const summary = summarizeWarnings([
+    "已跳过符号链接: /Users/demo/.agents/skills/a",
+    "拒绝符号链接目标: /Users/demo/.agents/skills/b",
+    "拒绝重解析点: C:\\Users\\demo\\.agents\\skills\\c",
+    "已跳过符号链接: /Users/demo/.agents/skills/a",
+    "部分 Skill 目录超过层级限制",
+    "部分 Skill 目录超过层级限制",
+  ]);
+  assert.equal(summary.total, 4);
+  assert.deepEqual(summary.symlinkPaths, [
+    "/Users/demo/.agents/skills/a",
+    "/Users/demo/.agents/skills/b",
+    "C:\\Users\\demo\\.agents\\skills\\c",
+  ]);
+  assert.deepEqual(summary.otherWarnings, ["部分 Skill 目录超过层级限制"]);
 });

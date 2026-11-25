@@ -9,7 +9,6 @@ import {
   DialogTitle,
 } from "../../components/ui";
 import {
-  IconAlertTriangle,
   IconBook2,
   IconFolderPlus,
   IconPlus,
@@ -23,6 +22,7 @@ import { ExtensionEditor } from "./ExtensionEditor";
 import { ExtensionScope, ExtensionFilters } from "./ExtensionToolbar";
 import { ExtensionError } from "./ExtensionError";
 import { ExtensionList } from "./ExtensionList";
+import { ExtensionWarnings } from "./ExtensionWarnings";
 import {
   draftChanged,
   selectResources,
@@ -30,6 +30,7 @@ import {
   canToggle,
   batchTargets,
   editorError,
+  getScopedWarnings,
 } from "./state";
 import type {
   Confirmation,
@@ -502,16 +503,7 @@ function CodexExtensionsPageComponent({
           </div>
         )}
 
-        {inventory?.warnings.map((warning, index) => (
-          <div
-            key={index}
-            role="status"
-            className="flex items-start gap-2 rounded-xl border border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--codey-amber)]"
-          >
-            <IconAlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1 break-words">{warning}</span>
-          </div>
-        ))}
+        <ExtensionWarnings warnings={getScopedWarnings(inventory, kind)} />
 
         {inventory && (
           <ExtensionFilters

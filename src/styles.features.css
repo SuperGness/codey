@@ -1446,6 +1446,125 @@
   word-break: break-all;
 }
 
+/* 聚合折叠提示条（单条直显、多条或符号链接跳过按需展开） */
+.extension-warning-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--codey-amber-border);
+  background: var(--codey-amber-soft);
+  color: var(--codey-amber);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.extension-warning-disclosure {
+  border: 1px solid var(--codey-amber-border);
+  border-radius: 10px;
+  background: var(--codey-amber-soft);
+  color: var(--codey-amber);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.extension-warning-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  line-height: 1.45;
+  transition: background-color 140ms ease;
+}
+
+.extension-warning-summary::-webkit-details-marker {
+  display: none;
+}
+
+.extension-warning-summary:hover {
+  background: color-mix(in srgb, var(--codey-amber) 7%, transparent);
+}
+
+.extension-warning-summary:focus-visible {
+  outline: 2px solid var(--codey-blue);
+  outline-offset: -2px;
+}
+
+.extension-warning-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 550;
+  opacity: 0.9;
+}
+
+.extension-warning-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--codey-amber-border);
+  background: var(--codey-card);
+  color: var(--codey-text-soft);
+}
+
+.extension-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--codey-amber);
+}
+
+.extension-warning-list-item {
+  word-break: break-word;
+}
+
+.extension-warning-symlink-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.extension-warning-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--codey-muted);
+}
+
+.extension-warning-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.extension-warning-path-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--codey-panel);
+  border: 1px solid var(--codey-border-subtle);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--codey-text-soft);
+}
+
 /* 筛选与搜索工具栏 */
 .extension-filter-panel {
   display: flex;

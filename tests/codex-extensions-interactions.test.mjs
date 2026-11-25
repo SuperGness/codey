@@ -183,3 +183,99 @@ test("批量选择跨页达到 100 项上限时，已部分选中的页可取消
   assert.equal(elementProps(cappedEmptyBtn).disabled, true);
   assert.equal(elementProps(cappedEmptyBtn).title, "最多同时选择 100 项");
 });
+
+test("警告组件按单条直显与符号链接折叠汇总展示，且 MCP 与 Skill 页面告警互不串味", () => {
+  const warningGraph = createModuleGraph(
+    new URL("../src/features/codex-extensions/ExtensionWarnings.tsx", import.meta.url),
+    { stubs },
+  );
+  assert.equal(warningGraph.exports.ExtensionWarnings({ warnings: [] }), null);
+
+  const single = warningGraph.exports.ExtensionWarnings({
+    warnings: ["开发预览：仅修改模拟数据。"],
+  });
+  assert.equal(matching(single, (node) => elementType(node) === "details").length, 0);
+  assert.match(textContent(single), /开发预览/);
+
+  const symlinks = warningGraph.exports.ExtensionWarnings({
+    warnings: [
+      "已跳过符号链接: /Users/demo/.agents/skills/alpha",
+      "已跳过符号链接: /Users/demo/.agents/skills/beta",
+    ],
+  });
+  assert.equal(matching(symlinks, (node) => elementType(node) === "details").length, 1);
+  const summaryNode = matching(symlinks, (node) => elementType(node) === "summary")[0];
+  assert.match(textContent(summaryNode), /已跳过 2 个符号链接条目/);
+  assert.equal(matching(symlinks, (node) => elementType(node) === "li").length, 2);
+
+  const mixed = warningGraph.exports.ExtensionWarnings({
+    warnings: [
+      "部分 Skill 目录超过层级限制",
+      "已跳过符号链接: /Users/demo/.agents/skills/alpha",
+    ],
+  });
+  assert.equal(matching(mixed, (node) => elementType(node) === "details").length, 1);
+  assert.match(
+    textContent(matching(mixed, (node) => elementType(node) === "summary")[0]),
+    /有 2 条提示（含 1 个已跳过的符号链接条目）/,
+  );
+
+  const skillWarnings = [
+    "已跳过符号链接: /Users/demo/.agents/skills/alpha",
+    "已跳过符号链接: /Users/demo/.agents/skills/beta",
+  ];
+  const controller = {
+    inventory: {
+      revision: "r1",
+      mcps: [],
+      skills: [],
+      warnings: skillWarnings,
+      mcpWarnings: [],
+      skillWarnings,
+    },
+    scope: { kind: "user" },
+    busy: false,
+    loading: false,
+    checks: {},
+    clearError() {},
+  };
+  const warningsStub = autoStubModule("warnings");
+  const pageGraph = createModuleGraph(
+    new URL("../src/features/codex-extensions/CodexExtensionsPage.tsx", import.meta.url),
+    {
+      autoStub: true,
+      stubs: {
+        ...stubs,
+        "./useExtensionsController": { useExtensionsController: () => controller },
+        "./ExtensionToolbar": autoStubModule("toolbar"),
+        "./ExtensionList": autoStubModule("list"),
+        "./ExtensionWarnings": warningsStub,
+      },
+    },
+  );
+  pageGraph.react.useRef = (initial) => pageGraph.react.useState(() => ({ current: initial }))[0];
+
+  const mcpTree = pageGraph.exports.CodexExtensionsPage({ kind: "mcp", request() {} });
+  const mcpWarningNode = matching(
+    mcpTree,
+    (node) => elementType(node) === warningsStub.ExtensionWarnings,
+  )[0];
+  assert.deepEqual(elementProps(mcpWarningNode).warnings, []);
+  assert.equal(warningGraph.exports.ExtensionWarnings(elementProps(mcpWarningNode)), null);
+
+  pageGraph.restart();
+  const skillTree = pageGraph.exports.CodexExtensionsPage({ kind: "skill", request() {} });
+  const skillWarningNode = matching(
+    skillTree,
+    (node) => elementType(node) === warningsStub.ExtensionWarnings,
+  )[0];
+  assert.deepEqual(elementProps(skillWarningNode).warnings, skillWarnings);
+  const renderedSkillWarnings = warningGraph.exports.ExtensionWarnings(
+    elementProps(skillWarningNode),
+  );
+  assert.equal(
+    matching(renderedSkillWarnings, (node) => elementType(node) === "details").length,
+    1,
+  );
+  assert.match(textContent(renderedSkillWarnings), /已跳过 2 个符号链接条目/);
+});

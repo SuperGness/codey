@@ -120,7 +120,8 @@ impl ExtensionService {
             &parsed_user_doc
         };
         let skill_cfg = skill_config::summary(user_doc)?;
-        let mut warnings = vec!["当前会话和 Codey 启动参数可能覆盖这里的配置。".to_owned()];
+        let mcp_warnings: Vec<String> = Vec::new();
+        let mut skill_warnings: Vec<String> = Vec::new();
         let scope_kind = if matches!(scope, Scope::User) {
             "user"
         } else {
@@ -137,7 +138,7 @@ impl ExtensionService {
                 scope_kind,
                 &registry,
                 &skill_cfg.disabled,
-                &mut warnings,
+                &mut skill_warnings,
                 &mut cache,
             ) {
                 if skill_cfg
@@ -209,7 +210,7 @@ impl ExtensionService {
                         entry["canToggle"] = json!(false);
                         entry["reason"] =
                             json!(format!("目录内容无法完整校验，已暂停编辑与启停：{error}"));
-                        warnings.push(format!(
+                        skill_warnings.push(format!(
                             "{} 的内容无法完整校验，已暂停编辑与启停：{error}",
                             manifest.to_string_lossy()
                         ));
@@ -258,8 +259,10 @@ impl ExtensionService {
                 }
             }
         }
+        let mut warnings = mcp_warnings.clone();
+        warnings.extend(skill_warnings.iter().cloned());
         Ok(
-            json!({"scope":scope,"configPath":config_path,"skillConfigPath":user_config_path,"revision":revision,"mcps":mcps,"skills":entries,"warnings":warnings,"applyNotice":"MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。当前 Codey 启动覆盖可能优先生效。"}),
+            json!({"scope":scope,"configPath":config_path,"skillConfigPath":user_config_path,"revision":revision,"mcps":mcps,"skills":entries,"warnings":warnings,"mcpWarnings":mcp_warnings,"skillWarnings":skill_warnings,"applyNotice":"MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。当前会话和 Codey 启动参数可能覆盖这里的配置。"}),
         )
     }
 

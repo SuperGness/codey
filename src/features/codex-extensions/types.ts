@@ -49,6 +49,8 @@ export interface Inventory {
   mcps: McpEntry[];
   skills: SkillEntry[];
   warnings: string[];
+  mcpWarnings?: string[];
+  skillWarnings?: string[];
   applyNotice: string;
 }
 export interface SkillCacheInventory {

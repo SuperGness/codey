@@ -177,3 +177,65 @@ export function pageResources<T>(entries: T[], page: number, size = 20) {
 export function causeText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
+
+export interface WarningSummary {
+  total: number;
+  symlinkPaths: string[];
+  otherWarnings: string[];
+}
+
+const SYMLINK_WARNING_PATTERN =
+  /^(?:已跳过符号链接|拒绝符号链接目标|拒绝重解析点)\s*[:：]\s*(.+)$/;
+
+export function getScopedWarnings(
+  inventory:
+    | Pick<Inventory, "warnings" | "mcpWarnings" | "skillWarnings">
+    | null
+    | undefined,
+  kind: "mcp" | "skill",
+): string[] {
+  if (!inventory) return [];
+  const source =
+    kind === "mcp"
+      ? (inventory.mcpWarnings ?? inventory.warnings)
+      : (inventory.skillWarnings ?? inventory.warnings);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const item of source ?? []) {
+    const text = item.trim();
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      unique.push(text);
+    }
+  }
+  return unique;
+}
+
+export function summarizeWarnings(warnings: string[]): WarningSummary {
+  const symlinkPaths: string[] = [];
+  const otherWarnings: string[] = [];
+  const seenPaths = new Set<string>();
+  const seenOther = new Set<string>();
+  for (const warning of warnings) {
+    const text = warning.trim();
+    if (!text) continue;
+    const match = SYMLINK_WARNING_PATTERN.exec(text);
+    if (match) {
+      const path = match[1].trim();
+      if (path && !seenPaths.has(path)) {
+        seenPaths.add(path);
+        symlinkPaths.push(path);
+      }
+      continue;
+    }
+    if (!seenOther.has(text)) {
+      seenOther.add(text);
+      otherWarnings.push(text);
+    }
+  }
+  return {
+    total: symlinkPaths.length + otherWarnings.length,
+    symlinkPaths,
+    otherWarnings,
+  };
+}
