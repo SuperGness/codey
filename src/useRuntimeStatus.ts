@@ -144,6 +144,7 @@ export function useRuntimeStatus({
   }, []);
 
   const retryConfigApply = useCallback(async () => {
+    setConfigApplyError(null);
     try {
       await refreshStatus();
       setConfigApplyError(null);

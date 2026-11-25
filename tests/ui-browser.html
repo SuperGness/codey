@@ -285,8 +285,9 @@
         restartState = "failed";
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
-        await waitFor(() => [...shadow.querySelectorAll('[role="alert"]')].some(alert => alert.textContent.includes("测试：配置应用失败")));
-        document.body.dataset.restartStateResult = "PASS：等待重启、应用中及保存成功均无横幅，重启流程和失败提示正常";
+        await waitFor(() => [...shadow.querySelectorAll('[data-slot="toast"] [role="alert"]')].some(alert => alert.textContent.includes("测试：配置应用失败")));
+        if (shadow.querySelector('.app-shell > [role="alert"]')) throw new Error("配置应用失败仍显示顶部横幅");
+        document.body.dataset.restartStateResult = "PASS：等待重启、应用中及保存成功均无横幅，重启流程和失败 Toast 提示正常";
       }
       if (new URLSearchParams(location.search).get("check") === "theme-sync") {
         const host = document.querySelector("#codey-settings-overlay-host");

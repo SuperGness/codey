@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "@heroui/react";
 import {
   IconBrandGithub,
@@ -36,7 +36,7 @@ import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
 import { prefixedRouteName } from "./routeShortNames";
 import { customContextRestoredNote, subagentUpdateNote, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
-import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
+import { CodeyBrandMark, SettingsModalShell, ToastContainerReadyContext } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
 import { useModelSelection } from "./useModelSelection";
@@ -45,6 +45,7 @@ import { configApplyNotice } from "./configApply";
 import { applyConfigCommandResult, type ConfigCommandResult } from "./configCommandResult";
 import { useAppUpdates } from "./useAppUpdates";
 import {
+  ConfigApplyErrorToast,
   NoticeLoadingText,
   NoticeToast,
   useAppNoticeController,
@@ -110,6 +111,16 @@ function thirdPartyRouteModelState(
     defaultModel:
       globalDefaultForRoute(config, route, selectedModels) || selectedModels[0] || "",
   };
+}
+
+function ConfigApplyErrorToastHost(props: {
+  active: boolean;
+  configApply?: import("./App.types").ConfigApplyStatus | null;
+  configApplyError?: string | null;
+  onRetry: () => void;
+}) {
+  const ready = useContext(ToastContainerReadyContext);
+  return <ConfigApplyErrorToast {...props} ready={ready} />;
 }
 
 export function App({
@@ -179,6 +190,38 @@ export function App({
   const confirmationController = useConfirmationController();
   const setNotice = noticeController.set;
   const setConfirmation = confirmationController.set;
+  const latestConfigApplyRef = useRef(status.configApply);
+  latestConfigApplyRef.current = status.configApply;
+  const notifyConfigApply = useCallback((
+    next: import("./App.types").ConfigApplyStatus,
+    extraText = "",
+  ) => {
+    if (next.state === "failed") {
+      // 配置应用失败统一由 ConfigApplyErrorToast 以 danger Toast 展示，避免重复提示。
+      const note = extraText.replace(/^；/, "").trim();
+      if (note) setNotice({ tone: "info", text: note });
+      return;
+    }
+    const notice = configApplyNotice(next);
+    setNotice(extraText ? { ...notice, text: `${notice.text}${extraText}` } : notice);
+  }, [setNotice]);
+  const handleModelSelectionNotice = useCallback((nextNotice: import("react").SetStateAction<Notice>) => {
+    const resolved = typeof nextNotice === "function"
+      ? nextNotice(noticeController.getSnapshot())
+      : nextNotice;
+    const currentApply = latestConfigApplyRef.current;
+    if (
+      resolved.tone === "error" &&
+      currentApply?.state === "failed" &&
+      resolved.text === configApplyNotice(currentApply).text
+    ) {
+      return;
+    }
+    setNotice(resolved);
+  }, [noticeController, setNotice]);
+  const handleRetryConfigApply = useCallback(() => {
+    void retryConfigApply();
+  }, [retryConfigApply]);
   useEffect(() => {
     if (restartStatusError) setNotice({ tone: "error", text: restartStatusError });
   }, [restartStatusError, setNotice]);
@@ -274,7 +317,7 @@ export function App({
     officialAccountAvailable: status.officialAccountAvailable === true,
     runOperation,
     applyConfigResult: (result) => applyCommandResult(result, adoptRouteConfig),
-    setNotice,
+    setNotice: handleModelSelectionNotice,
   });
   const {
     automaticallyChecking,
@@ -479,7 +522,11 @@ export function App({
           channels,
         },
       });
-      setNotice(result.configApply ? configApplyNotice(result.configApply) : { tone: "success", text: successText });
+      if (result.configApply) {
+        notifyConfigApply(result.configApply);
+      } else {
+        setNotice({ tone: "success", text: successText });
+      }
       return true;
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
@@ -589,9 +636,13 @@ export function App({
     result: ConfigCommandResult,
     adoptConfig: (incoming: Config) => { dirty: boolean } | null,
   ) {
-    return applyConfigCommandResult(result, {
+    const applied = applyConfigCommandResult(result, {
       adoptConfig, acceptConfigApply, setDirty, setProviderStatus, setModelState, setStatus,
     });
+    if (applied && result.configApply) {
+      latestConfigApplyRef.current = result.configApply;
+    }
+    return applied;
   }
 
   function applyRouteResult(result: ConfigCommandResult) {
@@ -622,7 +673,7 @@ export function App({
       const result = await persist(nextConfig);
       saved = true;
       if (result.configApply) {
-        setNotice(configApplyNotice(result.configApply));
+        notifyConfigApply(result.configApply);
         return;
       }
       setNotice({
@@ -657,7 +708,7 @@ export function App({
       applyRouteResult(result);
       saved = true;
       if (result.configApply) {
-        setNotice(configApplyNotice(result.configApply));
+        notifyConfigApply(result.configApply);
         return;
       }
       const reloadError = result.modelHotReloadError || result.subagentConfigHotReloadError;
@@ -681,7 +732,11 @@ export function App({
     profiles.splice(targetIndex, 0, profiles.splice(sourceIndex, 1)[0]);
     await runOperation("reorder-routes", async () => {
       const result = await persist({ ...config, profiles });
-      setNotice(result.configApply ? configApplyNotice(result.configApply) : { tone: "success", text: "线路顺序已保存" });
+      if (result.configApply) {
+        notifyConfigApply(result.configApply);
+      } else {
+        setNotice({ tone: "success", text: "线路顺序已保存" });
+      }
     });
   }
 
@@ -702,14 +757,18 @@ export function App({
       });
       applyRouteResult(result);
       // 顺序调整即时生效，不按重启状态提示；只有推送到选择器失败时才提醒。
-      setNotice(
-        result.configApply ? configApplyNotice(result.configApply) : result.modelHotReloadError
-          ? {
-              tone: "info",
-              text: `模型顺序已保存，但模型列表未刷新：${result.modelHotReloadError}`,
-            }
-          : { tone: "success", text: "模型顺序已保存" },
-      );
+      if (result.configApply) {
+        notifyConfigApply(result.configApply);
+      } else {
+        setNotice(
+          result.modelHotReloadError
+            ? {
+                tone: "info",
+                text: `模型顺序已保存，但模型列表未刷新：${result.modelHotReloadError}`,
+              }
+            : { tone: "success", text: "模型顺序已保存" },
+        );
+      }
     });
   }
 
@@ -729,7 +788,7 @@ export function App({
       });
       applyRouteResult(result);
       if (result.configApply) {
-        setNotice(configApplyNotice(result.configApply));
+        notifyConfigApply(result.configApply);
         return;
       }
       setNotice({
@@ -900,7 +959,7 @@ export function App({
       if (routeSettings) handleOfficialAccountsChanged(modelResult);
       saved = true;
       if (modelResult.configApply) {
-        setNotice({ ...configApplyNotice(modelResult.configApply), text: configApplyNotice(modelResult.configApply).text + customContextRestoredNote(modelResult) });
+        notifyConfigApply(modelResult.configApply, customContextRestoredNote(modelResult));
         return;
       }
       const restartNote = modelResult.restartRequired
@@ -947,7 +1006,7 @@ export function App({
       });
       applyRouteResult(result);
       if (result.configApply) {
-        setNotice(configApplyNotice(result.configApply));
+        notifyConfigApply(result.configApply);
         return;
       }
       setNotice({
@@ -967,7 +1026,7 @@ export function App({
           persistedConfigRef.current?.streamMaxRetries !== submitted.streamMaxRetries;
         const result = await persist(submitted);
         if (result.configApply) {
-          setNotice(configApplyNotice(result.configApply));
+          notifyConfigApply(result.configApply);
           return;
         }
         const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
@@ -1619,22 +1678,6 @@ export function App({
         </Button>
       )}
 
-      {status.configApply && (status.configApply.state === "failed" || configApplyError) && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-5 py-2.5 text-xs font-medium text-[var(--codey-red)]"
-        >
-          <span className="min-w-0 flex-1 leading-relaxed">
-            {configApplyError || configApplyNotice(status.configApply).text}
-          </span>
-          {configApplyError && (
-            <Button size="xs" variant="outline" onClick={() => void retryConfigApply()}>
-              重新查询状态
-            </Button>
-          )}
-        </div>
-      )}
-
       {usageAnalysisOpen && (
         <>
           <UsageAnalysisHeader onBack={() => setUsageAnalysisOpen(false)} />
@@ -1752,6 +1795,12 @@ export function App({
       />
 
       <NoticeToast controller={noticeController} />
+      <ConfigApplyErrorToastHost
+        active={!embedded || modalVisible}
+        configApply={status.configApply}
+        configApplyError={configApplyError}
+        onRetry={handleRetryConfigApply}
+      />
 
       <ModelPickerDialog
         open={modelPickerVisible}

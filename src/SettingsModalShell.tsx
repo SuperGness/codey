@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useEffect, useState, type ReactNode } from "react";
 import { Modal } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { useToastContainer } from "./components/ui";
 import codeyAppIcon from "../backend/icons/favicon.png?inline";
+
+export const ToastContainerReadyContext = createContext(true);
 
 type SettingsModalShellProps = {
   afterClose?: () => void;
@@ -46,7 +48,16 @@ export function SettingsModalShell({
   visible,
 }: SettingsModalShellProps) {
   const [toastHostEl, setToastHostEl] = useState<HTMLDivElement | null>(null);
+  const [toastContainerReady, setToastContainerReady] = useState(false);
   useToastContainer(toastHostEl, visible);
+  useEffect(() => {
+    if (!visible || !toastHostEl) {
+      setToastContainerReady(false);
+      return;
+    }
+    setToastContainerReady(true);
+    return () => setToastContainerReady(false);
+  }, [toastHostEl, visible]);
   // PortalProvider 以 getContainer 的引用作为上下文值；每次渲染新建闭包会让
   // 所有弹层 / 提示 / 组合框在每次 App 重渲染时一起重渲染。
   const getContainer = useCallback(() => container ?? null, [container]);
@@ -65,7 +76,7 @@ export function SettingsModalShell({
     >
       <Modal.Container placement="center" className="p-3 sm:p-3">
         <Modal.Dialog
-          className="settings-modal-shell relative flex h-[min(880px,calc(100dvh-24px))] w-[min(1220px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[18px] p-0 text-sm"
+          className="settings-modal-shell relative flex h-[min(880px,calc(100dvh-24px))] w-[min(1220px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[12px] p-0 text-sm"
           aria-label="Codey 配置"
         >
           <AfterClose onUnmount={afterClose} />
@@ -87,7 +98,9 @@ export function SettingsModalShell({
               className="toast-portal-host pointer-events-none absolute inset-x-0 top-0 z-[100] h-0"
               aria-hidden="true"
             />
-            {children}
+            <ToastContainerReadyContext.Provider value={toastContainerReady}>
+              {children}
+            </ToastContainerReadyContext.Provider>
           </div>
         </Modal.Dialog>
       </Modal.Container>
