@@ -6925,6 +6925,212 @@ fn parallel_tool_output_images_do_not_split_tool_result_groups() {
 }
 
 #[test]
+fn client_tool_outputs_without_call_id_convert_to_user_messages_in_adapted_protocols() {
+    let body = json!({
+        "model": "provider-model",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+            {
+                "type": "function_call_output",
+                "id": "fco_open_page",
+                "name": "codex_apps_open_page",
+                "namespace": "agent",
+                "output": "{\"page_id\":null}"
+            },
+            {
+                "type": "function_call_output",
+                "id": "fco_selected_page",
+                "name": "codex_apps_selected_page_part_1_of_1",
+                "namespace": "agent",
+                "output": "Companion Page snapshot part 1 of 1:\n{\"page_id\":null,\"document_view\":null}"
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "",
+                "name": "send_message_to_thread",
+                "output": [
+                    {"type": "input_text", "text": "thread note"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "original"}
+                ]
+            },
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]}
+        ]
+    });
+
+    let chat = responses_to_chat_completions_body(&body).unwrap();
+    let chat_messages = chat["messages"].as_array().unwrap();
+    assert_eq!(chat_messages.len(), 6);
+    assert_eq!(chat_messages[2]["role"], "user");
+    assert_eq!(
+        chat_messages[2]["content"],
+        "[agent.codex_apps_open_page]\n{\"page_id\":null}"
+    );
+    assert_eq!(chat_messages[3]["role"], "user");
+    assert_eq!(
+        chat_messages[3]["content"],
+        "[agent.codex_apps_selected_page_part_1_of_1]\nCompanion Page snapshot part 1 of 1:\n{\"page_id\":null,\"document_view\":null}"
+    );
+    assert_eq!(chat_messages[4]["role"], "user");
+    assert_eq!(
+        chat_messages[4]["content"][0],
+        json!({"type": "text", "text": "[send_message_to_thread]\nthread note"})
+    );
+    assert_eq!(chat_messages[4]["content"][1]["type"], "image_url");
+    assert_eq!(
+        chat_messages[4]["content"][1]["image_url"]["detail"],
+        "high"
+    );
+    assert_eq!(chat_messages[5]["role"], "user");
+    assert_eq!(chat_messages[5]["content"][0]["text"], "next question");
+    assert!(
+        chat_messages
+            .iter()
+            .all(|message| message["role"] != "tool"),
+        "unpaired client tool outputs must not emit orphan tool messages: {chat_messages:?}"
+    );
+
+    let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+    let anthropic_messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(anthropic_messages.len(), 3);
+    assert_eq!(anthropic_messages[2]["role"], "user");
+    let blocks = anthropic_messages[2]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 5);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(
+        blocks[0]["text"],
+        "[agent.codex_apps_open_page]\n{\"page_id\":null}"
+    );
+    assert_eq!(blocks[1]["type"], "text");
+    assert_eq!(
+        blocks[1]["text"],
+        "[agent.codex_apps_selected_page_part_1_of_1]\nCompanion Page snapshot part 1 of 1:\n{\"page_id\":null,\"document_view\":null}"
+    );
+    assert_eq!(blocks[2]["type"], "text");
+    assert_eq!(blocks[2]["text"], "[send_message_to_thread]\nthread note");
+    assert_eq!(blocks[3]["type"], "image");
+    assert_eq!(blocks[3]["source"]["data"], "aGVsbG8=");
+    assert_eq!(blocks[4]["type"], "text");
+    assert_eq!(blocks[4]["text"], "next question");
+    assert!(
+        blocks.iter().all(|block| block["type"] != "tool_result"),
+        "unpaired client tool outputs must not emit orphan tool_result blocks: {blocks:?}"
+    );
+}
+
+#[test]
+fn client_tool_outputs_without_call_id_do_not_split_tool_result_groups() {
+    let body = json!({
+        "model": "provider-model",
+        "input": [
+            {"type": "function_call", "call_id": "call-1", "name": "inspect", "arguments": "{}"},
+            {"type": "function_call", "call_id": "call-2", "name": "inspect", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "name": "codex_apps_open_page",
+                "namespace": "agent",
+                "output": "{\"page_id\":null}"
+            },
+            {"type": "function_call_output", "call_id": "call-1", "output": "first"},
+            {
+                "type": "function_call_output",
+                "call_id": null,
+                "name": "codex_apps_selected_page_part_1_of_1",
+                "namespace": ["agent"],
+                "output": "snapshot"
+            },
+            {"type": "function_call_output", "call_id": "call-2", "output": "second"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+        ],
+        "tools": [{
+            "type": "function",
+            "name": "inspect",
+            "parameters": {"type": "object"}
+        }]
+    });
+
+    let chat = responses_to_chat_completions_body(&body).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 6);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "call-1");
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["tool_call_id"], "call-2");
+    assert_eq!(messages[3]["role"], "user");
+    assert_eq!(
+        messages[3]["content"],
+        "[agent.codex_apps_open_page]\n{\"page_id\":null}"
+    );
+    assert_eq!(messages[4]["role"], "user");
+    assert_eq!(
+        messages[4]["content"],
+        "[agent.codex_apps_selected_page_part_1_of_1]\nsnapshot"
+    );
+    assert_eq!(messages[5]["role"], "user");
+    assert_eq!(messages[5]["content"][0]["text"], "continue");
+
+    let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    let blocks = messages[1]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 5);
+    assert_eq!(blocks[0]["type"], "tool_result");
+    assert_eq!(blocks[0]["tool_use_id"], "call-1");
+    assert_eq!(blocks[1]["type"], "tool_result");
+    assert_eq!(blocks[1]["tool_use_id"], "call-2");
+    assert_eq!(
+        blocks[2]["text"],
+        "[agent.codex_apps_open_page]\n{\"page_id\":null}"
+    );
+    assert_eq!(
+        blocks[3]["text"],
+        "[agent.codex_apps_selected_page_part_1_of_1]\nsnapshot"
+    );
+    assert_eq!(blocks[4]["text"], "continue");
+}
+
+#[test]
+fn tool_output_validation_still_rejects_invalid_call_ids_and_unportable_payloads() {
+    let tool_message_missing_id = json!({
+        "model": "provider-model",
+        "input": [{"role": "tool", "content": "done"}]
+    });
+    assert!(
+        responses_to_anthropic_messages_body(&tool_message_missing_id)
+            .unwrap_err()
+            .to_string()
+            .contains("tool message 缺少 call_id")
+    );
+
+    let non_string_call_id = json!({
+        "model": "provider-model",
+        "input": [{"type": "function_call_output", "call_id": 123, "output": "done"}]
+    });
+    assert!(
+        responses_to_chat_completions_body(&non_string_call_id)
+            .unwrap_err()
+            .to_string()
+            .contains("function_call_output.call_id 必须是字符串")
+    );
+
+    let unportable_compaction = json!({
+        "model": "provider-model",
+        "input": [{
+            "type": "function_call_output",
+            "name": "codex_apps_open_page",
+            "output": [{"type": "compaction", "encrypted_content": "opaque"}]
+        }]
+    });
+    assert!(
+        responses_to_anthropic_messages_body(&unportable_compaction)
+            .unwrap_err()
+            .to_string()
+            .contains("context_not_portable")
+    );
+}
+
+#[test]
 fn configured_duplicate_function_tools_are_deduplicated_without_merging_conflicts() {
     let string_lookup = json!({
         "type":"function",

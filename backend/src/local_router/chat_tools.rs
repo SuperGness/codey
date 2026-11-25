@@ -17,12 +17,20 @@ pub(crate) fn append_chat_messages_from_responses_input(
             Ok(replay.missing)
         }
         Value::Array(items) => {
+            let mut deferred_tool_user_indices = HashSet::new();
             for item in items {
                 let start = messages.len();
                 append_chat_message_item(item, messages, tool_bridge)?;
+                if is_responses_tool_output_item(item) {
+                    for (index, message) in messages.iter().enumerate().skip(start) {
+                        if message.get("role").and_then(Value::as_str) == Some("user") {
+                            deferred_tool_user_indices.insert(index);
+                        }
+                    }
+                }
                 replay.observe(Some(item), messages, start);
             }
-            move_tool_images_after_tool_results(messages);
+            move_tool_auxiliary_messages_after_tool_results(messages, &deferred_tool_user_indices);
             Ok(replay.missing)
         }
         Value::Object(_) => {
@@ -81,33 +89,47 @@ impl ChatReasoningReplay {
     }
 }
 
-/// Chat Completions 要求 assistant 的 tool_calls 后紧跟对应的 tool 消息。
-/// 工具输出中的图片会额外生成 user 消息，多个并行调用时这些消息会插在
-/// tool 消息之间，部分上游据此判定工具结果不完整并拒绝整条请求。这里把
-/// 夹在 tool 消息序列中的图片消息移到本轮全部 tool 消息之后，既保留图片
-/// 内容，也保持调用与结果的配对完整。
-pub(crate) fn move_tool_images_after_tool_results(messages: &mut Vec<Value>) {
+/// Chat Completions 和 Anthropic Messages 都要求工具调用后紧跟对应的工具结果。
+/// 工具输出中的图片以及不带 `call_id` 的客户端工具输出都会生成 `user` 消息；
+/// 若它们出现在工具调用之后或并行工具结果之间，部分上游会判定工具结果不完整
+/// 而拒绝整条请求。这里把由工具输出派生的辅助 `user` 消息移到本轮全部工具结果
+/// 之后，既保留内容，也保持调用与结果的配对完整。
+fn move_tool_auxiliary_messages_after_tool_results(
+    messages: &mut Vec<Value>,
+    deferred_user_indices: &HashSet<usize>,
+) {
     let mut ordered = Vec::with_capacity(messages.len());
-    let mut pending_images = Vec::new();
-    let mut in_tool_run = false;
-    for message in messages.drain(..) {
-        if message.get("role").and_then(Value::as_str) == Some("tool") {
-            in_tool_run = true;
+    let mut pending = Vec::new();
+    let mut in_tool_turn = false;
+    for (index, message) in messages.drain(..).enumerate() {
+        let role = message.get("role").and_then(Value::as_str);
+        if role == Some("assistant")
+            && (message.get("tool_calls").is_some() || message.get("function_call").is_some())
+        {
+            if !pending.is_empty() {
+                ordered.append(&mut pending);
+            }
+            in_tool_turn = true;
             ordered.push(message);
             continue;
         }
-        if in_tool_run && is_tool_image_message(&message) {
-            pending_images.push(message);
+        if role == Some("tool") {
+            in_tool_turn = true;
+            ordered.push(message);
             continue;
         }
-        if !pending_images.is_empty() {
-            ordered.append(&mut pending_images);
+        if in_tool_turn && deferred_user_indices.contains(&index) {
+            pending.push(message);
+            continue;
         }
-        in_tool_run = false;
+        if !pending.is_empty() {
+            ordered.append(&mut pending);
+        }
+        in_tool_turn = false;
         ordered.push(message);
     }
-    if !pending_images.is_empty() {
-        ordered.append(&mut pending_images);
+    if !pending.is_empty() {
+        ordered.append(&mut pending);
     }
     *messages = ordered;
 }
@@ -152,20 +174,17 @@ pub(crate) fn normalize_trailing_chat_assistant(
     }
 }
 
-pub(crate) fn is_tool_image_message(message: &Value) -> bool {
-    let Some(object) = message.as_object() else {
+fn is_responses_tool_output_item(item: &Value) -> bool {
+    let Some(object) = item.as_object() else {
         return false;
     };
-    if object.get("role").and_then(Value::as_str) != Some("user") {
-        return false;
-    }
-    let Some(parts) = object.get("content").and_then(Value::as_array) else {
-        return false;
-    };
-    !parts.is_empty()
-        && parts
-            .iter()
-            .all(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+    matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("function_call_output" | "custom_tool_call_output")
+    ) || object
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.trim() == "tool")
 }
 
 pub(crate) fn append_chat_message_item(
@@ -215,15 +234,21 @@ pub(crate) fn append_chat_message_item(
             Some("function_call") => {
                 append_responses_function_call_item(object, messages, tool_bridge)
             }
-            Some("function_call_output") => {
-                append_responses_tool_call_output_item(object, messages, "function_call_output")
-            }
+            Some("function_call_output") => append_responses_tool_call_output_item(
+                object,
+                messages,
+                "function_call_output",
+                true,
+            ),
             Some("custom_tool_call") => {
                 append_responses_custom_tool_call_item(object, messages, tool_bridge)
             }
-            Some("custom_tool_call_output") => {
-                append_responses_tool_call_output_item(object, messages, "custom_tool_call_output")
-            }
+            Some("custom_tool_call_output") => append_responses_tool_call_output_item(
+                object,
+                messages,
+                "custom_tool_call_output",
+                true,
+            ),
             Some("tool_search_call") => {
                 append_responses_tool_search_call_item(object, messages, tool_bridge)
             }
@@ -455,7 +480,7 @@ pub(crate) fn append_responses_message_object(
         .transpose()?
         .unwrap_or("user");
     if role == "tool" {
-        return append_responses_tool_call_output_item(object, messages, "tool message");
+        return append_responses_tool_call_output_item(object, messages, "tool message", false);
     }
     let mut message = serde_json::Map::new();
     message.insert("role".to_string(), Value::String(role.to_string()));
@@ -848,13 +873,9 @@ pub(crate) fn append_responses_tool_call_output_item(
     object: &serde_json::Map<String, Value>,
     messages: &mut Vec<Value>,
     context: &str,
+    allow_missing_call_id: bool,
 ) -> Result<()> {
-    let call_id = object
-        .get("call_id")
-        .or_else(|| object.get("tool_call_id"))
-        .and_then(Value::as_str)
-        .filter(|call_id| !call_id.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{context} 缺少 call_id"))?;
+    let call_id = optional_tool_call_id(object, context)?;
     let output = object
         .get("output")
         .or_else(|| object.get("content"))
@@ -865,6 +886,16 @@ pub(crate) fn append_responses_tool_call_output_item(
             Vec::new(),
         )
     });
+    let Some(call_id) = call_id else {
+        if !allow_missing_call_id {
+            anyhow::bail!("{context} 缺少 call_id");
+        }
+        // Codex 客户端会主动注入不带 call_id 的工具输出（如 Companion Page 快照或
+        // send_message_to_thread），历史上没有对应的模型调用。Chat Completions 与
+        // Anthropic Messages 都要求 tool 结果绑定已有调用，因此转为 user 消息保留内容。
+        append_unpaired_client_tool_output_message(object, content, images, messages);
+        return Ok(());
+    };
     messages.push(json!({
         "role": "tool",
         "tool_call_id": call_id,
@@ -877,6 +908,83 @@ pub(crate) fn append_responses_tool_call_output_item(
         }));
     }
     Ok(())
+}
+
+fn optional_tool_call_id<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    context: &str,
+) -> Result<Option<&'a str>> {
+    for key in ["call_id", "tool_call_id"] {
+        match object.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::String(call_id)) if !call_id.trim().is_empty() => {
+                return Ok(Some(call_id.as_str()));
+            }
+            Some(Value::String(_)) => continue,
+            Some(_) => anyhow::bail!("{context}.{key} 必须是字符串"),
+        }
+    }
+    Ok(None)
+}
+
+fn client_tool_output_label(object: &serde_json::Map<String, Value>) -> Option<String> {
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let namespace = match object.get("namespace") {
+        Some(Value::String(ns)) => {
+            let trimmed = ns.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Some(Value::Array(segments)) => {
+            let joined = segments
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|seg| !seg.is_empty())
+                .collect::<Vec<_>>()
+                .join(".");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    };
+    match (namespace, name) {
+        (Some(namespace), Some(name)) => Some(format!("{namespace}.{name}")),
+        (None, Some(name)) => Some(name.to_string()),
+        (Some(namespace), None) => Some(namespace),
+        (None, None) => None,
+    }
+}
+
+fn append_unpaired_client_tool_output_message(
+    object: &serde_json::Map<String, Value>,
+    content: String,
+    images: Vec<Value>,
+    messages: &mut Vec<Value>,
+) {
+    let text = match client_tool_output_label(object) {
+        Some(label) if !content.is_empty() => format!("[{label}]\n{content}"),
+        Some(label) => format!("[{label}]"),
+        None => content,
+    };
+    if !images.is_empty() {
+        let mut parts = Vec::with_capacity(images.len() + usize::from(!text.is_empty()));
+        if !text.is_empty() {
+            parts.push(json!({"type": "text", "text": text}));
+        }
+        parts.extend(images);
+        messages.push(json!({
+            "role": "user",
+            "content": parts,
+        }));
+    } else if !text.is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": text,
+        }));
+    }
 }
 
 pub(crate) fn responses_tool_output_content(
