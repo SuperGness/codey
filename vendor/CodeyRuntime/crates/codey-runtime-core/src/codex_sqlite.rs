@@ -2,16 +2,24 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use rusqlite::{Connection, OptionalExtension};
+
+static GLOBAL_SESSION_DB_CACHE: OnceLock<Mutex<CodexSessionDbDiscoveryCache>> = OnceLock::new();
 
 pub fn default_codex_home_dir() -> PathBuf {
     crate::codex_home::default_codex_home_dir()
 }
 
 pub fn codex_session_db_paths_from_home(home: &Path) -> Vec<PathBuf> {
-    CodexSessionDbDiscoveryCache::default().session_db_paths_from_home(home)
+    let cache =
+        GLOBAL_SESSION_DB_CACHE.get_or_init(|| Mutex::new(CodexSessionDbDiscoveryCache::default()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.session_db_paths_from_home(home)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,10 +89,18 @@ pub struct CodexSessionDbDiscoveryCache {
 
 impl CodexSessionDbDiscoveryCache {
     pub fn session_db_paths_from_home(&mut self, home: &Path) -> Vec<PathBuf> {
+        let sqlite_dir = home.join("sqlite");
         let candidates = codex_sqlite_dir_candidates(home);
         let active_candidates = candidates.iter().cloned().collect::<HashSet<_>>();
-        self.candidates
-            .retain(|path, _| active_candidates.contains(path));
+        if self.candidates.len() > 256 {
+            self.candidates.retain(|path, _| {
+                path.starts_with(&sqlite_dir) && active_candidates.contains(path)
+            });
+        } else {
+            self.candidates.retain(|path, _| {
+                !path.starts_with(&sqlite_dir) || active_candidates.contains(path)
+            });
+        }
 
         let mut paths = Vec::new();
         for path in candidates {

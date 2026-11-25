@@ -2,16 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Persisted execution phases. `Failed` is retained only so schema v1-v4
-/// ledgers can be deserialized before migration; new records use `Terminal`
-/// plus an independent [`ExecutionOutcome`].
+/// Persisted execution phases. Terminal attempts record `Terminal` plus an
+/// independent [`ExecutionOutcome`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExecutionPhase {
     Pending,
     Running,
     Terminal,
-    Failed,
     Recovered,
 }
 
@@ -76,8 +74,8 @@ impl ExecutionPhase {
             return Some(self);
         }
         match (self, requested) {
-            (Self::Pending, Self::Running | Self::Terminal | Self::Failed | Self::Recovered)
-            | (Self::Running, Self::Terminal | Self::Failed | Self::Recovered) => Some(requested),
+            (Self::Pending, Self::Running | Self::Terminal | Self::Recovered)
+            | (Self::Running, Self::Terminal | Self::Recovered) => Some(requested),
             _ => None,
         }
     }
@@ -114,10 +112,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ExecutionPhase>("\"pending\"").unwrap(),
             ExecutionPhase::Pending
-        );
-        assert_eq!(
-            serde_json::from_str::<ExecutionPhase>("\"failed\"").unwrap(),
-            ExecutionPhase::Failed
         );
         assert_eq!(
             serde_json::to_string(&ExecutionOutcome::TimedOut).unwrap(),

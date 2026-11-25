@@ -39,8 +39,6 @@ pub(crate) fn prepare_cached_catalog_in_context(
     let runtime_source = value.get("codey_runtime_source").cloned();
     drop(value);
 
-    let original_models = models.clone();
-    apply_remote_compaction_models(&mut models, remote_compaction_models);
     let allowed_model_keys = native_web_search_models
         .iter()
         .map(|model| model_id::key(model))
@@ -49,49 +47,55 @@ pub(crate) fn prepare_cached_catalog_in_context(
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
-    let mut changed = models != original_models;
+    let mut changed = apply_remote_compaction_models(&mut models, remote_compaction_models);
     for model in &mut models {
-        let previous = model.clone();
-        gate_cached_native_web_search(model, &allowed_model_keys);
-        gate_cached_image_detail_original(model, &image_detail_original_model_keys);
-        prepare_cached_context_window(model);
-        normalize_third_party_compaction_identity(model);
-        changed |= *model != previous;
+        changed |= gate_cached_native_web_search(model, &allowed_model_keys);
+        changed |= gate_cached_image_detail_original(model, &image_detail_original_model_keys);
+        changed |= prepare_cached_context_window(model);
+        changed |= normalize_third_party_compaction_identity(model);
     }
     if !changed {
         return Ok(true);
     }
 
-    write_catalog_with_source(home, &models, runtime_source)?;
-
-    let written_models = read_runtime_catalog_models(home)?;
-    let mut safely_gated_models = written_models.clone();
-    apply_remote_compaction_models(&mut safely_gated_models, remote_compaction_models);
-    for model in &mut safely_gated_models {
-        gate_cached_native_web_search(model, &allowed_model_keys);
-        gate_cached_image_detail_original(model, &image_detail_original_model_keys);
-        prepare_cached_context_window(model);
-        normalize_third_party_compaction_identity(model);
+    let written = write_catalog_with_source(home, &models, runtime_source)?;
+    verify_written_catalog(home, &models, &written)?;
+    let mut verify_changed = apply_remote_compaction_models(&mut models, remote_compaction_models);
+    for model in &mut models {
+        verify_changed |= gate_cached_native_web_search(model, &allowed_model_keys);
+        verify_changed |=
+            gate_cached_image_detail_original(model, &image_detail_original_model_keys);
+        verify_changed |= prepare_cached_context_window(model);
+        verify_changed |= normalize_third_party_compaction_identity(model);
     }
-    if safely_gated_models != written_models {
+    if verify_changed {
         bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的模型能力");
     }
     Ok(true)
 }
 
-pub(super) fn apply_remote_compaction_models(models: &mut [Value], allowed: &[String]) {
+pub(super) fn apply_remote_compaction_models(models: &mut [Value], allowed: &[String]) -> bool {
     let allowed = allowed
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
+    let mut changed = false;
     for model in models {
         let enabled = model
             .get("slug")
             .and_then(Value::as_str)
             .is_some_and(|slug| allowed.contains(&model_id::key(slug)));
-        // Codex 忽略扩展字段，Codey 的原生请求入口用它选择会话 Provider。
-        model["codey_remote_compaction"] = json!(enabled);
+        if model
+            .get("codey_remote_compaction")
+            .and_then(Value::as_bool)
+            != Some(enabled)
+        {
+            // Codex 忽略扩展字段，Codey 的原生请求入口用它选择会话 Provider。
+            model["codey_remote_compaction"] = json!(enabled);
+            changed = true;
+        }
     }
+    changed
 }
 
 pub(super) fn gate_synthetic_native_web_search(
@@ -104,7 +108,7 @@ pub(super) fn gate_synthetic_native_web_search(
     gate_cached_native_web_search(model, allowed_model_keys);
 }
 
-fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet<String>) {
+fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet<String>) -> bool {
     let allowed = model
         .get("slug")
         .and_then(Value::as_str)
@@ -116,12 +120,14 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
             .and_then(Value::as_str)
             .is_some_and(|tool_type| !tool_type.trim().is_empty());
     if allowed && source_declares_search {
-        return;
+        return false;
     }
+    let mut changed = false;
     if let Some(object) = model.as_object_mut() {
-        object.remove("supports_search_tool");
-        object.remove("web_search_tool_type");
+        changed |= object.remove("supports_search_tool").is_some();
+        changed |= object.remove("web_search_tool_type").is_some();
     }
+    changed
 }
 
 /// Chat Completions 与 Anthropic Messages 都没有 `input_image.detail=original`
@@ -130,15 +136,15 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
 pub(super) fn gate_cached_image_detail_original(
     model: &mut Value,
     allowed_model_keys: &HashSet<String>,
-) {
+) -> bool {
     let allowed = model
         .get("slug")
         .and_then(Value::as_str)
         .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
     if allowed {
-        return;
+        return false;
     }
-    if let Some(object) = model.as_object_mut() {
-        object.remove("supports_image_detail_original");
-    }
+    model
+        .as_object_mut()
+        .is_some_and(|object| object.remove("supports_image_detail_original").is_some())
 }

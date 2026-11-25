@@ -1,15 +1,6 @@
-//! 内置 Codex 模型兼容元数据加载与通用模型字段清洗。
+//! 通用模型字段与提示词字段清洗。
 
 use serde_json::{Value, json};
-
-/// 内置 Codex 模型兼容元数据，不包含 system/developer prompt。
-///
-/// 这里只保留 Codex 识别模型条目所需的能力字段，避免把上游私有提示资产
-/// 编入 CodeyRuntime 二进制。
-const BUNDLED_TEMPLATE_JSON: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/model-catalog-metadata.json"
-));
 
 const MODEL_PROMPT_FIELDS: [&str; 7] = [
     "base_instructions",
@@ -36,21 +27,10 @@ const GENERIC_MODEL_SPECIFIC_FIELDS: [&str; 12] = [
     "web_search_tool_type",
 ];
 
-/// Loads prompt-free model compatibility metadata bundled with CodeyRuntime.
-///
-/// Callers should prefer a live Codex cache and use this only as a cold-start
-/// fallback when an API-only installation has not created models_cache.json.
-pub fn bundled_model_catalog() -> Option<Value> {
-    let mut catalog = serde_json::from_str(BUNDLED_TEMPLATE_JSON).ok()?;
-    remove_model_prompt_fields(&mut catalog);
-    Some(catalog)
-}
-
 /// Recursively removes Codex prompt-bearing fields from model catalog values.
 ///
-/// Live `models_cache.json` entries can contain the same fields as the bundled
-/// upstream catalog. Callers must sanitize cloned entries before writing a
-/// Codey-owned catalog.
+/// Live catalog entries can contain prompt fields. Callers must sanitize cloned
+/// entries before writing a Codey-owned catalog.
 pub fn remove_model_prompt_fields(value: &mut Value) {
     match value {
         Value::Object(object) => {

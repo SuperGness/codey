@@ -116,8 +116,7 @@ pub(crate) fn merge_account_runtime_models_in_context(
         .get_mut("models")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| anyhow::anyhow!("Codex 模型目录快照格式无效"))?;
-    let mut templates = cached_instruction_templates(home);
-    templates.extend(entries.iter().cloned());
+    let mut templates = entries.clone();
     let mut positions = entries
         .iter()
         .enumerate()

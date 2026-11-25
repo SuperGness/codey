@@ -194,9 +194,17 @@ async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
     );
     let codex_config = b"model_catalog_json = 'custom.json'\n";
     std::fs::write(directory.path().join("config.toml"), codex_config).unwrap();
-    let catalog =
-        serde_json::to_vec(&codey_runtime_core::model_suffix::bundled_model_catalog().unwrap())
-            .unwrap();
+    let catalog = serde_json::to_vec(&json!({
+        "models": [
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6 Sol",
+                "context_window": 272_000,
+                "supported_in_api": true
+            }
+        ]
+    }))
+    .unwrap();
     let source = directory.path().join("custom.json");
     std::fs::write(&source, &catalog).unwrap();
     let error = crate::codex_config::runtime_model_catalog_path(
@@ -582,7 +590,6 @@ fn renderer_settings_keep_editable_credentials_but_clear_clawbot_tokens() {
     config.profiles[0].api_key = "renderer-secret".to_string();
     config.prompt_optimization.api_key = "optimizer-secret".to_string();
     config.hide_full_access_warning = true;
-    config.webhook.url = "https://open.feishu.cn/legacy-secret".to_string();
     config.webhook.channels.push(NotificationChannelConfig {
         id: "feishu-1".to_string(),
         url: "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-secret".to_string(),
@@ -708,7 +715,7 @@ fn provider_secret_merge_rejects_unknown_protocol_before_normalization() {
 }
 
 #[test]
-fn provider_secret_merge_keeps_explicit_protocol_defaults_and_legacy_aliases() {
+fn provider_secret_merge_keeps_explicit_protocol_defaults_and_rejects_legacy_aliases() {
     let mut saved = ProviderProfile::new("Relay");
     saved.id = "relay-route".into();
     saved.short_name = "中转".into();
@@ -722,19 +729,15 @@ fn provider_secret_merge_keeps_explicit_protocol_defaults_and_legacy_aliases() {
     for (input, expected) in [
         ("   ", crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES),
         (
-            " chatCompletions ",
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
             crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
         ),
         (
-            "openaiChatCompletion",
-            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
-        ),
-        (
-            "anthropic",
             crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
-        ),
-        (
-            "anthropicMessagesApi",
             crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
         ),
     ] {
@@ -744,6 +747,19 @@ fn provider_secret_merge_keeps_explicit_protocol_defaults_and_legacy_aliases() {
         let merged = merge_profile_secrets(vec![request], &previous).unwrap();
         assert_eq!(merged[0].upstream_protocol, expected, "{input}");
         assert_eq!(merged[0].api_key, "saved-key");
+    }
+    for legacy_alias in [
+        "chatCompletions",
+        "openaiChatCompletion",
+        "anthropic",
+        "anthropicMessagesApi",
+    ] {
+        let mut request = saved.clone();
+        request.upstream_protocol = legacy_alias.into();
+        assert!(
+            merge_profile_secrets(vec![request], &previous).is_err(),
+            "{legacy_alias}"
+        );
     }
 }
 
@@ -826,37 +842,27 @@ fn provider_secret_merge_preserves_user_remote_compaction_setting() {
 }
 
 #[test]
-fn route_name_limit_matches_the_renderer_and_legacy_names_stay_saveable() {
-    let mut legacy = ProviderProfile::new("一条长度超过十五个字符限制的旧线路名称");
-    legacy.id = "legacy-route".to_string();
-    legacy.base_url = "https://relay.example/v1".to_string();
-    legacy.api_key = "sk-relay".to_string();
-    legacy.normalize();
-    assert!(legacy.name.chars().count() > crate::config::MAX_ROUTE_NAME_CHARS);
+fn route_name_limit_matches_the_renderer() {
+    let mut base = ProviderProfile::new("线路");
+    base.id = "route-limit".to_string();
+    base.base_url = "https://relay.example/v1".to_string();
+    base.api_key = "sk-relay".to_string();
+    base.short_name = "旧".to_string();
+    base.normalize();
     let previous = CodeyConfig {
-        active_profile_id: legacy.id.clone(),
-        profiles: vec![legacy.clone()],
+        active_profile_id: base.id.clone(),
+        profiles: vec![base.clone()],
         ..CodeyConfig::default()
     };
 
-    // 旧配置里的超限名称只要这次没有改动,保存其他设置仍然成功。
-    let mut updated = legacy.clone();
-    updated.api_key = "sk-relay-updated".to_string();
-    let merged = merge_profile_secrets(vec![updated], &previous).unwrap();
-    assert_eq!(merged[0].name, legacy.name);
-    assert_eq!(merged[0].api_key, "sk-relay-updated");
-
-    let mut at_limit = legacy.clone();
+    let mut at_limit = base.clone();
     at_limit.name = "名".repeat(15);
-    at_limit.short_name = "旧".to_string();
     let merged = merge_profile_secrets(vec![at_limit.clone()], &previous).unwrap();
     assert_eq!(merged[0].name, at_limit.name);
 
-    // 改名以后超过上限会被拒绝,直接调用后端接口也无法写进界面存不下的名称。
-    let mut renamed = legacy.clone();
-    renamed.name = "名".repeat(16);
-    renamed.short_name = "旧".to_string();
-    let error = merge_profile_secrets(vec![renamed], &previous).unwrap_err();
+    let mut oversized = base.clone();
+    oversized.name = "名".repeat(16);
+    let error = merge_profile_secrets(vec![oversized], &previous).unwrap_err();
     assert!(error.contains("最多 15 个字符"), "{error}");
 }
 
@@ -940,17 +946,20 @@ fn native_account_usage_follows_the_current_official_provider_without_a_saved_ro
 }
 
 #[test]
-fn official_probe_migrates_legacy_account_route_to_current_provider() {
+fn official_probe_activates_official_route_and_rejects_unavailable_without_third_party() {
     let previous = serde_json::from_value::<CodeyConfig>(json!({
-        "activeProfileId": "codey_global",
+        "activeProfileId": "codey-official-account",
         "profiles": [{
-            "id": "codey_global",
+            "id": "codey-official-account",
+            "sourceProviderId": "openai",
             "name": "OpenAI 官方直登",
+            "authMode": "officialAccount",
+            "officialAccount": true,
             "baseUrl": "https://chatgpt.com/backend-api/codex",
             "apiKey": ""
         }],
-        "selectedModelsByProvider": { "codey_global": ["gpt-5.6-sol"] },
-        "defaultModel": "codey_global/gpt-5.6-sol"
+        "selectedModelsByProvider": { "openai": ["gpt-5.6-sol"] },
+        "defaultModel": "openai/gpt-5.6-sol"
     }))
     .unwrap()
     .normalize();
@@ -1676,11 +1685,8 @@ async fn official_account_removal_reconciles_subagent_roles_and_validates_agains
             .get_mut("codey_reviewer")
             .unwrap()
             .model = format!("{one_provider}/gpt-6.2-sol");
-        config
-            .subagent_roles
-            .get_mut("codey_worker")
-            .unwrap()
-            .model = format!("{one_provider}/gpt-6-astra");
+        config.subagent_roles.get_mut("codey_worker").unwrap().model =
+            format!("{one_provider}/gpt-6-astra");
         config
             .subagent_roles
             .get_mut("codey_explorer")
@@ -1696,9 +1702,21 @@ async fn official_account_removal_reconciles_subagent_roles_and_validates_agains
 
     let after_drop = state.config.read().await.clone();
     assert!(after_drop.misc_model.is_empty());
-    assert!(!after_drop.default_model.starts_with(&format!("{one_provider}/")));
-    assert!(!after_drop.selected_models_by_provider.contains_key(&one_provider));
-    assert!(!after_drop.upstream_models_by_provider.contains_key(&one_provider));
+    assert!(
+        !after_drop
+            .default_model
+            .starts_with(&format!("{one_provider}/"))
+    );
+    assert!(
+        !after_drop
+            .selected_models_by_provider
+            .contains_key(&one_provider)
+    );
+    assert!(
+        !after_drop
+            .upstream_models_by_provider
+            .contains_key(&one_provider)
+    );
     assert!(
         !after_drop
             .upstream_speed_tiers_by_provider
@@ -1742,7 +1760,11 @@ async fn official_account_removal_reconciles_subagent_roles_and_validates_agains
     let after_commit = state.config.read().await.clone();
     assert!(after_commit.misc_model.is_empty());
     assert_eq!(after_commit.default_model, "relay/gpt-6-astra");
-    assert!(!after_commit.selected_models_by_provider.contains_key(&two_provider));
+    assert!(
+        !after_commit
+            .selected_models_by_provider
+            .contains_key(&two_provider)
+    );
     assert_eq!(
         after_commit.subagent_roles["codey_reviewer"].model,
         "relay/gpt-6-astra"
@@ -1778,7 +1800,10 @@ async fn invalid_official_account_reconciles_subagent_roles_while_preserving_acc
         .unwrap();
 
     let next = state.config.read().await.clone();
-    assert!(next.upstream_speed_tiers_by_provider.contains_key(&one_provider));
+    assert!(
+        next.upstream_speed_tiers_by_provider
+            .contains_key(&one_provider)
+    );
     assert!(next.selected_models_by_provider.contains_key(&one_provider));
     assert_eq!(next.misc_model, format!("{one_provider}/gpt-6-astra"));
     assert!(
@@ -2378,26 +2403,13 @@ async fn native_model_cache_without_saved_route_does_not_block_settings_or_reena
 }
 
 #[tokio::test]
-async fn codey_update_policy_save_persists_explicit_and_legacy_values() {
+async fn codey_update_policy_save_persists_explicit_values() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
         ..AppState::default()
     });
 
-    for enabled in [false, true] {
-        let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
-        payload.as_object_mut().unwrap().remove("codeyUpdatePolicy");
-        payload["autoCheckCodeyUpdates"] = json!(enabled);
-        let input = codey_config_save_input(&json!({ "config": payload })).unwrap();
-        save_codey_config_locked(&state, input).await.unwrap();
-        let expected = if enabled {
-            crate::config::CodeyUpdatePolicy::Stable
-        } else {
-            crate::config::CodeyUpdatePolicy::Off
-        };
-        assert_eq!(state.config.read().await.codey_update_policy, expected);
-    }
     for policy in [
         crate::config::CodeyUpdatePolicy::Off,
         crate::config::CodeyUpdatePolicy::Stable,

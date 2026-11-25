@@ -151,6 +151,27 @@ pub(crate) fn remember_settings(
     selected_at_ms: Option<i64>,
     reasoning_effort: Option<&Value>,
 ) -> Result<()> {
+    remember_settings_with_lock_timeout(
+        home,
+        thread_id,
+        model,
+        provider,
+        selected_at_ms,
+        reasoning_effort,
+        std::time::Duration::from_secs(2),
+    )
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn remember_settings_with_lock_timeout(
+    home: &Path,
+    thread_id: &str,
+    model: &str,
+    provider: Option<&str>,
+    selected_at_ms: Option<i64>,
+    reasoning_effort: Option<&Value>,
+    file_lock_timeout: std::time::Duration,
+) -> Result<()> {
     validate_thread_id(thread_id)?;
     let model = model.trim();
     let provider = provider.map(str::trim);
@@ -210,7 +231,7 @@ pub(crate) fn remember_settings(
     crate::fs_util::acquire_exclusive_lock_with_timeout(
         &lock,
         &lock_path,
-        std::time::Duration::from_secs(2),
+        file_lock_timeout,
         std::time::Duration::from_millis(10),
         || "等待会话模型写入超时".to_owned(),
         || "无法锁定会话模型记录".to_owned(),
@@ -340,8 +361,11 @@ struct RolloutFingerprint {
     head_tail_hash: u64,
 }
 
-type RolloutModelCache =
-    HashMap<(PathBuf, String), (RolloutFingerprint, Option<RolloutModelTuple>)>;
+#[derive(Default)]
+struct RolloutModelCache {
+    entries: HashMap<(PathBuf, String), (RolloutFingerprint, Option<RolloutModelTuple>, u64)>,
+    next_order: u64,
+}
 
 static ROLLOUT_MODEL_CACHE: OnceLock<Mutex<RolloutModelCache>> = OnceLock::new();
 
@@ -373,14 +397,21 @@ fn rollout_fingerprint(file: &mut File) -> Result<RolloutFingerprint> {
 fn read_rollout_model(path: &Path, thread_id: &str) -> Result<Option<RolloutModelTuple>> {
     let mut file = File::open(path)?;
     let fingerprint = rollout_fingerprint(&mut file)?;
-    let cache = ROLLOUT_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = ROLLOUT_MODEL_CACHE.get_or_init(|| Mutex::new(RolloutModelCache::default()));
     let key = (path.to_path_buf(), thread_id.to_owned());
-    if let Ok(guard) = cache.lock()
-        && let Some((cached_fp, cached_model)) = guard.get(&key)
-        && *cached_fp == fingerprint
-    {
-        return Ok(cached_model.clone());
+    if let Ok(mut guard) = cache.lock() {
+        let state = &mut *guard;
+        if let Some((cached_fp, cached_model, order)) = state.entries.get_mut(&key)
+            && *cached_fp == fingerprint
+        {
+            state.next_order = state.next_order.wrapping_add(1);
+            *order = state.next_order;
+            return Ok(cached_model.clone());
+        }
     }
+    let max_timestamp_ms = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_add(300_000);
     let mut model = None;
     let mut session_provider = None;
     let mut identity = RolloutIdentity::default();
@@ -420,13 +451,7 @@ fn read_rollout_model(path: &Path, thread_id: &str) -> Result<Option<RolloutMode
                     .as_str()
                     .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
                     .map(|value| value.timestamp_millis())
-                    .filter(|value| {
-                        *value > 0
-                            && *value
-                                <= chrono::Utc::now()
-                                    .timestamp_millis()
-                                    .saturating_add(300_000)
-                    }),
+                    .filter(|value| *value > 0 && *value <= max_timestamp_ms),
                 payload
                     .effort
                     .or_else(|| {
@@ -440,10 +465,21 @@ fn read_rollout_model(path: &Path, thread_id: &str) -> Result<Option<RolloutMode
     }
     identity.require_owner()?;
     if let Ok(mut guard) = cache.lock() {
-        if guard.len() >= 256 && !guard.contains_key(&key) {
-            guard.clear();
+        if guard.entries.len() >= 256
+            && !guard.entries.contains_key(&key)
+            && let Some(oldest_key) = guard
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, _, order))| *order)
+                .map(|(k, _)| k.clone())
+        {
+            guard.entries.remove(&oldest_key);
         }
-        guard.insert(key, (fingerprint, model.clone()));
+        guard.next_order = guard.next_order.wrapping_add(1);
+        let order = guard.next_order;
+        guard
+            .entries
+            .insert(key, (fingerprint, model.clone(), order));
     }
     Ok(model)
 }
@@ -1334,12 +1370,14 @@ mod tests {
                 scope.spawn(move || {
                     started_tx.send(()).unwrap();
                     completed_tx
-                        .send(remember_settings(
+                        .send(remember_settings_with_lock_timeout(
                             home,
                             "saved",
                             &format!("model-{timestamp}"),
                             None,
                             Some(timestamp),
+                            None,
+                            Duration::from_millis(50),
                         ))
                         .unwrap();
                 });
@@ -1348,7 +1386,7 @@ mod tests {
                 started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
             }
             // 模拟本进程的慢写入超过文件锁额度，排队通知应继续等待。
-            let premature = completed_rx.recv_timeout(Duration::from_secs(3));
+            let premature = completed_rx.recv_timeout(Duration::from_millis(150));
             fs2::FileExt::unlock(&file_lock).unwrap();
             drop(local_guard);
             assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));

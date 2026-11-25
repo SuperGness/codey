@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -390,19 +392,25 @@ pub(crate) fn load(state_root: &Path) -> LoadedRuleSet {
     load_uncached(state_root)
 }
 
+struct LoadedRuleFile {
+    rules: RuleSet,
+    bytes: Vec<u8>,
+    modified: Option<SystemTime>,
+}
+
 fn load_uncached(state_root: &Path) -> LoadedRuleSet {
     let live_path = live_rule_path(state_root);
     match load_file(&live_path) {
-        Ok(Some((rules, bytes))) => {
-            if let Err(error) = persist_last_good(state_root, &bytes) {
+        Ok(Some(loaded)) => {
+            if let Err(error) = persist_last_good(state_root, loaded.modified, &loaded.bytes) {
                 return LoadedRuleSet {
-                    rules,
+                    rules: loaded.rules,
                     source: RuleSource::Live,
                     warning: Some(format!("保存 last-known-good 子代理规则失败：{error:#}")),
                 };
             }
             LoadedRuleSet {
-                rules,
+                rules: loaded.rules,
                 source: RuleSource::Live,
                 warning: None,
             }
@@ -415,8 +423,8 @@ fn load_uncached(state_root: &Path) -> LoadedRuleSet {
         Err(live_error) => {
             let last_good_path = state_root.join(LAST_GOOD_RULE_FILE);
             match load_file(&last_good_path) {
-                Ok(Some((rules, _))) => LoadedRuleSet {
-                    rules,
+                Ok(Some(loaded)) => LoadedRuleSet {
+                    rules: loaded.rules,
                     source: RuleSource::LastKnownGood,
                     warning: Some(format!(
                         "动态子代理规则无效，已回退 last-known-good：{live_error:#}"
@@ -441,29 +449,58 @@ fn load_uncached(state_root: &Path) -> LoadedRuleSet {
     }
 }
 
-fn load_file(path: &Path) -> Result<Option<(RuleSet, Vec<u8>)>> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+fn load_file(path: &Path) -> Result<Option<LoadedRuleFile>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("读取子代理规则失败：{}", path.display()));
         }
     };
+    let metadata = file.metadata().ok();
+    let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+    if let Some(meta) = &metadata {
+        anyhow::ensure!(meta.len() <= 256 * 1024, "子代理规则文件超过 256 KiB");
+    }
+    let mut bytes = Vec::with_capacity(
+        metadata
+            .as_ref()
+            .and_then(|meta| usize::try_from(meta.len()).ok())
+            .unwrap_or(0)
+            .min(256 * 1024),
+    );
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("读取子代理规则失败：{}", path.display()))?;
     anyhow::ensure!(bytes.len() <= 256 * 1024, "子代理规则文件超过 256 KiB");
     let rules: RuleSet = serde_json::from_slice(&bytes)
         .with_context(|| format!("解析子代理规则失败：{}", path.display()))?;
     rules.validate()?;
     rules.validate_not_weaker_than(embedded())?;
-    Ok(Some((rules, bytes)))
+    Ok(Some(LoadedRuleFile {
+        rules,
+        bytes,
+        modified,
+    }))
 }
 
-fn persist_last_good(state_root: &Path, bytes: &[u8]) -> Result<()> {
+fn persist_last_good(
+    state_root: &Path,
+    live_modified: Option<SystemTime>,
+    bytes: &[u8],
+) -> Result<()> {
+    let path = state_root.join(LAST_GOOD_RULE_FILE);
+    if let Ok(meta) = fs::metadata(&path)
+        && meta.len() == bytes.len() as u64
+    {
+        if live_modified.is_some_and(|live| meta.modified().ok().is_some_and(|lkg| lkg > live)) {
+            return Ok(());
+        }
+        if fs::read(&path).ok().as_deref() == Some(bytes) {
+            return Ok(());
+        }
+    }
     fs::create_dir_all(state_root)
         .with_context(|| format!("创建子代理规则目录失败：{}", state_root.display()))?;
-    let path = state_root.join(LAST_GOOD_RULE_FILE);
-    if fs::read(&path).ok().as_deref() == Some(bytes) {
-        return Ok(());
-    }
     crate::fs_util::atomic_write(&path, bytes)
         .with_context(|| format!("写入 last-known-good 子代理规则失败：{}", path.display()))
 }

@@ -672,18 +672,43 @@ pub(super) fn restored_resume_model(
 
 #[cfg(any(windows, target_os = "macos", test))]
 fn cached_catalog_slugs(catalog_path: &str) -> Result<Vec<String>> {
-    type CatalogCache = (String, Vec<u8>, Vec<String>);
+    #[derive(PartialEq, Eq)]
+    struct CatalogMetadataSig {
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+        #[cfg(unix)]
+        dev: u64,
+        #[cfg(unix)]
+        ino: u64,
+    }
+    type CatalogCache = (String, CatalogMetadataSig, Vec<String>);
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CatalogCache>>> =
         std::sync::OnceLock::new();
-    let bytes = std::fs::read(catalog_path)?;
+    let metadata = std::fs::metadata(catalog_path)?;
+    #[cfg(unix)]
+    let sig = {
+        use std::os::unix::fs::MetadataExt;
+        CatalogMetadataSig {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    };
+    #[cfg(not(unix))]
+    let sig = CatalogMetadataSig {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    };
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache.lock()
-        && let Some((cached_path, cached_bytes, cached_slugs)) = guard.as_ref()
+        && let Some((cached_path, cached_sig, cached_slugs)) = guard.as_ref()
         && cached_path == catalog_path
-        && *cached_bytes == bytes
+        && *cached_sig == sig
     {
         return Ok(cached_slugs.clone());
     }
+    let bytes = std::fs::read(catalog_path)?;
     let catalog: serde_json::Value = serde_json::from_slice(&bytes)?;
     let models = catalog
         .get("models")
@@ -694,7 +719,7 @@ fn cached_catalog_slugs(catalog_path: &str) -> Result<Vec<String>> {
         .filter_map(|entry| entry.get("slug")?.as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     if let Ok(mut guard) = cache.lock() {
-        *guard = Some((catalog_path.to_owned(), bytes, slugs.clone()));
+        *guard = Some((catalog_path.to_owned(), sig, slugs.clone()));
     }
     Ok(slugs)
 }

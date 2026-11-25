@@ -197,40 +197,6 @@ fn delete_messages_once(
         }
     }
     result.deleted = deleted_ids.len();
-    if has_rollout || result.deleted > 0 {
-        return Ok(DeleteMessagesAttemptOutcome {
-            result,
-            deleted_ids,
-        });
-    }
-
-    // Compatibility path for older Codex builds that stored individual
-    // messages in SQLite instead of turn blocks in a rollout JSONL file.
-    for db_path in codex_session_db_paths_from_home(home) {
-        if !db_path.exists() {
-            continue;
-        }
-        let Some(targets) =
-            find_message_targets(&db_path).map_err(|source| DeleteMessagesAttemptError {
-                source,
-                deleted_ids: deleted_ids.clone(),
-            })?
-        else {
-            result
-                .unsupported_databases
-                .push(db_path.to_string_lossy().to_string());
-            continue;
-        };
-        let deleted =
-            delete_from_db(&db_path, &targets, session_id, &message_ids).map_err(|source| {
-                DeleteMessagesAttemptError {
-                    source,
-                    deleted_ids: deleted_ids.clone(),
-                }
-            })?;
-        deleted_ids.extend(deleted);
-    }
-    result.deleted = deleted_ids.len();
     Ok(DeleteMessagesAttemptOutcome {
         result,
         deleted_ids,
@@ -964,12 +930,27 @@ fn canonical_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
 fn stable_rollout_tail_turn_ids(rollout: &str, count: usize) -> Option<Vec<String>> {
     let mut turns = Vec::<(String, bool)>::new();
     for line in rollout.lines() {
-        if let Some(turn_id) = turn_boundary_id(line)
+        let has_escape = line.contains("\\u");
+        let maybe_boundary = has_escape
+            || (line.contains("turn_id")
+                && (line.contains("turn_context") || line.contains("task_started")));
+        let maybe_terminal = has_escape
+            || (line.contains("turn_id")
+                && (line.contains("task_complete") || line.contains("turn_aborted")));
+        if !maybe_boundary && !maybe_terminal {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if maybe_boundary
+            && let Some(turn_id) = turn_boundary_id_from_value(&value)
             && turns.last().is_none_or(|(current, _)| current != &turn_id)
         {
             turns.push((turn_id, false));
         }
-        if let Some(turn_id) = terminal_turn_id(line)
+        if maybe_terminal
+            && let Some(turn_id) = terminal_turn_id_from_value(&value)
             && let Some((current, terminal)) = turns.last_mut()
             && current == &turn_id
         {
@@ -988,8 +969,7 @@ fn stable_rollout_tail_turn_ids(rollout: &str, count: usize) -> Option<Vec<Strin
     })
 }
 
-fn terminal_turn_id(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(line).ok()?;
+fn terminal_turn_id_from_value(value: &Value) -> Option<String> {
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
     }
@@ -1006,6 +986,9 @@ fn terminal_turn_id(line: &str) -> Option<String> {
 }
 
 fn is_compacted_summary(line: &str) -> bool {
+    if !line.contains("\\u") && !line.contains("compacted") {
+        return false;
+    }
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return false;
     };
@@ -1024,7 +1007,17 @@ fn is_compacted_summary(line: &str) -> bool {
 }
 
 fn turn_boundary_id(line: &str) -> Option<String> {
+    if !line.contains("\\u")
+        && !(line.contains("turn_id")
+            && (line.contains("turn_context") || line.contains("task_started")))
+    {
+        return None;
+    }
     let value = serde_json::from_str::<Value>(line).ok()?;
+    turn_boundary_id_from_value(&value)
+}
+
+fn turn_boundary_id_from_value(value: &Value) -> Option<String> {
     let payload = value.get("payload")?;
     let record_type = value.get("type").and_then(Value::as_str);
     let is_boundary = record_type == Some("turn_context")
@@ -1072,7 +1065,7 @@ fn rewrite_if_unchanged(
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut output = options.open(&temporary)?;
+        let mut output = std::io::BufWriter::new(options.open(&temporary)?);
         serde_json::to_writer(
             &mut output,
             &RolloutRecovery {
@@ -1083,7 +1076,8 @@ fn rewrite_if_unchanged(
                 replacement: std::str::from_utf8(contents)?,
             },
         )?;
-        output.sync_all()?;
+        output.flush()?;
+        output.get_ref().sync_all()?;
         drop(output);
         let mut current = fs::OpenOptions::new()
             .read(true)
@@ -1212,11 +1206,6 @@ fn recover_rollout_write(destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn table_columns(path: &Path, table: &str) -> Result<std::collections::HashSet<String>> {
-    let connection = open_message_delete_database(path)?;
-    Ok(crate::sqlite_util::table_columns(&connection, table)?)
-}
-
 fn open_message_delete_database(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)
         .with_context(|| format!("打开会话数据库失败：{}", path.display()))?;
@@ -1224,71 +1213,6 @@ fn open_message_delete_database(path: &Path) -> Result<Connection> {
         .busy_timeout(MESSAGE_DELETE_SQLITE_BUSY_TIMEOUT)
         .with_context(|| format!("设置会话数据库等待时间失败：{}", path.display()))?;
     Ok(connection)
-}
-
-#[derive(Debug, Clone)]
-struct MessageTarget {
-    table: &'static str,
-    id_column: &'static str,
-    session_column: &'static str,
-}
-
-fn find_message_targets(path: &Path) -> Result<Option<Vec<MessageTarget>>> {
-    let mut targets = Vec::new();
-    for table in ["messages", "thread_items", "items"] {
-        let columns = table_columns(path, table)?;
-        if columns.is_empty() {
-            continue;
-        }
-        let Some(id_column) = ["id", "message_id", "item_id"]
-            .into_iter()
-            .find(|candidate| columns.contains(*candidate))
-        else {
-            continue;
-        };
-        let Some(session_column) = ["session_id", "thread_id"]
-            .into_iter()
-            .find(|candidate| columns.contains(*candidate))
-        else {
-            continue;
-        };
-        targets.push(MessageTarget {
-            table,
-            id_column,
-            session_column,
-        });
-    }
-    Ok((!targets.is_empty()).then_some(targets))
-}
-
-fn delete_from_db(
-    path: &Path,
-    targets: &[MessageTarget],
-    session_id: &str,
-    message_ids: &[String],
-) -> Result<HashSet<String>> {
-    let mut connection = open_message_delete_database(path)?;
-    let placeholders = std::iter::repeat_n("?", message_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut values = message_ids.to_vec();
-    values.push(session_id.to_string());
-    let transaction = connection.transaction()?;
-    let mut deleted = HashSet::new();
-    for target in targets {
-        let sql = format!(
-            "DELETE FROM {} WHERE {} IN ({placeholders}) AND {} = ? RETURNING {}",
-            target.table, target.id_column, target.session_column, target.id_column
-        );
-        let mut statement = transaction.prepare(&sql)?;
-        let found = statement
-            .query_map(params_from_iter(values.iter()), |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        deleted.extend(found);
-    }
-    // Only committed IDs count: a later store may fail after this one succeeds.
-    transaction.commit()?;
-    Ok(deleted)
 }
 
 fn delete_from_thread_history(
@@ -1619,158 +1543,6 @@ mod tests {
             rollout_thread_id_from_filename(&format!("rollout-2026-{session}.jsonl")),
             Some(session.into())
         );
-    }
-
-    #[test]
-    fn deletes_messages_transactionally_without_a_backup() {
-        let home = tempdir().unwrap();
-        let path = home.path().join("state_5.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, body TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO messages (id, session_id, body) VALUES (?1, ?2, ?3), (?4, ?2, ?5)",
-                params!["m1", "s1", "one", "m2", "two"],
-            )
-            .unwrap();
-        drop(connection);
-
-        let result = delete_messages(home.path(), "s1", &["m1".into()]).unwrap();
-        assert_eq!(result.deleted, 1);
-        let connection = Connection::open(path).unwrap();
-        let remaining: i64 = connection
-            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(remaining, 1);
-    }
-
-    #[test]
-    fn legacy_deletion_counts_each_requested_id_once_across_stores() {
-        let home = tempdir().unwrap();
-        fs::create_dir(home.path().join("sqlite")).unwrap();
-        let paths = [
-            home.path().join("sqlite/codex.db"),
-            home.path().join("state_5.sqlite"),
-        ];
-        for path in &paths {
-            let connection = Connection::open(path).unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE threads (id TEXT PRIMARY KEY);\
-                     CREATE TABLE messages (id TEXT, session_id TEXT);\
-                     CREATE TABLE items (item_id TEXT, thread_id TEXT);\
-                     INSERT INTO messages VALUES ('m1', 's1'), ('m2', 's1'), ('m1', 's2');\
-                     INSERT INTO items VALUES ('m1', 's1'), ('m2', 's1'), ('m1', 's2');",
-                )
-                .unwrap();
-        }
-
-        let result =
-            delete_messages_persistently(home.path(), "s1", &["m1".into(), "missing".into()])
-                .unwrap();
-
-        assert_eq!(result.deleted, 1);
-        assert!(result.unsupported_databases.is_empty());
-        for path in &paths {
-            let connection = Connection::open(path).unwrap();
-            for table in ["messages", "items"] {
-                let remaining: usize = connection
-                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                        row.get(0)
-                    })
-                    .unwrap();
-                assert_eq!(remaining, 2);
-            }
-        }
-    }
-
-    #[test]
-    fn legacy_deletion_does_not_count_rolled_back_records() {
-        let home = tempdir().unwrap();
-        let path = home.path().join("state_5.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE messages (id TEXT, session_id TEXT);\
-                 CREATE TABLE items (item_id TEXT, thread_id TEXT);\
-                 INSERT INTO messages VALUES ('m1', 's1');\
-                 INSERT INTO items VALUES ('m1', 's1');\
-                 CREATE TRIGGER reject_item_delete BEFORE DELETE ON items \
-                 BEGIN SELECT RAISE(ABORT, 'test deletion failure'); END;",
-            )
-            .unwrap();
-        drop(connection);
-
-        let error = delete_messages_once(home.path(), "s1", &["m1".into()])
-            .err()
-            .unwrap();
-
-        assert!(format!("{:#}", error.source).contains("test deletion failure"));
-        assert!(error.deleted_ids.is_empty());
-        let connection = Connection::open(path).unwrap();
-        for table in ["messages", "items"] {
-            let remaining: usize = connection
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert_eq!(remaining, 1);
-        }
-    }
-
-    #[test]
-    fn retries_after_legacy_lock_without_losing_committed_deletion_ids() {
-        let home = tempdir().unwrap();
-        fs::create_dir(home.path().join("sqlite")).unwrap();
-        let first_path = home.path().join("sqlite/codex.db");
-        let locked_path = home.path().join("state_5.sqlite");
-        for (path, message_id) in [(&first_path, "m1"), (&locked_path, "m2")] {
-            let connection = Connection::open(path).unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE threads (id TEXT PRIMARY KEY);\
-                     CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT);",
-                )
-                .unwrap();
-            connection
-                .execute("INSERT INTO messages VALUES (?1, 's1')", [message_id])
-                .unwrap();
-        }
-        assert_eq!(
-            codex_session_db_paths_from_home(home.path()),
-            vec![first_path.clone(), locked_path.clone()]
-        );
-
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let lock_path = locked_path.clone();
-        let lock_thread = std::thread::spawn(move || {
-            let lock = Connection::open(lock_path).unwrap();
-            // Allow schema reads while preventing the second store's deletion.
-            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-            ready_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(5_500));
-            lock.execute_batch("COMMIT").unwrap();
-        });
-        ready_rx.recv().unwrap();
-
-        let result = delete_messages_persistently(home.path(), "s1", &["m1".into(), "m2".into()]);
-        lock_thread.join().unwrap();
-        let result = result.unwrap();
-
-        assert_eq!(result.deleted, 2);
-        assert!(result.unsupported_databases.is_empty());
-        for path in [&first_path, &locked_path] {
-            let connection = Connection::open(path).unwrap();
-            let remaining: usize = connection
-                .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(remaining, 0);
-        }
     }
 
     #[test]
@@ -2676,33 +2448,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_keeps_tombstones_when_storage_cannot_be_confirmed() {
-        let home = tempdir().unwrap();
-        let db = home.path().join("state_5.sqlite");
-        let connection = Connection::open(&db).unwrap();
-        connection
-            .execute(
-                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-
-        let result = delete_messages_persistently(home.path(), "s1", &["t1".into()]).unwrap();
-        assert_eq!(result.deleted, 0);
-        assert!(!result.unsupported_databases.is_empty());
-        let tombstone_path = tombstone_path(&tombstone_directory(home.path()), "s1", "t1");
-        assert!(tombstone_path.exists());
-
-        let replay = reapply_persisted_deletions(home.path()).unwrap();
-
-        assert_eq!(replay.deleted, 0);
-        assert_eq!(replay.cleared_sessions, 0);
-        assert_eq!(replay.failures.len(), 1);
-        assert!(tombstone_path.exists());
-    }
-
-    #[test]
     fn replays_a_tombstone_when_only_the_rollout_filename_knows_the_session() {
         let home = tempdir().unwrap();
         let session_id = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
@@ -2828,6 +2573,11 @@ mod tests {
     fn keeps_a_tombstone_while_any_store_still_mentions_the_session() {
         let home = tempdir().unwrap();
         let session_id = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
+        let history = Connection::open(home.path().join(THREAD_HISTORY_DB)).unwrap();
+        history
+            .execute("CREATE TABLE unknown_history (note TEXT NOT NULL)", [])
+            .unwrap();
+        drop(history);
         let sqlite_dir = home.path().join("sqlite");
         fs::create_dir_all(&sqlite_dir).unwrap();
         let catalog = Connection::open(sqlite_dir.join("codex.db")).unwrap();
@@ -2862,43 +2612,5 @@ mod tests {
         assert_eq!(replay.failures.len(), 1);
         assert!(replay.failures[0].1.contains("无法确认消息删除是否已落地"));
         assert!(tombstone.exists());
-    }
-
-    #[test]
-    fn startup_keeps_tombstones_after_a_partial_legacy_database_delete() {
-        let home = tempdir().unwrap();
-        let sqlite_dir = home.path().join("sqlite");
-        fs::create_dir_all(&sqlite_dir).unwrap();
-        let unsupported = Connection::open(sqlite_dir.join("codex.db")).unwrap();
-        unsupported
-            .execute("CREATE TABLE threads (id TEXT PRIMARY KEY)", [])
-            .unwrap();
-        drop(unsupported);
-        let legacy = Connection::open(home.path().join("state_5.sqlite")).unwrap();
-        legacy
-            .execute(
-                "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        legacy
-            .execute(
-                "INSERT INTO messages (id, session_id) VALUES (?1, ?2)",
-                params!["t1", "s1"],
-            )
-            .unwrap();
-        drop(legacy);
-
-        let result = delete_messages_persistently(home.path(), "s1", &["t1".into()]).unwrap();
-        assert_eq!(result.deleted, 1);
-        assert!(!result.unsupported_databases.is_empty());
-        let tombstone_path = tombstone_path(&tombstone_directory(home.path()), "s1", "t1");
-        assert!(tombstone_path.exists());
-
-        let replay = reapply_persisted_deletions(home.path()).unwrap();
-
-        assert_eq!(replay.cleared_sessions, 0);
-        assert_eq!(replay.failures.len(), 1);
-        assert!(tombstone_path.exists());
     }
 }

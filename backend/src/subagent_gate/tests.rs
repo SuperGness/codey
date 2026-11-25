@@ -1210,7 +1210,7 @@ fn runtime_gate_enforces_native_role_capabilities() {
     owned_patch.tool_input = Some(json!({
         "patch": "*** Begin Patch\n*** Update File: backend/src/lib.rs\n*** End Patch"
     }));
-    attest_test_child(&owned_patch, root, &current_runtime_id());
+    attest_test_child(&owned_patch, root, &test_runtime_id());
     assert_eq!(handle_hook(&owned_patch, root).unwrap(), json!({}));
 
     let mut escaped_patch = owned_patch;
@@ -1306,7 +1306,7 @@ fn followup_task_rejects_unbound_or_terminal_targets_before_reactivation() {
     unbound_write.agent_type = Some("codey_worker".to_string());
     unbound_write.tool_name = Some("apply_patch".to_string());
     unbound_write.tool_input = Some(json!({ "patch": "*** Begin Patch\n*** End Patch" }));
-    attest_test_child(&unbound_write, root, &current_runtime_id());
+    attest_test_child(&unbound_write, root, &test_runtime_id());
     let denied_write = handle_hook(&unbound_write, root).unwrap();
     assert!(
         denied_write["hookSpecificOutput"]["permissionDecisionReason"]
@@ -2224,7 +2224,7 @@ fn native_message_uses_the_selected_writer_role() {
     patch.tool_input = Some(json!({
         "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"
     }));
-    attest_test_child(&patch, state_root, &current_runtime_id());
+    attest_test_child(&patch, state_root, &test_runtime_id());
     assert_eq!(handle_hook(&patch, state_root).unwrap(), json!({}));
 }
 
@@ -2284,7 +2284,7 @@ fn anonymous_actor_with_active_subagent_is_limited_to_reconciliation() {
     let mut child_bash = input("PreToolUse", "session-a");
     child_bash.agent_id = Some("agent-a".to_string());
     child_bash.tool_name = Some("Bash".to_string());
-    attest_test_child(&child_bash, root, &current_runtime_id());
+    attest_test_child(&child_bash, root, &test_runtime_id());
     let child_denied = handle_hook(&child_bash, root).unwrap();
     assert_eq!(
         child_denied["hookSpecificOutput"]["permissionDecision"].as_str(),
@@ -2652,7 +2652,7 @@ fn child_cannot_spawn_nested_subagents_through_any_supported_alias() {
         child_spawn.agent_id = Some("agent-a".to_string());
         child_spawn.tool_name = Some(tool.to_string());
 
-        attest_test_child(&child_spawn, temp.path(), &current_runtime_id());
+        attest_test_child(&child_spawn, temp.path(), &test_runtime_id());
         let denied = handle_hook(&child_spawn, temp.path()).unwrap();
         assert_eq!(
             denied["hookSpecificOutput"]["permissionDecision"].as_str(),
@@ -3817,51 +3817,6 @@ fn root_only_full_list_recovers_a_spawn_that_never_started() {
 }
 
 #[test]
-fn stale_pending_init_releases_after_grace() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let runtime_id = "runtime-a";
-
-    let mut start = input("SubagentStart", "pending-session");
-    start.agent_id = Some("agent-a".to_string());
-    handle_hook_for_runtime_at(&start, root, runtime_id, 1_000).unwrap();
-    let mut list = input("PostToolUse", "pending-session");
-    list.tool_name = Some("agents.list_agents".to_string());
-    list.tool_input = Some(json!({}));
-    list.tool_response = Some(json!({
-        "agents": [
-            { "agent_name": "/root", "agent_status": "running" },
-            { "agent_name": "/root/agent-a", "agent_status": "pending_init" }
-        ]
-    }));
-    assert_eq!(
-        handle_hook_for_runtime_at(&list, root, runtime_id, 1_000).unwrap()["decision"].as_str(),
-        Some("block")
-    );
-    assert_eq!(
-        handle_hook_for_runtime_at(
-            &input("Stop", "pending-session"),
-            root,
-            runtime_id,
-            1_000 + PENDING_INIT_GRACE_MILLIS - 1,
-        )
-        .unwrap()["decision"]
-            .as_str(),
-        Some("block")
-    );
-    assert_eq!(
-        handle_hook_for_runtime_at(
-            &input("Stop", "pending-session"),
-            root,
-            runtime_id,
-            1_000 + PENDING_INIT_GRACE_MILLIS,
-        )
-        .unwrap(),
-        json!({})
-    );
-}
-
-#[test]
 fn mixed_pending_init_and_live_agents_use_independent_recovery_timers() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -4350,7 +4305,7 @@ fn recovery_timer_resets_on_backward_clock_jumps_but_accepts_late_checks() {
             root,
             "runtime-a",
             "clock-session",
-            PENDING_INIT_OBSERVED_FILE,
+            UNAVAILABLE_STATUS_SINCE_FILE,
             200_000,
             grace,
         )
@@ -4361,7 +4316,7 @@ fn recovery_timer_resets_on_backward_clock_jumps_but_accepts_late_checks() {
             root,
             "runtime-a",
             "clock-session",
-            PENDING_INIT_OBSERVED_FILE,
+            UNAVAILABLE_STATUS_SINCE_FILE,
             200_000 + grace + 60_001,
             grace,
         )

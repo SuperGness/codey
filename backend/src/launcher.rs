@@ -834,7 +834,7 @@ async fn prepare_startup_model_catalog(
         .enabled
         .then(|| config.default_model_for_profile(current_profile))
         .flatten();
-    let (refresh_result, cached_catalog_result, selection_result) =
+    let (refresh_result, cached_catalog_result, selection_result, has_official_context_default) =
         tokio::task::spawn_blocking(move || {
             let refresh = model_catalog::refresh_for_provider_with_contexts(
                 &catalog_home,
@@ -897,7 +897,14 @@ async fn prepare_startup_model_catalog(
                 requested_default_model.as_deref(),
                 &catalog_codex_app_path,
             );
-            (refresh, cached_catalog, selection)
+            let has_official_context_default = use_builtin_official_catalog
+                && model_catalog::catalog_has_official_context_default(&catalog_home);
+            (
+                refresh,
+                cached_catalog,
+                selection,
+                has_official_context_default,
+            )
         })
         .await
         .map_err(|error| {
@@ -985,7 +992,7 @@ async fn prepare_startup_model_catalog(
             || config.needs_route_speed_catalog()
             || (use_builtin_official_catalog
                 && catalog_available_for_runtime
-                && model_catalog::catalog_has_official_context_default(home)),
+                && has_official_context_default),
     );
     let model_state = match selection_result {
         Ok(state) => state,
@@ -1024,24 +1031,28 @@ async fn prepare_codex_startup_state(
     let stream_max_retries = config.stream_max_retries;
     let runtime_default_model = runtime_default_model(config, use_official_catalog, &model_state);
     let runtime_model_contexts = config.runtime_enabled_model_contexts();
-    let required_catalog_models =
-        crate::codex_config::runtime_required_catalog_models(config, home, use_official_catalog);
     let remote_compaction_models = config.runtime_remote_compaction_model_aliases();
     let fast_context_tools = config.fast_context_tools;
     let scope_guard = config.scope_guard;
+    let config_for_blocking = config.clone();
     let mut runtime_subagent_config = config.clone();
     runtime_subagent_config.active_profile_id = current_profile.id.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));
-    let runtime_roles_config = startup_router_subagent_runtime_config(
-        &mut runtime_subagent_config,
-        use_official_catalog,
-        home,
-    );
-    let subagent_optimization = runtime_subagent_config.subagent_optimization;
-    let subagent_model = runtime_roles_config.subagent_model.clone();
-    let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
-    let subagent_roles = runtime_roles_config.subagent_roles.clone();
     let runtime_config = tokio::task::spawn_blocking(move || {
+        let required_catalog_models = crate::codex_config::runtime_required_catalog_models(
+            &config_for_blocking,
+            &runtime_config_home,
+            use_official_catalog,
+        );
+        let runtime_roles_config = startup_router_subagent_runtime_config(
+            &mut runtime_subagent_config,
+            use_official_catalog,
+            &runtime_config_home,
+        );
+        let subagent_optimization = runtime_subagent_config.subagent_optimization;
+        let subagent_model = runtime_roles_config.subagent_model.clone();
+        let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
+        let subagent_roles = runtime_roles_config.subagent_roles.clone();
         let applied = apply_runtime_router_config(
             &runtime_config_home,
             RuntimeRouterConfigOptions {
@@ -1890,6 +1901,7 @@ async fn prepare_startup_storage(
     let mut stop_codex_done = None;
     let mut session_maintenance_done = None;
     let mut model_catalog_done = None;
+    let mut pet_slim_done = None;
     let mut storage_guards_done = None;
     let preparation = async {
         let app_dir = resolve_configured_codex_app_dir(config).await?;
@@ -1900,9 +1912,9 @@ async fn prepare_startup_storage(
         prepare_codex_for_launch(&app_dir).await?;
         stop_codex_done = Some(started.elapsed());
 
-        // Session repair and catalog use other files. Run them together only
-        // after the old Codex writer stops.
-        let (session_maintenance, startup_catalog) = tokio::join!(
+        // Session repair, catalog prep, and pet slim patch touch disjoint files.
+        // Run them together once the old Codex writer has stopped.
+        let (session_maintenance, startup_catalog, ()) = tokio::join!(
             async {
                 let result = run_startup_session_maintenance(home).await;
                 session_maintenance_done = Some(started.elapsed());
@@ -1917,6 +1929,10 @@ async fn prepare_startup_storage(
                 };
                 model_catalog_done = Some(started.elapsed());
                 result
+            },
+            async {
+                apply_startup_pet_slim(home, config.slim_codex_pet).await;
+                pet_slim_done = Some(started.elapsed());
             }
         );
         Ok::<_, anyhow::Error>((
@@ -1949,6 +1965,7 @@ async fn prepare_startup_storage(
         ("storage.stopCodexDoneMs", stop_codex_done),
         ("storage.sessionMaintenanceDoneMs", session_maintenance_done),
         ("storage.modelCatalogDoneMs", model_catalog_done),
+        ("storage.petSlimDoneMs", pet_slim_done),
         ("storage.guardsDoneMs", storage_guards_done),
     ] {
         if let Some(done) = done {
@@ -1993,12 +2010,12 @@ async fn prepare_native_runtime_state(
     let scope_guard = config.scope_guard;
     let stream_max_retries = config.stream_max_retries;
     let native_subagent_config = config.clone();
-    let applied = tokio::task::spawn_blocking(move || {
+    let (mut runtime_config, applied) = tokio::task::spawn_blocking(move || {
         let native_subagent_config = reconciled_native_subagent_runtime_config(
             &native_subagent_config,
             &runtime_config_home,
         );
-        apply_runtime_router_config(
+        let applied = apply_runtime_router_config(
             &runtime_config_home,
             RuntimeRouterConfigOptions {
                 local_router: None,
@@ -2015,13 +2032,13 @@ async fn prepare_native_runtime_state(
                 scope_guard,
                 stream_max_retries,
             },
-        )
+        )?;
+        Ok::<_, anyhow::Error>((native_subagent_config, applied))
     })
     .await
     .map_err(|error| {
         anyhow::Error::new(error).context("应用原生 Provider 运行配置任务异常退出")
     })??;
-    let mut runtime_config = reconciled_native_subagent_runtime_config(config, home);
     runtime_config.fast_context_tools = applied.fast_context_tools_active;
     Ok(PreparedProviderState {
         runtime_config,
@@ -2030,32 +2047,7 @@ async fn prepare_native_runtime_state(
     })
 }
 
-async fn prepare_startup_patches(
-    home: &std::path::Path,
-    config: &CodeyConfig,
-) -> Result<StartupPatchState> {
-    // The vendored helper only probes the port on Windows. A busy 9229 on macOS
-    // (another Node/Electron debugger) otherwise leaves Chromium without a
-    // remote-debugging port and the injection times out after 30 s.
-    prepare_startup_patches_with_port_selector(home, config, || {
-        codey_runtime_core::ports::try_select_packaged_codex_debug_port_with(
-            9229,
-            true,
-            codey_runtime_core::ports::can_bind_loopback_port,
-            codey_runtime_core::ports::try_find_available_loopback_port,
-        )
-    })
-    .await
-}
-
-async fn prepare_startup_patches_with_port_selector(
-    home: &std::path::Path,
-    config: &CodeyConfig,
-    select_debug_port: impl FnOnce() -> std::io::Result<u16>,
-) -> Result<StartupPatchState> {
-    let debug_port = select_debug_port().context("无法为 Codex 分配本地调试端口")?;
-    anyhow::ensure!(debug_port != 0, "无法为 Codex 分配有效的本地调试端口");
-    let slim_codex_pet = config.slim_codex_pet;
+async fn apply_startup_pet_slim(home: &std::path::Path, slim_codex_pet: bool) {
     let pet_result = configure_startup_pet(home, slim_codex_pet).await;
     match pet_result {
         Ok(Ok(_)) => {}
@@ -2090,7 +2082,28 @@ async fn prepare_startup_patches_with_port_selector(
                 }),
             );
         }
-    };
+    }
+}
+
+fn select_startup_debug_port() -> Result<StartupPatchState> {
+    // The vendored helper only probes the port on Windows. A busy 9229 on macOS
+    // (another Node/Electron debugger) otherwise leaves Chromium without a
+    // remote-debugging port and the injection times out after 30 s.
+    select_startup_debug_port_with(|| {
+        codey_runtime_core::ports::try_select_packaged_codex_debug_port_with(
+            9229,
+            true,
+            codey_runtime_core::ports::can_bind_loopback_port,
+            codey_runtime_core::ports::try_find_available_loopback_port,
+        )
+    })
+}
+
+fn select_startup_debug_port_with(
+    select_debug_port: impl FnOnce() -> std::io::Result<u16>,
+) -> Result<StartupPatchState> {
+    let debug_port = select_debug_port().context("无法为 Codex 分配本地调试端口")?;
+    anyhow::ensure!(debug_port != 0, "无法为 Codex 分配有效的本地调试端口");
     Ok(StartupPatchState { debug_port })
 }
 
@@ -2483,23 +2496,38 @@ impl CodeyRuntime {
         }
         stage_timings.mark("validateRouterProviderMs");
         let initial_storage_guards = spawn_initial_storage_guards(home, config, trace_guard_state);
-        let (storage, startup_catalog) = prepare_startup_storage(
-            home,
-            config,
-            startup_profile.as_ref(),
-            initial_storage_guards,
-            trace_log_write_protection_active,
-            &crashpad_pending_stats,
-            &mut stage_timings,
-        )
-        .await?;
-        stage_timings.mark("storageAndCatalogMs");
-        let local_router = if config.local_router_enabled {
-            Some(LocalRouter::start_with_usage(config, account_usage_cache).await?)
-        } else {
-            None
+        let (storage_result, local_router_result) = tokio::join!(
+            prepare_startup_storage(
+                home,
+                config,
+                startup_profile.as_ref(),
+                initial_storage_guards,
+                trace_log_write_protection_active,
+                &crashpad_pending_stats,
+                &mut stage_timings,
+            ),
+            async {
+                if config.local_router_enabled {
+                    LocalRouter::start_with_usage(config, account_usage_cache)
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+        );
+        let (storage, startup_catalog, local_router) = match (storage_result, local_router_result) {
+            (Ok((storage, startup_catalog)), Ok(local_router)) => {
+                (storage, startup_catalog, local_router)
+            }
+            (Err(error), Ok(local_router)) => {
+                stop_local_router_after_failed_start(local_router.as_ref()).await;
+                return Err(error);
+            }
+            (Ok(_), Err(error)) => return Err(error),
+            (Err(storage_error), Err(_)) => return Err(storage_error),
         };
-        stage_timings.mark("localRouterStartMs");
+        stage_timings.mark("storageCatalogAndRouterMs");
         let prepared_provider_state =
             if let (Some(startup_profile), Some(local_router), Some(startup_catalog)) = (
                 startup_profile.as_ref(),
@@ -2534,7 +2562,7 @@ impl CodeyRuntime {
             }
         };
         stage_timings.mark("providerStateMs");
-        let patch = match prepare_startup_patches(home, config).await {
+        let patch = match select_startup_debug_port() {
             Ok(patch) => patch,
             Err(error) => {
                 stop_local_router_after_failed_start(local_router.as_ref()).await;
@@ -2588,11 +2616,16 @@ impl CodeyRuntime {
             .map(WindowsStartupProcess::tracked_process_id);
         // 会话内的官方额度数据按启动时的登录身份刷新；记下这个身份，之后
         // 切换默认账号时页面可以区分哪些官方线路已经换了凭据。
-        let session_official_account_id =
-            crate::official_accounts::OfficialAccountStore::read_codex_login(home)
+        let login_home = home.to_path_buf();
+        let session_official_account_id = tokio::task::spawn_blocking(move || {
+            crate::official_accounts::OfficialAccountStore::read_codex_login(&login_home)
                 .ok()
                 .flatten()
-                .map(|record| record.id);
+                .map(|record| record.id)
+        })
+        .await
+        .ok()
+        .flatten();
         let RuntimeWatchers {
             injection_statuses,
             injection_websocket_url,

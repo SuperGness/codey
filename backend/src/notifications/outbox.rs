@@ -206,6 +206,35 @@ impl Outbox {
             .await
     }
 
+    pub(crate) async fn record_baseline_keys(
+        &self,
+        keys: Vec<String>,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.run(move |connection, _| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(db_error)?;
+            let mut statement = transaction
+                .prepare(
+                    "INSERT OR IGNORE INTO notification_events(event_key, payload, created_at_ms, settled_at_ms)
+                     VALUES (?1, '{}', ?2, ?2)",
+                )
+                .map_err(db_error)?;
+            for key in keys {
+                validate_key(&key, 4_096, "事件标识")?;
+                statement.execute(params![key, now_ms]).map_err(db_error)?;
+            }
+            drop(statement);
+            transaction.commit().map_err(db_error)?;
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn claim_due(
         &self,
         now_ms: i64,

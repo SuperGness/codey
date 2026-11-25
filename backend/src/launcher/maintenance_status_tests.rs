@@ -8,12 +8,9 @@ async fn pet_state_failure_does_not_abort_startup_or_replace_state() {
         let backup = temp.path().join(".codex-global-state.json.bak");
         std::fs::write(&primary, b"{broken").unwrap();
         std::fs::write(&backup, b"{also broken").unwrap();
-        let config = CodeyConfig {
-            slim_codex_pet,
-            ..CodeyConfig::default()
-        };
 
-        let patch = prepare_startup_patches(temp.path(), &config).await.unwrap();
+        apply_startup_pet_slim(temp.path(), slim_codex_pet).await;
+        let patch = select_startup_debug_port().unwrap();
 
         assert_ne!(patch.debug_port, 0);
         assert_eq!(std::fs::read(&primary).unwrap(), b"{broken");
@@ -21,17 +18,15 @@ async fn pet_state_failure_does_not_abort_startup_or_replace_state() {
     }
 }
 
-#[tokio::test]
-async fn debug_port_failure_aborts_before_startup_patches() {
+#[test]
+fn debug_port_failure_aborts_before_startup_patches() {
     let temp = tempfile::tempdir().unwrap();
-    let config = CodeyConfig::default();
-    let result = prepare_startup_patches_with_port_selector(temp.path(), &config, || {
+    let result = select_startup_debug_port_with(|| {
         Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "loopback binding denied",
         ))
-    })
-    .await;
+    });
     let error = match result {
         Ok(_) => panic!("startup should fail without a debug port"),
         Err(error) => error,
@@ -40,12 +35,10 @@ async fn debug_port_failure_aborts_before_startup_patches() {
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
 
-#[tokio::test]
-async fn debug_port_zero_never_reaches_startup_command() {
+#[test]
+fn debug_port_zero_never_reaches_startup_command() {
     let temp = tempfile::tempdir().unwrap();
-    let result =
-        prepare_startup_patches_with_port_selector(temp.path(), &CodeyConfig::default(), || Ok(0))
-            .await;
+    let result = select_startup_debug_port_with(|| Ok(0));
     assert!(result.is_err());
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }

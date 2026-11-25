@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[cfg(test)]
-use super::current_runtime_id;
+#[cfg(test)]
+use super::test_runtime_id;
 use super::{
     ACTIVE_MARKER_SCHEMA_VERSION, HOOK_STATE_LOCK_FILE, PROTOCOL_HEALTH_FILE,
     PROTOCOL_HEALTH_SCHEMA_VERSION, ROOT_TURN_BINDING_FILE, ROOT_TURN_BINDING_SCHEMA_VERSION,
@@ -522,7 +523,7 @@ pub(super) fn remove_session_state(
 
 #[cfg(test)]
 pub(super) fn active_agent_count(state_root: &Path, session_id: &str) -> Result<usize> {
-    active_agent_count_for_runtime(state_root, &current_runtime_id(), session_id)
+    active_agent_count_for_runtime(state_root, &test_runtime_id(), session_id)
 }
 
 pub(super) fn active_agent_count_for_runtime(

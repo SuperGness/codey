@@ -1254,26 +1254,24 @@ fn normalize_version_value(value: &str) -> Option<String> {
     .then(|| value.to_string())
 }
 
-/// 内置 CLI 的候选位置。Codex 更新改动过文件名与目录层级，所以按已知命名逐个
-/// 尝试：只认单一路径时，一次改名就等于「找不到内置 CLI」并卡死启动。
-/// 首选项与历史行为一致，因此存在同名文件时仍选到原来的那一个。
+/// 内置 CLI 的候选位置。优先匹配当前 `codex-cli/bin/codex` 包布局，再回退到旧布局。
 pub fn codex_runtime_executable_candidates(app_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if app_dir.extension() == Some(OsStr::new("app")) {
         let resources = app_dir.join("Contents").join("Resources");
-        candidates.push(resources.join("codex"));
-        candidates.push(resources.join("codex-cli"));
-        // 新版把 CLI 收进 `codex-cli` 包：`bin/codex` 是包清单声明的入口，并且
+        // 当前版本把 CLI 收进 `codex-cli` 包：`bin/codex` 是包清单声明的入口，并且
         // 与 `codex-code-mode-host` 同级，包装器与宿主校验都依赖这一层布局。
         candidates.push(resources.join("codex-cli").join("bin").join("codex"));
+        candidates.push(resources.join("codex"));
+        candidates.push(resources.join("codex-cli"));
         candidates.push(resources.join("bin").join("codex"));
         candidates.push(app_dir.join("Contents").join("MacOS").join("codex"));
     } else {
         let resources = app_dir.join("resources");
+        candidates.push(resources.join("codex-cli").join("bin").join("codex.exe"));
         candidates.push(resources.join("codex.exe"));
         candidates.push(app_dir.join("Resources").join("codex.exe"));
         candidates.push(resources.join("bin").join("codex.exe"));
-        candidates.push(resources.join("codex-cli").join("bin").join("codex.exe"));
         candidates.push(resources.join("codex-cli.exe"));
     }
     candidates
@@ -2815,21 +2813,29 @@ mod tests {
             Some(packaged.join("codex").as_path())
         );
 
-        // 历史布局仍在时保持原选择。
+        // 同时存在旧布局时优先命中当前包内布局。
         let legacy = contents.join("Resources").join("codex");
         std::fs::write(&legacy, "legacy CLI").unwrap();
+        assert_eq!(
+            codex_runtime_executable(&app_dir).as_deref(),
+            Some(packaged.join("codex").as_path())
+        );
+
+        // 包内布局缺失时回退到旧布局。
+        std::fs::remove_file(packaged.join("codex")).unwrap();
         assert_eq!(
             codex_runtime_executable(&app_dir).as_deref(),
             Some(legacy.as_path())
         );
     }
 
-    /// Windows 分支同样要覆盖包内布局；这里只校验候选路径拼接。
+    /// Windows 分支同样优先检查包内布局；这里只校验候选路径顺序。
     #[test]
     fn runtime_executable_candidates_include_the_packaged_windows_layout() {
         let app_dir = PathBuf::from("Codex");
-        assert!(
-            codex_runtime_executable_candidates(&app_dir).contains(
+        assert_eq!(
+            codex_runtime_executable_candidates(&app_dir).first(),
+            Some(
                 &app_dir
                     .join("resources")
                     .join("codex-cli")

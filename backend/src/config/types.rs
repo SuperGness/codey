@@ -597,30 +597,13 @@ impl RouteRequestLogConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CodeyUpdatePolicy {
     Off,
     #[default]
     Stable,
     Experimental,
-}
-
-impl<'de> Deserialize<'de> for CodeyUpdatePolicy {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::Bool(false) => Ok(Self::Off),
-            serde_json::Value::Bool(true) => Ok(Self::Stable),
-            serde_json::Value::String(value) => match value.as_str() {
-                "off" => Ok(Self::Off),
-                "stable" => Ok(Self::Stable),
-                "experimental" => Ok(Self::Experimental),
-                _ => Err(serde::de::Error::custom("Codey 更新策略无效")),
-            },
-            _ => Err(serde::de::Error::custom("Codey 更新策略无效")),
-        }
-    }
 }
 
 impl CodeyUpdatePolicy {
@@ -638,7 +621,7 @@ impl CodeyUpdatePolicy {
 pub struct CodeyConfig {
     #[serde(default)]
     pub settings_revision: u64,
-    #[serde(default, alias = "autoCheckCodeyUpdates")]
+    #[serde(default)]
     pub codey_update_policy: CodeyUpdatePolicy,
     /// Controls whether Codey installs and uses its process-local multi-route
     /// gateway. Missing values default to enabled so existing installations
@@ -924,21 +907,9 @@ pub const SUBAGENT_ROLE_IDS: [&str; 4] = [
     SUBAGENT_ROLE_REVIEWER,
     SUBAGENT_ROLE_DEFAULT,
 ];
-/// Roles registered by earlier releases, paired with the role that replaced
-/// them. Saved selections migrate in this order (first enabled match wins), and
-/// Codey-owned files or config tables under these names are still cleaned up.
-pub const LEGACY_SUBAGENT_ROLES: [(&str, &str); 4] = [
-    ("codey_deep_research", SUBAGENT_ROLE_EXPLORER),
-    ("codey_quick_scan", SUBAGENT_ROLE_EXPLORER),
-    ("codey_visual_worker", SUBAGENT_ROLE_WORKER),
-    ("codey_visual_analysis", SUBAGENT_ROLE_REVIEWER),
-];
-
-/// Every role ID Codey has registered, current and retired, for cleanup paths.
+/// Every role ID Codey registers for cleanup paths.
 pub fn owned_subagent_role_ids() -> impl Iterator<Item = &'static str> {
-    SUBAGENT_ROLE_IDS
-        .into_iter()
-        .chain(LEGACY_SUBAGENT_ROLES.into_iter().map(|(legacy, _)| legacy))
+    SUBAGENT_ROLE_IDS.into_iter()
 }
 
 pub(super) fn default_upstream_protocol() -> String {

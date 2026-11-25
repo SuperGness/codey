@@ -3,9 +3,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::time::SystemTime;
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -90,8 +91,59 @@ impl ConfigAuditSink for DiagnosticConfigAuditSink {
 
 pub trait FileLockGuard: Send {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigFileSignature {
+    len: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mtime: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+}
+
+impl ConfigFileSignature {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            mtime: metadata.mtime(),
+            #[cfg(unix)]
+            mtime_nsec: metadata.mtime_nsec(),
+            #[cfg(unix)]
+            ctime: metadata.ctime(),
+            #[cfg(unix)]
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigFileMetadata {
+    Unsupported,
+    Missing,
+    Present(ConfigFileSignature),
+}
+
 pub trait ConfigFileSystem: Send + Sync {
     fn read_optional(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
+    fn file_metadata(&self, _path: &Path) -> io::Result<ConfigFileMetadata> {
+        Ok(ConfigFileMetadata::Unsupported)
+    }
     fn exists(&self, path: &Path) -> io::Result<bool> {
         Ok(self.read_optional(path)?.is_some())
     }
@@ -121,6 +173,18 @@ impl ConfigFileSystem for OsConfigFileSystem {
         match fs::read(path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn file_metadata(&self, path: &Path) -> io::Result<ConfigFileMetadata> {
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(ConfigFileMetadata::Present(
+                ConfigFileSignature::from_metadata(&metadata),
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(ConfigFileMetadata::Missing)
+            }
             Err(error) => Err(error),
         }
     }
@@ -229,25 +293,35 @@ pub struct ConfigManager {
     inner: Arc<ConfigManagerInner>,
 }
 
+#[derive(Clone)]
+struct CachedConfigSnapshot {
+    metadata: ConfigFileMetadata,
+    snapshot: Arc<ConfigSnapshot>,
+}
+
 struct ConfigManagerInner {
     path: PathBuf,
     lock_path: PathBuf,
     backup_limit: usize,
     fs: Arc<dyn ConfigFileSystem>,
     audit: Arc<dyn ConfigAuditSink>,
-    snapshot: RwLock<Option<Arc<ConfigSnapshot>>>,
+    snapshot: RwLock<Option<CachedConfigSnapshot>>,
     process_lock: Arc<Mutex<()>>,
+    use_global_cache: bool,
 }
 
 static PROCESS_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+static GLOBAL_SNAPSHOT_CACHE: OnceLock<RwLock<BTreeMap<PathBuf, CachedConfigSnapshot>>> =
+    OnceLock::new();
 
 impl ConfigManager {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self::with_components(
+        Self::with_options(
             path,
             Arc::new(OsConfigFileSystem),
             Arc::new(DiagnosticConfigAuditSink),
             DEFAULT_BACKUP_LIMIT,
+            true,
         )
     }
 
@@ -261,6 +335,16 @@ impl ConfigManager {
         audit: Arc<dyn ConfigAuditSink>,
         backup_limit: usize,
     ) -> Self {
+        Self::with_options(path, fs, audit, backup_limit, false)
+    }
+
+    fn with_options(
+        path: impl Into<PathBuf>,
+        fs: Arc<dyn ConfigFileSystem>,
+        audit: Arc<dyn ConfigAuditSink>,
+        backup_limit: usize,
+        use_global_cache: bool,
+    ) -> Self {
         let path = path.into();
         let lock_path = lock_path_for(&path);
         let process_lock = process_lock_for(&lock_path);
@@ -273,6 +357,7 @@ impl ConfigManager {
                 audit,
                 snapshot: RwLock::new(None),
                 process_lock,
+                use_global_cache,
             }),
         }
     }
@@ -286,33 +371,141 @@ impl ConfigManager {
             .snapshot
             .read()
             .ok()
-            .and_then(|value| value.clone())
+            .and_then(|value| value.as_ref().map(|entry| entry.snapshot.clone()))
     }
 
     pub fn load(&self) -> Result<Arc<ConfigSnapshot>> {
-        self.load_operation("load")
+        self.load_operation("load", true)
     }
 
     pub fn reload(&self) -> Result<Arc<ConfigSnapshot>> {
-        self.load_operation("reload")
+        self.load_operation("reload", false)
     }
 
-    fn load_operation(&self, operation: &str) -> Result<Arc<ConfigSnapshot>> {
-        let result = self.with_lock(|| self.load_locked());
-        match &result {
-            Ok(snapshot) => self.record(ConfigAuditEvent {
-                operation: operation.to_string(),
-                path: self.inner.path.to_string_lossy().into_owned(),
-                status: "ok".to_string(),
-                reason: None,
-                caller: None,
-                revision: Some(snapshot.revision.as_hex()),
-                base_url_changed: false,
-                error: None,
-            }),
-            Err(error) => self.record_failure(operation, None, None, error),
+    fn load_operation(
+        &self,
+        operation: &str,
+        allow_metadata_hit: bool,
+    ) -> Result<Arc<ConfigSnapshot>> {
+        let result = self.load_lockless(allow_metadata_hit);
+        if let Err(error) = &result {
+            self.record_failure(operation, None, None, error);
         }
         result
+    }
+
+    fn load_lockless(&self, allow_metadata_hit: bool) -> Result<Arc<ConfigSnapshot>> {
+        let meta_before = self
+            .inner
+            .fs
+            .file_metadata(&self.inner.path)
+            .with_context(|| format!("读取 {} 元数据失败", self.inner.path.display()))?;
+
+        if allow_metadata_hit
+            && meta_before != ConfigFileMetadata::Unsupported
+            && let Some(snapshot) = self.cached_for_metadata(&meta_before)
+        {
+            return Ok(snapshot);
+        }
+
+        let bytes = self
+            .inner
+            .fs
+            .read_optional(&self.inner.path)
+            .with_context(|| format!("读取 {} 失败", self.inner.path.display()))?;
+        let exists = bytes.is_some();
+        let raw_bytes = bytes.unwrap_or_default();
+        let meta_after = if meta_before != ConfigFileMetadata::Unsupported {
+            self.inner
+                .fs
+                .file_metadata(&self.inner.path)
+                .ok()
+                .filter(|after| after == &meta_before)
+                .unwrap_or(ConfigFileMetadata::Unsupported)
+        } else {
+            ConfigFileMetadata::Unsupported
+        };
+
+        if let Some(snapshot) = self.cached_for_raw(exists, &raw_bytes) {
+            self.store_cached(meta_after, snapshot.clone());
+            return Ok(snapshot);
+        }
+
+        let snapshot = Arc::new(build_snapshot(&self.inner.path, exists, raw_bytes)?);
+        self.store_cached(meta_after, snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn cached_for_metadata(&self, metadata: &ConfigFileMetadata) -> Option<Arc<ConfigSnapshot>> {
+        if let Some(entry) = self
+            .inner
+            .snapshot
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            && &entry.metadata == metadata
+        {
+            return Some(entry.snapshot);
+        }
+        if self.inner.use_global_cache
+            && let Some(cache) = GLOBAL_SNAPSHOT_CACHE.get()
+            && let Some(entry) = cache
+                .read()
+                .ok()
+                .and_then(|guard| guard.get(&self.inner.path).cloned())
+            && &entry.metadata == metadata
+        {
+            if let Ok(mut guard) = self.inner.snapshot.write() {
+                *guard = Some(entry.clone());
+            }
+            return Some(entry.snapshot);
+        }
+        None
+    }
+
+    fn cached_for_raw(&self, exists: bool, raw: &[u8]) -> Option<Arc<ConfigSnapshot>> {
+        if let Some(entry) = self
+            .inner
+            .snapshot
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            && entry.snapshot.exists == exists
+            && entry.snapshot.raw() == raw
+        {
+            return Some(entry.snapshot);
+        }
+        if self.inner.use_global_cache
+            && let Some(cache) = GLOBAL_SNAPSHOT_CACHE.get()
+            && let Some(entry) = cache
+                .read()
+                .ok()
+                .and_then(|guard| guard.get(&self.inner.path).cloned())
+            && entry.snapshot.exists == exists
+            && entry.snapshot.raw() == raw
+        {
+            return Some(entry.snapshot);
+        }
+        None
+    }
+
+    fn store_cached(&self, metadata: ConfigFileMetadata, snapshot: Arc<ConfigSnapshot>) {
+        let entry = CachedConfigSnapshot {
+            metadata: metadata.clone(),
+            snapshot,
+        };
+        if let Ok(mut guard) = self.inner.snapshot.write() {
+            *guard = Some(entry.clone());
+        }
+        if self.inner.use_global_cache && metadata != ConfigFileMetadata::Unsupported {
+            let cache = GLOBAL_SNAPSHOT_CACHE.get_or_init(|| RwLock::new(BTreeMap::new()));
+            if let Ok(mut guard) = cache.write() {
+                if guard.len() >= 64 && !guard.contains_key(&self.inner.path) {
+                    guard.clear();
+                }
+                guard.insert(self.inner.path.clone(), entry);
+            }
+        }
     }
 
     pub fn update<F>(
@@ -340,11 +533,12 @@ impl ConfigManager {
             let candidate = build_snapshot(&self.inner.path, true, raw.into_bytes())?;
             self.commit_locked(&current, &candidate)?;
             let candidate = Arc::new(candidate);
-            *self
+            let metadata = self
                 .inner
-                .snapshot
-                .write()
-                .expect("config snapshot lock poisoned") = Some(candidate.clone());
+                .fs
+                .file_metadata(&self.inner.path)
+                .unwrap_or(ConfigFileMetadata::Unsupported);
+            self.store_cached(metadata, candidate.clone());
             self.record(ConfigAuditEvent {
                 operation: if base_url_changed {
                     "base_url_change".to_string()
@@ -419,11 +613,12 @@ impl ConfigManager {
             exists,
             bytes.unwrap_or_default(),
         )?);
-        *self
+        let metadata = self
             .inner
-            .snapshot
-            .write()
-            .expect("config snapshot lock poisoned") = Some(snapshot.clone());
+            .fs
+            .file_metadata(&self.inner.path)
+            .unwrap_or(ConfigFileMetadata::Unsupported);
+        self.store_cached(metadata, snapshot.clone());
         Ok(snapshot)
     }
 

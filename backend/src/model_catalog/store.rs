@@ -160,6 +160,17 @@ fn catalog_signature(paths: &[PathBuf]) -> CatalogSignature {
 }
 
 #[cfg(test)]
+pub(crate) fn write_test_runtime_catalog(home: &Path, mut catalog: Value, account_snapshot: bool) {
+    catalog["codey_runtime_source"] = json!(catalog_source_for_app(""));
+    if account_snapshot {
+        catalog["codey_account_snapshot"] = json!(true);
+    }
+    let path = home.join(DEBUG_CATALOG_RELATIVE_PATH);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+}
+
+#[cfg(test)]
 pub(super) fn read_official_entries(
     home: &Path,
     codex_app_path: &str,
@@ -191,27 +202,38 @@ pub(super) fn read_official_entries_in_context(
     Ok(entries)
 }
 
-/// Raw catalog sources, newest first. A snapshot is captured only when it is
-/// missing or older than the installed Codex, so whenever it is newer than
-/// `models_cache.json` it carries instructions the cache cannot: without this
-/// ordering a Codex upgrade that stops maintaining the cache would keep the
-/// pre-upgrade instructions forever, and the refresh would be wasted work.
-/// Missing files sort last; they contribute nothing either way.
+/// Codey-owned runtime catalog sources: raw CLI/account snapshot first, then
+/// the rendered catalog for instruction template recovery.
 fn ordered_catalog_sources(home: &Path) -> Vec<PathBuf> {
-    let mut raw = [
-        home.join("models_cache.json"),
+    vec![
         home.join(DEBUG_CATALOG_RELATIVE_PATH),
-    ];
-    raw.sort_by_key(|path| {
-        std::cmp::Reverse(
-            fs::metadata(path)
-                .and_then(|metadata| metadata.modified())
-                .ok(),
-        )
+        home.join(relative_path()),
+    ]
+}
+
+fn fallback_official_metadata_entry(slug: &str, display_name: &str, priority: usize) -> Value {
+    let (default_effort, efforts): (&str, &[&str]) = match slug {
+        "gpt-5.6-sol" => ("low", &["low", "medium", "high", "xhigh", "max", "ultra"]),
+        "gpt-5.5" => ("medium", &["low", "medium", "high", "xhigh"]),
+        _ => (
+            "medium",
+            &["low", "medium", "high", "xhigh", "max", "ultra"],
+        ),
+    };
+    let supported_reasoning_levels = efforts
+        .iter()
+        .map(|effort| json!({ "effort": effort }))
+        .collect::<Vec<_>>();
+    let mut entry = json!({
+        "slug": slug,
+        "display_name": display_name,
+        "visibility": "list",
+        "supported_in_api": true,
+        "default_reasoning_level": default_effort,
+        "supported_reasoning_levels": supported_reasoning_levels,
     });
-    raw.into_iter()
-        .chain([home.join(relative_path())])
-        .collect()
+    normalize_official_model(&mut entry, slug, display_name, priority);
+    entry
 }
 
 fn read_official_entries_uncached(
@@ -219,30 +241,17 @@ fn read_official_entries_uncached(
     source: Option<&RuntimeCatalogSource>,
 ) -> Result<Vec<Value>> {
     let mut catalogs = Vec::new();
-    let mut last_error = None;
-    let mut account_snapshot_models = None;
+    let mut account_snapshot_index = None;
     for path in paths {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                last_error = Some(error.to_string());
-                continue;
-            }
+            Err(_) => continue,
         };
-        let value = match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => value,
-            Err(error) => {
-                last_error = Some(error.to_string());
-                continue;
-            }
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
         };
-        // Codey's raw and rendered catalogs can contain templates copied from
-        // another installation. Account-owned models_cache.json remains intact.
-        if (path.ends_with(DEBUG_CATALOG_RELATIVE_PATH)
-            || path.ends_with(MODEL_CATALOG_RELATIVE_PATH))
-            && !snapshot_matches_runtime_source(&value, source)
-        {
+        if !snapshot_matches_runtime_source(&value, source) {
             continue;
         }
         let account_snapshot = path.ends_with(DEBUG_CATALOG_RELATIVE_PATH)
@@ -252,13 +261,12 @@ fn read_official_entries_uncached(
                 .unwrap_or(false);
         let mut models = official_models_from_value(&value);
         if path.ends_with(MODEL_CATALOG_RELATIVE_PATH) {
-            // 旧版生成目录曾按模型名补 Ultrafast，只能用它恢复指令等模板字段。
+            // 生成目录可能携带线路速度覆盖，只能用它恢复指令等模板字段。
             for model in &mut models {
                 clear_template_speed_tiers(model);
             }
         } else {
             for model in &mut models {
-                // 有来源的官方容量声明应保留，旧版 Codey 的 1M 覆盖另行迁移。
                 if model.get("codey_context_source").is_none()
                     && declared_context_capacity(model).is_some()
                 {
@@ -266,78 +274,60 @@ fn read_official_entries_uncached(
                 }
             }
         }
-        if account_snapshot {
-            account_snapshot_models = Some(models.clone());
-        }
         if !models.is_empty() {
+            if account_snapshot {
+                account_snapshot_index = Some(catalogs.len());
+            }
             catalogs.push(models);
         }
-    }
-    if let Some(value) = codey_runtime_core::model_suffix::bundled_model_catalog() {
-        let models = official_models_from_value(&value);
-        if !models.is_empty() {
-            catalogs.push(models);
-        }
-    }
-    if catalogs.is_empty() {
-        bail!(
-            "{}",
-            last_error.unwrap_or_else(|| "找不到可用的 Codex 模型模板".to_string())
-        );
     }
 
     // A Codey-owned CLI snapshot is account-backed and therefore the source
-    // of truth. Keeping the old fixed list below is still useful for first-run
-    // and offline fallback, but it must not hide newly released models that
-    // the signed-in account can actually use. A generic models_cache.json is
-    // intentionally not treated as dynamic input because older Codex builds
-    // can leave retired models in that file.
-    let dynamic_source = account_snapshot_models;
-    // Account `/models` payloads name the slugs the signed-in account can call,
-    // but they omit the instruction templates Codex needs to launch a model.
-    // Fill those from the local cache before deciding the snapshot is unusable,
-    // so a newly released slug is not dropped back to the fixed fallback list.
-    let dynamic_source = dynamic_source.map(|models| {
-        let templates = catalogs.iter().flatten().cloned().collect::<Vec<_>>();
-        complete_account_models(&models, &templates)
-    });
-    if let Some(source) = dynamic_source
-        .as_deref()
-        .filter(|models| snapshot_has_runtime_models(models))
-    {
-        let mut seen = HashSet::new();
-        let models = source
-            .iter()
-            .filter(|model| {
-                model_instruction_source(model).is_some()
-                    && model
-                        .get("visibility")
+    // of truth. Fill missing instruction templates in-place from the other
+    // local catalog entries without deep-cloning every catalog.
+    if let Some(index) = account_snapshot_index {
+        let mut account_models = catalogs.swap_remove(index);
+        complete_account_models_in_place(&mut account_models, &catalogs);
+        if snapshot_has_runtime_models(&account_models) {
+            let mut seen = HashSet::new();
+            let models = account_models
+                .into_iter()
+                .filter(|model| {
+                    model_instruction_source(model).is_some()
+                        && model
+                            .get("visibility")
+                            .and_then(Value::as_str)
+                            .is_none_or(|visibility| visibility != "hide")
+                })
+                .filter_map(|mut model| {
+                    let slug = model
+                        .get("slug")
+                        .and_then(Value::as_str)?
+                        .trim()
+                        .to_string();
+                    if slug.is_empty() || !seen.insert(model_id::key(&slug)) {
+                        return None;
+                    }
+                    let display_name = model
+                        .get("display_name")
                         .and_then(Value::as_str)
-                        .is_none_or(|visibility| visibility != "hide")
-            })
-            .filter_map(|model| {
-                let slug = model.get("slug").and_then(Value::as_str)?.trim();
-                if slug.is_empty() || !seen.insert(model_id::key(slug)) {
-                    return None;
-                }
-                let mut model = model.clone();
-                let display_name = model
-                    .get("display_name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(slug)
-                    .to_string();
-                normalize_official_model(&mut model, slug, &display_name, seen.len() - 1);
-                Some(model)
-            })
-            .collect::<Vec<_>>();
-        if !models.is_empty() {
-            return Ok(models);
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&slug)
+                        .to_string();
+                    normalize_official_model(&mut model, &slug, &display_name, seen.len() - 1);
+                    Some(model)
+                })
+                .collect::<Vec<_>>();
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        } else {
+            catalogs.insert(index, account_models);
         }
     }
 
-    OFFICIAL_MODELS
+    Ok(OFFICIAL_MODELS
         .iter()
         .enumerate()
         .map(|(priority, (slug, display_name))| {
@@ -346,22 +336,20 @@ fn read_official_entries_uncached(
                 .flat_map(|models| models.iter())
                 .filter(|model| model.get("slug").and_then(Value::as_str) == Some(*slug))
                 .collect::<Vec<_>>();
-            // A source may hold the slug without runtime fields (for example an
-            // incomplete `models_cache.json` written before a Codex update).
-            // Prefer the first instruction-bearing entry so a fresher Codey
-            // snapshot can repair it instead of failing the whole catalog.
-            let mut model = matching_models
+            let Some(mut model) = matching_models
                 .iter()
                 .find(|model| model_instruction_source(model).is_some())
                 .or_else(|| matching_models.first())
                 .map(|model| (*model).clone())
-                .ok_or_else(|| anyhow::anyhow!("Codex 模型模板缺少固定官方模型 {slug}"))?;
+            else {
+                return fallback_official_metadata_entry(slug, display_name, priority);
+            };
             let fallbacks = matching_models;
             complete_reasoning_metadata(&mut model, &fallbacks);
             normalize_official_model(&mut model, slug, display_name, priority);
-            Ok(model)
+            model
         })
-        .collect()
+        .collect())
 }
 
 /// Writes the catalog and returns the exact bytes that now live on disk.
@@ -406,7 +394,11 @@ pub(super) fn write_verified_catalog_in_context(
     verify_written_catalog(home, models, &written)
 }
 
-fn verify_written_catalog(home: &Path, models: &[Value], written: &[u8]) -> Result<usize> {
+pub(super) fn verify_written_catalog(
+    home: &Path,
+    models: &[Value],
+    written: &[u8],
+) -> Result<usize> {
     // Verify the bytes on disk instead of re-parsing the whole catalog; the
     // serialized form already carries every slug in order.
     let path = home.join(relative_path());

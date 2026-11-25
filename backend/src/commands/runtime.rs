@@ -46,8 +46,6 @@ fn remote_compaction_status_value(
     })
 }
 
-mod injection_repair;
-pub(super) use injection_repair::schedule_main_process_injection_repair;
 #[cfg(any(windows, test))]
 mod crash_recovery;
 #[cfg(any(windows, test))]

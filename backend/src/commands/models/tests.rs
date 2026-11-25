@@ -66,20 +66,20 @@ fn plugin_reasoning_limits_preserve_capabilities_and_reject_unsupported_settings
         4
     );
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        home.path().join("models_cache.json"),
-        serde_json::to_vec(&json!({
+    model_catalog::write_test_runtime_catalog(
+        home.path(),
+        json!({
             "models": [{
                 "slug": "demo", "display_name": "demo", "default_reasoning_level": "ultra",
+                "base_instructions": "demo instructions",
                 "supported_reasoning_levels": [
                     {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
                     {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
                 ]
             }]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+        }),
+        true,
+    );
     config
         .selected_models_by_provider
         .insert(provider_id.clone(), available.clone());
