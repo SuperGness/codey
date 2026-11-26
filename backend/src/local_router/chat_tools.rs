@@ -22,6 +22,8 @@ pub(crate) fn append_chat_messages_from_normalized_input(
             Ok(replay.missing)
         }
         NormalizedResponsesInput::Items(items) => {
+            let reordered = reorder_responses_item_refs_for_tool_pairing(&items);
+            let items = reordered.as_deref().unwrap_or(items.as_slice());
             let mut deferred_tool_user_indices = HashSet::new();
             for item in items {
                 let start = messages.len();
@@ -94,46 +96,278 @@ impl ChatReasoningReplay {
 }
 
 /// Chat Completions 和 Anthropic Messages 都要求工具调用后紧跟对应的工具结果。
-/// 工具输出中的图片以及不带 `call_id` 的客户端工具输出都会生成 `user` 消息；
-/// 若它们出现在工具调用之后或并行工具结果之间，部分上游会判定工具结果不完整
-/// 而拒绝整条请求。这里把由工具输出派生的辅助 `user` 消息移到本轮全部工具结果
-/// 之后，既保留内容，也保持调用与结果的配对完整。
+/// 工具输出中的图片、不带 `call_id` 的客户端工具输出，以及并行工具输出收齐前夹在
+/// 中间的独立 `developer`/`user` 提示（如 `<image_resize_notice>`）若打断工具结果序列，
+/// Kimi/DeepSeek/Anthropic 等严格上游会判定工具配对不完整而返回 400。
+/// 这里把辅助消息和尚未收齐同批工具结果时穿插的提示统一推迟到该批紧邻工具结果之后。
 fn move_tool_auxiliary_messages_after_tool_results(
     messages: &mut Vec<Value>,
     deferred_user_indices: &HashSet<usize>,
 ) {
-    let mut ordered = Vec::with_capacity(messages.len());
+    let drained = std::mem::take(messages);
+    let mut ordered = Vec::with_capacity(drained.len());
     let mut pending = Vec::new();
+    let mut open_call_ids: HashSet<String> = HashSet::new();
     let mut in_tool_turn = false;
-    for (index, message) in messages.drain(..).enumerate() {
+    for (index, message) in drained.iter().enumerate() {
         let role = message.get("role").and_then(Value::as_str);
-        if role == Some("assistant") && message.get("tool_calls").is_some() {
+        if role == Some("assistant") {
             if !pending.is_empty() {
                 ordered.append(&mut pending);
             }
-            in_tool_turn = true;
-            ordered.push(message);
+            open_call_ids.clear();
+            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for call in tool_calls {
+                    if let Some(id) = call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    {
+                        open_call_ids.insert(id.to_string());
+                    }
+                }
+                in_tool_turn = true;
+            } else {
+                in_tool_turn = false;
+            }
+            ordered.push(message.clone());
             continue;
         }
         if role == Some("tool") {
             in_tool_turn = true;
-            ordered.push(message);
+            if let Some(call_id) = message.get("tool_call_id").and_then(Value::as_str) {
+                open_call_ids.remove(call_id);
+            }
+            ordered.push(message.clone());
             continue;
         }
-        if in_tool_turn && deferred_user_indices.contains(&index) {
-            pending.push(message);
+        let has_remaining_matching_tool = !open_call_ids.is_empty()
+            && drained[index + 1..]
+                .iter()
+                .take_while(|next| next.get("role").and_then(Value::as_str) != Some("assistant"))
+                .any(|next| {
+                    next.get("role").and_then(Value::as_str) == Some("tool")
+                        && next
+                            .get("tool_call_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| open_call_ids.contains(id))
+                });
+        if in_tool_turn
+            && (deferred_user_indices.contains(&index)
+                || (matches!(role, Some("user" | "system")) && has_remaining_matching_tool))
+        {
+            pending.push(message.clone());
             continue;
         }
         if !pending.is_empty() {
             ordered.append(&mut pending);
         }
         in_tool_turn = false;
-        ordered.push(message);
+        open_call_ids.clear();
+        ordered.push(message.clone());
     }
     if !pending.is_empty() {
         ordered.append(&mut pending);
     }
     *messages = ordered;
+}
+
+fn responses_item_opened_call_ids<'a>(item: &'a Value, out: &mut Vec<&'a str>) {
+    let Some(object) = item.as_object() else {
+        return;
+    };
+    if matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("function_call" | "custom_tool_call" | "tool_search_call")
+    ) {
+        if let Some(call_id) = object
+            .get("call_id")
+            .or_else(|| object.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            out.push(call_id);
+        }
+        return;
+    }
+    if object.get("role").and_then(Value::as_str) == Some("assistant")
+        && let Some(tool_calls) = object.get("tool_calls").and_then(Value::as_array)
+    {
+        for call in tool_calls {
+            if let Some(call_id) = call
+                .get("id")
+                .or_else(|| call.get("call_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                out.push(call_id);
+            }
+        }
+    }
+}
+
+fn responses_item_tool_output_call_id(item: &Value) -> Option<&str> {
+    let object = item.as_object()?;
+    let is_tool_output = matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
+    ) || object
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.trim() == "tool");
+    if !is_tool_output {
+        return None;
+    }
+    optional_tool_call_id(object, "tool_output").ok().flatten()
+}
+
+fn is_responses_assistant_turn_item(item: &Value) -> bool {
+    let Some(object) = item.as_object() else {
+        return false;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some(
+            "reasoning" | "function_call" | "custom_tool_call" | "tool_search_call"
+            | "web_search_call",
+        ) => true,
+        Some("agent_message") => !agent_message_carries_instruction(object),
+        Some("message") | None => object.get("role").and_then(Value::as_str) == Some("assistant"),
+        _ => false,
+    }
+}
+
+fn is_deferrable_interleaved_prompt_item(item: &Value) -> bool {
+    match item {
+        Value::String(_) => true,
+        Value::Object(object) => {
+            if is_responses_tool_output_item(item) {
+                return false;
+            }
+            match object.get("type").and_then(Value::as_str) {
+                Some("additional_tools") => false,
+                Some("input_text" | "output_text" | "text" | "input_image" | "image_url") => true,
+                Some("agent_message") => agent_message_carries_instruction(object),
+                Some("message") | None => matches!(
+                    object.get("role").and_then(Value::as_str).map(str::trim),
+                    Some("user" | "developer" | "system")
+                ),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn compute_reordered_tool_pairing_indices(
+    items: &[&Value],
+    require_started_output_batch: bool,
+) -> Option<Vec<usize>> {
+    if items.len() < 3 {
+        return None;
+    }
+    let has_later_matching_output = |rest: &[&Value], open_call_ids: &HashSet<&str>| -> bool {
+        if open_call_ids.is_empty() {
+            return false;
+        }
+        for candidate in rest {
+            if is_responses_assistant_turn_item(candidate) {
+                return false;
+            }
+            if responses_item_tool_output_call_id(candidate)
+                .is_some_and(|call_id| open_call_ids.contains(call_id))
+            {
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut order = Vec::with_capacity(items.len());
+    let mut deferred = Vec::new();
+    let mut open_call_ids: HashSet<&str> = HashSet::new();
+    let mut in_assistant_turn = false;
+    let mut saw_tool_output_in_batch = false;
+    let mut changed = false;
+
+    for (index, item) in items.iter().copied().enumerate() {
+        if is_responses_assistant_turn_item(item) {
+            if !in_assistant_turn {
+                if !deferred.is_empty() {
+                    order.append(&mut deferred);
+                }
+                open_call_ids.clear();
+                saw_tool_output_in_batch = false;
+                in_assistant_turn = true;
+            }
+            let mut opened = Vec::new();
+            responses_item_opened_call_ids(item, &mut opened);
+            for call_id in opened {
+                open_call_ids.insert(call_id);
+            }
+            order.push(index);
+            continue;
+        }
+        in_assistant_turn = false;
+
+        if let Some(call_id) = responses_item_tool_output_call_id(item) {
+            if open_call_ids.remove(call_id) {
+                saw_tool_output_in_batch = true;
+            }
+            order.push(index);
+            if !deferred.is_empty()
+                && !has_later_matching_output(&items[index + 1..], &open_call_ids)
+            {
+                order.append(&mut deferred);
+                saw_tool_output_in_batch = false;
+            }
+            continue;
+        }
+
+        if (!require_started_output_batch || saw_tool_output_in_batch)
+            && is_deferrable_interleaved_prompt_item(item)
+            && has_later_matching_output(&items[index + 1..], &open_call_ids)
+        {
+            deferred.push(index);
+            changed = true;
+            continue;
+        }
+
+        if !deferred.is_empty() {
+            order.append(&mut deferred);
+        }
+        saw_tool_output_in_batch = false;
+        order.push(index);
+    }
+    if !deferred.is_empty() {
+        order.append(&mut deferred);
+    }
+    changed.then_some(order)
+}
+
+fn reorder_responses_item_refs_for_tool_pairing<'a>(items: &[&'a Value]) -> Option<Vec<&'a Value>> {
+    let indices = compute_reordered_tool_pairing_indices(items, false)?;
+    Some(indices.into_iter().map(|index| items[index]).collect())
+}
+
+/// 在第三方原生 Responses 请求体中，将同一轮并行工具调用尚未收齐对应 `function_call_output`
+/// 期间穿插在工具输出中间的独立 `developer`/`user` 提示推迟到该批工具结果全部发出之后。
+pub(crate) fn defer_interleaved_tool_output_prompts(body: &mut Value) -> bool {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let refs: Vec<&Value> = items.iter().collect();
+    let Some(indices) = compute_reordered_tool_pairing_indices(&refs, true) else {
+        return false;
+    };
+    let mut slots: Vec<Option<Value>> = items.drain(..).map(Some).collect();
+    for index in indices {
+        if let Some(item) = slots[index].take() {
+            items.push(item);
+        }
+    }
+    true
 }
 
 /// Responses 语义里结尾的 assistant 项只表示上下文到此为止、模型应继续
@@ -721,8 +955,10 @@ pub(crate) fn append_responses_function_call_item(
         .ok_or_else(|| anyhow::anyhow!("function_call 缺少 call_id"))?;
     let tool_name = responses_tool_name_from_call_object(object, "function_call")?;
     let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
-    let arguments =
-        json_value_as_chat_string(object.get("arguments")).unwrap_or_else(|| "{}".to_string());
+    let arguments = match object.get("arguments") {
+        Some(Value::String(raw)) => deduplicate_json_object_keys(raw).into_owned(),
+        other => json_value_as_chat_string(other).unwrap_or_else(|| "{}".to_string()),
+    };
     append_chat_assistant_tool_call(messages, call_id, &upstream_name, &arguments)
 }
 
@@ -1058,8 +1294,10 @@ pub(crate) fn normalize_chat_tool_calls(
             "tool_call.function",
         )?;
         let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
-        let arguments = json_value_as_chat_string(function.get("arguments"))
-            .unwrap_or_else(|| "{}".to_string());
+        let arguments = match function.get("arguments") {
+            Some(Value::String(raw)) => deduplicate_json_object_keys(raw).into_owned(),
+            other => json_value_as_chat_string(other).unwrap_or_else(|| "{}".to_string()),
+        };
         let id = object
             .get("id")
             .and_then(Value::as_str)
@@ -2583,6 +2821,301 @@ pub(crate) fn json_value_as_chat_string(value: Option<&Value>) -> Option<String>
     })
 }
 
+const MAX_JSON_KEY_SCAN_DEPTH: usize = 64;
+const INLINE_OBJECT_KEY_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy)]
+struct JsonKeySpan {
+    start: usize,
+    end: usize,
+    escaped: bool,
+}
+
+struct JsonEscapedChars<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> JsonEscapedChars<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn parse_hex4(&mut self) -> Option<u16> {
+        let slice = self.bytes.get(self.pos..self.pos + 4)?;
+        let mut value = 0_u16;
+        for &byte in slice {
+            let digit = match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                b'A'..=b'F' => byte - b'A' + 10,
+                _ => return None,
+            };
+            value = (value << 4) | u16::from(digit);
+        }
+        self.pos += 4;
+        Some(value)
+    }
+}
+
+impl Iterator for JsonEscapedChars<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let first = *self.bytes.get(self.pos)?;
+        if first != b'\\' {
+            let tail = std::str::from_utf8(&self.bytes[self.pos..]).ok()?;
+            let ch = tail.chars().next()?;
+            self.pos += ch.len_utf8();
+            return Some(u32::from(ch));
+        }
+        self.pos += 1;
+        let escaped = *self.bytes.get(self.pos)?;
+        self.pos += 1;
+        match escaped {
+            b'"' | b'\\' | b'/' => Some(u32::from(escaped)),
+            b'b' => Some(0x08),
+            b'f' => Some(0x0c),
+            b'n' => Some(u32::from(b'\n')),
+            b'r' => Some(u32::from(b'\r')),
+            b't' => Some(u32::from(b'\t')),
+            b'u' => {
+                let unit = self.parse_hex4()?;
+                if (0xD800..=0xDBFF).contains(&unit)
+                    && self.bytes.get(self.pos..self.pos + 2) == Some(b"\\u")
+                {
+                    let saved = self.pos;
+                    self.pos += 2;
+                    if let Some(low) = self
+                        .parse_hex4()
+                        .filter(|low| (0xDC00..=0xDFFF).contains(low))
+                    {
+                        let combined =
+                            0x10000 + ((u32::from(unit - 0xD800) << 10) | u32::from(low - 0xDC00));
+                        return Some(combined);
+                    }
+                    self.pos = saved;
+                }
+                Some(u32::from(unit))
+            }
+            other => Some(u32::from(other)),
+        }
+    }
+}
+
+fn json_key_spans_equal(bytes: &[u8], left: JsonKeySpan, right: JsonKeySpan) -> bool {
+    let left_slice = &bytes[left.start..left.end];
+    let right_slice = &bytes[right.start..right.end];
+    if !left.escaped && !right.escaped {
+        return left_slice == right_slice;
+    }
+    JsonEscapedChars::new(left_slice).eq(JsonEscapedChars::new(right_slice))
+}
+
+fn skip_json_ws(bytes: &[u8], pos: &mut usize) {
+    while let Some(&byte) = bytes.get(*pos) {
+        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn scan_json_string_span(bytes: &[u8], pos: &mut usize) -> Option<JsonKeySpan> {
+    if bytes.get(*pos) != Some(&b'"') {
+        return None;
+    }
+    *pos += 1;
+    let start = *pos;
+    let mut escaped = false;
+    while *pos < bytes.len() {
+        match bytes[*pos] {
+            b'"' => {
+                let end = *pos;
+                *pos += 1;
+                return Some(JsonKeySpan {
+                    start,
+                    end,
+                    escaped,
+                });
+            }
+            b'\\' => {
+                escaped = true;
+                *pos = pos.saturating_add(2);
+            }
+            _ => {
+                if let Some(offset) = memchr::memchr2(b'"', b'\\', &bytes[*pos..]) {
+                    *pos += offset;
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn scan_json_for_duplicate_keys(bytes: &[u8], pos: &mut usize, depth: usize) -> Option<bool> {
+    if depth > MAX_JSON_KEY_SCAN_DEPTH {
+        return Some(true);
+    }
+    skip_json_ws(bytes, pos);
+    let head = *bytes.get(*pos)?;
+    match head {
+        b'"' => {
+            scan_json_string_span(bytes, pos)?;
+            Some(false)
+        }
+        b'{' => {
+            *pos += 1;
+            skip_json_ws(bytes, pos);
+            if bytes.get(*pos) == Some(&b'}') {
+                *pos += 1;
+                return Some(false);
+            }
+            let mut keys = [JsonKeySpan {
+                start: 0,
+                end: 0,
+                escaped: false,
+            }; INLINE_OBJECT_KEY_CAPACITY];
+            let mut count = 0_usize;
+            loop {
+                skip_json_ws(bytes, pos);
+                let key = scan_json_string_span(bytes, pos)?;
+                if keys[..count]
+                    .iter()
+                    .any(|&existing| json_key_spans_equal(bytes, existing, key))
+                {
+                    return Some(true);
+                }
+                if count >= INLINE_OBJECT_KEY_CAPACITY {
+                    // 超出栈上固定槽位的超大对象交由 serde_json 归一化，保持预检零堆分配。
+                    return Some(true);
+                }
+                keys[count] = key;
+                count += 1;
+                skip_json_ws(bytes, pos);
+                if bytes.get(*pos) != Some(&b':') {
+                    return None;
+                }
+                *pos += 1;
+                if scan_json_for_duplicate_keys(bytes, pos, depth + 1)? {
+                    return Some(true);
+                }
+                skip_json_ws(bytes, pos);
+                match bytes.get(*pos)? {
+                    b',' => *pos += 1,
+                    b'}' => {
+                        *pos += 1;
+                        return Some(false);
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'[' => {
+            *pos += 1;
+            skip_json_ws(bytes, pos);
+            if bytes.get(*pos) == Some(&b']') {
+                *pos += 1;
+                return Some(false);
+            }
+            loop {
+                if scan_json_for_duplicate_keys(bytes, pos, depth + 1)? {
+                    return Some(true);
+                }
+                skip_json_ws(bytes, pos);
+                match bytes.get(*pos)? {
+                    b',' => *pos += 1,
+                    b']' => {
+                        *pos += 1;
+                        return Some(false);
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        _ => {
+            let start = *pos;
+            while let Some(&byte) = bytes.get(*pos) {
+                if matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') {
+                    break;
+                }
+                *pos += 1;
+            }
+            (*pos > start).then_some(false)
+        }
+    }
+}
+
+/// 零堆分配预检 JSON 文本在同一对象层级是否包含重复键。
+pub(crate) fn json_str_has_duplicate_object_keys(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 11 {
+        return false;
+    }
+    let mut pos = 0;
+    scan_json_for_duplicate_keys(bytes, &mut pos, 0).unwrap_or(false)
+}
+
+/// 仅在检测到同一 JSON 对象层级存在重复键时才经 `serde_json::Value` 重序列化去重；
+/// 常规唯一键字符串零拷贝直通。
+pub(crate) fn deduplicate_json_object_keys(raw: &str) -> Cow<'_, str> {
+    if !json_str_has_duplicate_object_keys(raw) {
+        return Cow::Borrowed(raw);
+    }
+    match serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| serde_json::to_string(&value).ok())
+    {
+        Some(cleaned) => Cow::Owned(cleaned),
+        None => Cow::Borrowed(raw),
+    }
+}
+
+pub(crate) fn deduplicate_native_function_call_arguments(body: &mut Value) -> bool {
+    fn deduplicate_item(item: &mut Value) -> bool {
+        let Some(object) = item.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        if object.get("type").and_then(Value::as_str) == Some("function_call")
+            && let Some(Value::String(arguments)) = object.get_mut("arguments")
+            && let Cow::Owned(cleaned) = deduplicate_json_object_keys(arguments)
+        {
+            *arguments = cleaned;
+            changed = true;
+        }
+        if let Some(Value::Array(tool_calls)) = object.get_mut("tool_calls") {
+            for call in tool_calls {
+                if let Some(Value::String(arguments)) = call
+                    .get_mut("function")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|function| function.get_mut("arguments"))
+                    && let Cow::Owned(cleaned) = deduplicate_json_object_keys(arguments)
+                {
+                    *arguments = cleaned;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    match body.get_mut("input") {
+        Some(Value::Array(items)) => {
+            let mut changed = false;
+            for item in items {
+                changed |= deduplicate_item(item);
+            }
+            changed
+        }
+        Some(item @ Value::Object(_)) => deduplicate_item(item),
+        _ => false,
+    }
+}
+
 pub(crate) fn wrap_custom_tool_input(input: &str) -> Result<String> {
     serde_json::to_string(&json!({"input":input})).context("序列化 custom 工具 input 包装失败")
 }
@@ -3277,5 +3810,190 @@ mod tests {
         assert!(parameters["$defs"]["__schema2"].get("allOf").is_none());
         assert_eq!(parameters["default"]["$ref"], "#/$defs/__schema2");
         assert!(!wrap_chat_tool_ref_siblings(&mut body));
+    }
+
+    #[test]
+    fn parallel_tool_outputs_defer_interleaved_developer_and_user_prompts_until_batch_complete() {
+        let responses_body = json!({
+            "model": "kimi-k2.5",
+            "input": [
+                {"type": "message", "role": "user", "content": "inspect both"},
+                {"type": "function_call", "call_id": "call_img", "name": "view_image", "arguments": "{\"path\":\"a.png\"}"},
+                {"type": "function_call", "call_id": "call_cmd", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
+                {"type": "function_call_output", "call_id": "call_img", "output": [
+                    {"type": "input_text", "text": "loaded image"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+                ]},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<image_resize_notice>resized</image_resize_notice>"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<system-reminder>mid-batch</system-reminder>"}]},
+                {"type": "function_call_output", "call_id": "call_cmd", "output": "/workspace"},
+                {"type": "message", "role": "user", "content": "now summarize"}
+            ],
+            "tools": [
+                {"type": "function", "name": "view_image", "parameters": {"type": "object"}},
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}}
+            ]
+        });
+
+        // Chat Completions：两个并行 tool 消息必须紧跟在 assistant(tool_calls) 之后。
+        let chat = responses_to_chat_completions_body(&responses_body).unwrap();
+        let messages = chat["messages"].as_array().unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "tool", "tool", "user", "system", "user", "user"]
+        );
+        assert_eq!(messages[2]["tool_call_id"], "call_img");
+        assert_eq!(messages[3]["tool_call_id"], "call_cmd");
+        assert_eq!(
+            messages[5]["content"],
+            "<image_resize_notice>resized</image_resize_notice>"
+        );
+        assert_eq!(
+            messages[7]["content"],
+            "now summarize"
+        );
+
+        // Anthropic Messages：同一 user 回合中两个 tool_result 必须紧邻排在辅助图片和提示之前。
+        let anthropic = responses_to_anthropic_messages_body(&responses_body).unwrap();
+        let blocks = anthropic["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_img");
+        assert_eq!(blocks[1]["type"], "tool_result");
+        assert_eq!(blocks[1]["tool_use_id"], "call_cmd");
+        assert_eq!(blocks[2]["type"], "image");
+
+        // 第三方原生 Responses（compaction 准备路径）同样推迟穿插项，官方账号保持原样。
+        let mut third_party_native = responses_body.clone();
+        assert!(prepare_native_responses_body(
+            &mut third_party_native,
+            false,
+            false,
+            false,
+            None
+        ));
+        let native_types: Vec<(&str, Option<&str>)> = third_party_native["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item.get("type").and_then(Value::as_str).unwrap_or("message"),
+                    item.get("call_id")
+                        .or_else(|| item.get("role"))
+                        .and_then(Value::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            native_types,
+            [
+                ("message", Some("user")),
+                ("function_call", Some("call_img")),
+                ("function_call", Some("call_cmd")),
+                ("function_call_output", Some("call_img")),
+                ("function_call_output", Some("call_cmd")),
+                ("message", Some("developer")),
+                ("message", Some("user")),
+                ("message", Some("user")),
+            ]
+        );
+
+        // 若第二个并行工具被取消、后续根本没有对应输出，则不挪动正常的用户下一轮消息。
+        let mut aborted_body = json!({
+            "input": [
+                {"type": "function_call", "call_id": "c1", "name": "a", "arguments": "{}"},
+                {"type": "function_call", "call_id": "c2", "name": "b", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+                {"type": "message", "role": "user", "content": "abort c2 and do something else"}
+            ]
+        });
+        assert!(!defer_interleaved_tool_output_prompts(&mut aborted_body));
+    }
+
+    #[test]
+    fn duplicate_json_object_keys_precheck_is_zero_copy_when_unique_and_dedups_duplicates() {
+        for unique in [
+            r#"{}"#,
+            r#"{"cmd":"ls -la","workdir":"/tmp"}"#,
+            r#"{"a":{"x":1},"b":{"x":2}}"#,
+            r#"{"items":[{"k":1},{"k":2}]}"#,
+            r#"{"script":"echo '{\"dup\":1,\"dup\":2}'"}"#,
+        ] {
+            assert!(!json_str_has_duplicate_object_keys(unique), "{unique}");
+            let out = deduplicate_json_object_keys(unique);
+            assert!(matches!(out, Cow::Borrowed(_)), "{unique}");
+            assert!(std::ptr::eq(out.as_ptr(), unique.as_ptr()), "{unique}");
+        }
+
+        for (raw, expected) in [
+            (
+                r#"{"cmd":"ls","workdir":"/old","workdir":"/new"}"#,
+                json!({"cmd": "ls", "workdir": "/new"}),
+            ),
+            (
+                r#"{"nested":{"a":1,"b":2,"a":3}}"#,
+                json!({"nested": {"a": 3, "b": 2}}),
+            ),
+            (
+                r#"{"arr":[{"k":"first","k":"second"}]}"#,
+                json!({"arr": [{"k": "second"}]}),
+            ),
+            (
+                r#"{"a":1,"\u0061":2}"#,
+                json!({"a": 2}),
+            ),
+        ] {
+            assert!(json_str_has_duplicate_object_keys(raw), "{raw}");
+            let deduped = deduplicate_json_object_keys(raw);
+            assert!(matches!(deduped, Cow::Owned(_)), "{raw}");
+            assert!(!json_str_has_duplicate_object_keys(&deduped), "{deduped}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&deduped).unwrap(),
+                expected,
+                "{raw}"
+            );
+        }
+
+        // 验证 Chat 转换与原生清洗路径均自动去重历史 function_call.arguments。
+        let dirty_args = r#"{"cmd":"pwd","timeout":10,"timeout":30}"#;
+        let mut request = json!({
+            "model": "deepseek-chat",
+            "input": [
+                {"type": "message", "role": "user", "content": "run"},
+                {"type": "function_call", "call_id": "call_dup", "name": "exec", "arguments": dirty_args},
+                {"type": "function_call_output", "call_id": "call_dup", "output": "ok"}
+            ],
+            "tools": [{"type": "function", "name": "exec", "parameters": {"type": "object"}}]
+        });
+        let chat = responses_to_chat_completions_body(&request).unwrap();
+        let cleaned_chat_args = chat["messages"][1]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(!json_str_has_duplicate_object_keys(cleaned_chat_args));
+        assert_eq!(
+            serde_json::from_str::<Value>(cleaned_chat_args).unwrap(),
+            json!({"cmd": "pwd", "timeout": 30})
+        );
+
+        assert!(prepare_native_responses_body(
+            &mut request,
+            false,
+            false,
+            false,
+            None
+        ));
+        let cleaned_native_args = request["input"][1]["arguments"].as_str().unwrap();
+        assert!(!json_str_has_duplicate_object_keys(cleaned_native_args));
+        assert!(!prepare_native_responses_body(
+            &mut request,
+            false,
+            false,
+            false,
+            None
+        ));
     }
 }

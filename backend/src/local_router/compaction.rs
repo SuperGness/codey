@@ -342,6 +342,7 @@ pub(crate) fn normalize_native_responses_context_without_summaries(
 ) -> bool {
     let mut changed = normalize_encrypted_agent_payloads(body);
     changed |= strip_rejected_reasoning_items(body);
+    changed |= deduplicate_native_function_call_arguments(body);
     // 同一线路必须原样回传 reasoning，包括第三方 thinking 模式需要的明文内容。
     // 换线路时只去掉上一供应商的密文，可见摘要改成官方可接受的 summary。
     if discard_opaque_reasoning {
@@ -367,6 +368,7 @@ pub(crate) fn prepare_native_responses_body(
     }
     if !official_account {
         changed |= replay_third_party_agent_messages(body);
+        changed |= defer_interleaved_tool_output_prompts(body);
     }
     if official_account {
         changed |= sanitize_official_upstream_history(body);
