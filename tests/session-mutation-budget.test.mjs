@@ -711,14 +711,22 @@ test("the mutation observer watches identity attributes and excludes display-onl
     "data-message-id",
     "data-message-author-role",
     "data-testid",
-    "data-session-id",
+    "data-above-composer-conversation-id",
     "data-conversation-id",
-    "data-thread-id",
     "data-app-action-sidebar-thread-id",
   ]) {
     assert.equal(filter.includes(attribute), true, `missing ${attribute}`);
   }
-  for (const attribute of ["style", "aria-label", "aria-hidden", "disabled", "hidden"]) {
+  for (const attribute of [
+    "style",
+    "aria-label",
+    "aria-hidden",
+    "disabled",
+    "hidden",
+    "data-session-id",
+    "data-thread-id",
+    "data-request-user-input-auto-resolution-conversation-id",
+  ]) {
     assert.equal(filter.includes(attribute), false, `unexpected ${attribute}`);
   }
   runtime.window.__codeySessionToolsInstall.dispose();

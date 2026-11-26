@@ -199,8 +199,8 @@ function loadInjection({
     },
     querySelector(selector) {
       if (selector in sessionElements) return sessionElements[selector][0] || null;
-      if (selector === "[data-session-id]") {
-        return new FakeElement({ "data-session-id": sessionId });
+      if (selector === "[data-conversation-id]" && sessionId) {
+        return new FakeElement({ "data-conversation-id": sessionId });
       }
       return null;
     },
@@ -432,19 +432,15 @@ test("reconciles the current session through AppServerManager without a completi
 test("uses the visible retained session for initial reconciliation", async () => {
   const events = [];
   const hidden = new FakeElement({
-    "data-response-annotation-conversation": "session-hidden",
+    "data-conversation-id": "session-hidden",
   });
   hidden.layoutHidden = true;
   const visible = new FakeElement({
-    "data-response-annotation-conversation": "session-visible",
+    "data-conversation-id": "session-visible",
   });
   const selector = [
     "[data-above-composer-conversation-id]",
-    "[data-session-id]",
     "[data-conversation-id]",
-    "[data-thread-id]",
-    "[data-request-user-input-auto-resolution-conversation-id]",
-    "[data-response-annotation-conversation]",
   ].join(", ");
   loadInjection({
     codexSessionController: createRecoveryController(events),
@@ -804,8 +800,8 @@ test("deletion uses the visible composer and excludes selected rows in cached co
   const hiddenComposer = new FakeElement({ "data-above-composer-conversation-id": "old-session" });
   hiddenComposer.layoutHidden = true;
   const visibleComposer = new FakeElement({ "data-above-composer-conversation-id": "local:current-session" });
-  const hiddenAnnotation = new FakeElement({ "data-response-annotation-conversation": "old-session" });
-  hiddenAnnotation.layoutHidden = true;
+  const hiddenConversation = new FakeElement({ "data-conversation-id": "old-session" });
+  hiddenConversation.layoutHidden = true;
   const discarded = [];
   const runtime = loadInjection({
     initialSessionId: "stale-session",
@@ -813,8 +809,13 @@ test("deletion uses the visible composer and excludes selected rows in cached co
     hiddenTurnIds: ["old-turn"],
     selectedTurnIds: ["old-turn", "current-turn"],
     sessionElements: {
+      "[data-above-composer-conversation-id], [data-conversation-id]": [
+        hiddenComposer,
+        visibleComposer,
+        hiddenConversation,
+      ],
       "[data-above-composer-conversation-id]": [hiddenComposer, visibleComposer],
-      "[data-response-annotation-conversation]": [hiddenAnnotation],
+      "[data-conversation-id]": [hiddenConversation],
     },
     codexSessionController: createRecoveryController([], {
       async prepareMessageDeletion(sessionId) { discarded.push(sessionId); },

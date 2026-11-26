@@ -281,14 +281,38 @@ test("rspack CheckoutPersonalWebviewHost skips background prewarm and renders on
 test("rspack performance gates cap pierre workers and skip orbit preload, route prefetch, LoAF observers, and pending sampler", async () => {
   const { logs, patch } = await installPatch();
 
-  // 1. Pierre syntax highlight worker pool: poolSize 4 -> 1; poolSize 1 stays untouched.
-  const pierreUrl = "app://-/assets/async/517695.46b78d24c8.js";
-  const pierreSource = "function k(){return{}}function render(){let t={workerFactory:k,poolSize:4,totalASTLRUCacheSize:100};return t}";
+  // 1. Pierre syntax highlight worker pool: poolSize 2/4 -> 1 and totalASTLRUCacheSize 100 -> 32; Shiki tokenizeTimeLimit 0 -> 250.
+  const pierreUrl = "app://-/assets/async/660852.c4b8f73f76.js";
+  const pierreSource = "function k(){return{}}function render(){let t={workerFactory:k,poolSize:2,totalASTLRUCacheSize:100};return t}";
   const patchedPierre = patch(pierreSource, pierreUrl);
   assert.ok(patchedPierre?.includes("/*codey-pierre-pool-size*/1"));
   assert.equal(patch(patchedPierre, pierreUrl), null);
-  assert.equal(Function(`${patchedPierre};return render()`)().poolSize, 1);
-  assert.equal(patch(pierreSource.replace("poolSize:4", "poolSize:1"), pierreUrl), null);
+  const pierreCfg = Function(`${patchedPierre};return render()`)();
+  assert.equal(pierreCfg.poolSize, 1);
+  assert.equal(pierreCfg.totalASTLRUCacheSize, 32);
+  assert.equal(
+    patch("function k(){return{}}function render(){let t={workerFactory:k,poolSize:1,totalASTLRUCacheSize:32};return t}", pierreUrl),
+    null,
+  );
+
+  for (const [shikiUrl, shikiSource] of [
+    [
+      "app://-/assets/async/625546.e2f9da89f8.js",
+      'function K(e,t,i,n){return{lang:e,..."string"==typeof t?{theme:t}:{themes:t},defaultColor:!1,cssVariablePrefix:(0,n.D)("token"),tokenizeMaxLineLength:i,tokenizeTimeLimit:0}}',
+    ],
+    [
+      "app://-/assets/async/76322.eaa934f410.js",
+      'function K(e,t,i,N){return{lang:e,..."string"==typeof t?{theme:t}:{themes:t},defaultColor:!1,cssVariablePrefix:N("token"),tokenizeMaxLineLength:i,tokenizeTimeLimit:0}}',
+    ],
+  ]) {
+    const patchedShiki = patch(shikiSource, shikiUrl);
+    assert.ok(patchedShiki?.includes("/*codey-shiki-tokenize-time-limit*/250"), shikiUrl);
+    assert.equal(patch(patchedShiki, shikiUrl), null);
+    const opts = Function(
+      `${patchedShiki};return K("ts","dark",20000,Object.assign((s)=>s,{D:(s)=>s}))`,
+    )();
+    assert.equal(opts.tokenizeTimeLimit, 250);
+  }
 
   // 2. Orbit character preload iframe: d() becomes a callable no-op while preserving Oz/iE.
   const orbitUrl = "app://-/assets/async/198194.4d5c9b6c90.js";
@@ -602,7 +626,8 @@ test("incompatible optional renderer patches log anchor excerpts once without bl
     const incompatibleSource = [
       "supportsIndependentSpeedModes",
       "ultrafast_mode",
-      "case`electron-app-state-snapshot-request`:",
+      'case"electron-app-state-snapshot-request":',
+      "collectAppStateSnapshot(",
     ].join(" ");
     const url = "app://-/assets/async/49792.d8d33ace73.js";
     assert.equal(patch(incompatibleSource, url), null);
@@ -681,5 +706,226 @@ test("hosted composer sends pass through the portable handoff gate", async () =>
   }
   const lock = "function t(e){return!r.has(e)&&(r.add(e),!0)}";
   assert.equal(patch(lock, "app://-/assets/async/999999.be4319076981.js"), null);
+  assert.deepEqual(logs, []);
+});
+
+test("rspack 26.1120.50957 patches fix breadcrumb ResizeObserver loop, turn-diff telemetry, customAvatars slimming, paste cap, project sort, Bluetooth dictation, browser sidebar disposal, and question auto-resolve", async () => {
+  const { logs, patch } = await installPatch();
+  const mainChunkUrl = "app://-/assets/async/49792.d8d33ace73.js";
+
+  // (a) File breadcrumb ResizeObserver subpixel guard + post-recovery showRoot (#62669)
+  const breadcrumbSource = [
+    'const label="review.fileSource.breadcrumb.ariaLabel";',
+    "function compute(avail,trailWidths,ellipsisW,sepW,zoom){",
+    "let e={currentCSSZoom:zoom,style:{paddingInlineEnd:\"\"}};",
+    "let state={first:0,showRoot:!1,empty:!1};",
+    "let i=10,a=avail,s=[...trailWidths,ellipsisW,sepW],[o,l]=s.splice(-2),u=s.at(-1)??0,d=a<Math.min(u,l),c=a<s.reduce((x,y)=>x+y,0)?s.length-1:0,p=a-u-o,h=c>0&&p>=0;for(;c>0&&p>=Math.min(s[c-1],o+l);)c-=1,p-=s[c];let f=`${i/(e.currentCSSZoom||1)}px`;e.style.paddingInlineEnd!==f&&(e.style.paddingInlineEnd=f),(t=>{state=t(state)})(e=>e.first===c&&e.showRoot===h&&e.empty===d?e:{first:c,showRoot:h,empty:d});",
+    "return state}",
+  ].join("");
+  const patchedBreadcrumb = patch(breadcrumbSource, mainChunkUrl);
+  assert.ok(patchedBreadcrumb?.includes("/*codey-breadcrumb-subpixel-guard*/"));
+  assert.equal(patch(patchedBreadcrumb, mainChunkUrl), null);
+  const computeBreadcrumb = Function(`${patchedBreadcrumb};return compute`)();
+  assert.deepEqual(
+    computeBreadcrumb(99.8, [40, 60], 12, 8, 1),
+    { first: 0, showRoot: false, empty: false },
+    "0.2px subpixel rounding difference does not trigger false overflow",
+  );
+  assert.deepEqual(
+    computeBreadcrumb(84, [40, 45], 12, 8, 1),
+    { first: 0, showRoot: false, empty: false },
+    "when recovery loop restores all segments (c===0), showRoot must be false",
+  );
+  assert.deepEqual(
+    computeBreadcrumb(70, [35, 30, 30], 12, 8, 1),
+    { first: 1, showRoot: false, empty: false },
+    "when restored segment borrows ellipsis space (p < 0), showRoot must turn off to prevent overflow",
+  );
+  assert.deepEqual(
+    computeBreadcrumb(75, [35, 30, 30], 12, 8, 1),
+    { first: 1, showRoot: true, empty: false },
+    "genuinely truncated path with room for ellipsis displays showRoot",
+  );
+
+  // (c) Turn diff analytics full-repo Git snapshot short-circuit (#54955)
+  const turnDiffSource = [
+    "async function runTurnDiff(gitReq,visStart,visDone,analytics,retain){",
+    'let ctx={capture:async function(e,t,n,r,i,a){try{return await (0,gitReq.V)("git").request({method:"turn-diff-capture-start",params:{baseTurnId:i,checkpointKey:r,cwd:n,hostConfig:t,operationSource:"turn_diff_analytics",turnId:a}})}catch(e){return console.warn("Failed to start turn diff analytics capture",{safe:{},sensitive:{error:e}}),null}}(1,2,"/repo","k","b","t1"),visualizationSnapshot:(async function(e,t){return await visStart()})(1,2).catch(e=>(console.warn("Failed to start visualization turn diff snapshot",{safe:{},sensitive:{error:e}}),null))};',
+    'let[u,c]=await Promise.all([ctx.capture,ctx.visualizationSnapshot]);let[p,h]=await Promise.all([(0,gitReq.V)("git").request({method:"turn-diff-capture-complete",params:{capture:u??"forced",hostConfig:2,operationSource:"turn_diff_analytics",retainCheckpoint:retain()}}),null==c||!retain()?null:(async function(e,t,n=null,r){return await visDone()})(1,c).catch(e=>(console.warn("Failed to complete visualization turn diff snapshot",{safe:{},sensitive:{error:e}}),null))]);if(!retain())return"not-retained";if("error"===p.diff.type)return analytics();return"sent"}',
+  ].join("");
+  const patchedTurnDiff = patch(turnDiffSource, mainChunkUrl);
+  assert.ok(patchedTurnDiff?.includes("/*codey-turn-diff-analytics-skip*/"));
+  assert.ok(patchedTurnDiff?.includes("/*codey-turn-diff-complete-skip*/"));
+  assert.equal(patch(patchedTurnDiff, mainChunkUrl), null);
+  let gitCalls = 0;
+  let visCalls = 0;
+  const runTurnDiff = Function(`${patchedTurnDiff};return runTurnDiff`)();
+  await runTurnDiff(
+    { V: () => ({ request: async () => { gitCalls += 1; return { diff: { type: "ok" } }; } }) },
+    async () => { visCalls += 1; return {}; },
+    async () => { visCalls += 1; return "diff"; },
+    () => { gitCalls += 1; },
+    () => true,
+  );
+  assert.equal(gitCalls, 0);
+  assert.equal(visCalls, 0);
+
+  // (d) Slim pet customAvatars.load() short-circuit (#61498)
+  const avatarsSource =
+    'function buildQuery(r,i,a,s){let o=["custom-avatars"];return r(a,()=>({queryKey:o,queryFn:()=>i.appServices.customAvatars.load(),enabled:!0,networkMode:"always",refetchOnMount:!1,refetchOnWindowFocus:!1,staleTime:s}))}';
+  const patchedAvatars = patch(avatarsSource, mainChunkUrl);
+  assert.ok(patchedAvatars?.includes("/*codey-custom-avatars-slim-skip*/"));
+  assert.equal(patch(patchedAvatars, mainChunkUrl), null);
+  let rpcLoads = 0;
+  const queryDef = Function(`${patchedAvatars};return buildQuery`)()(
+    (_atom, factory) => factory(),
+    { appServices: { customAvatars: { load: async () => { rpcLoads += 1; return [{ id: "custom:1" }]; } } } },
+    null,
+    Infinity,
+  );
+  try {
+    globalThis.__codeyPetControlShield = { enabled: true };
+    assert.deepEqual(await queryDef.queryFn(), []);
+    assert.equal(rpcLoads, 0);
+    globalThis.__codeyPetControlShield = { enabled: false };
+    assert.deepEqual(await queryDef.queryFn(), [{ id: "custom:1" }]);
+    assert.equal(rpcLoads, 1);
+  } finally {
+    delete globalThis.__codeyPetControlShield;
+  }
+
+  // (e) Paste attachment threshold 5,000 -> 500,000 chars (#25144)
+  const pasteUrl = "app://-/assets/async/976185.d6427dfaa7.js";
+  const pasteSource = "const exports={hqW:()=>1,huD:()=>5e3,i0d:()=>2};";
+  const patchedPaste = patch(pasteSource, pasteUrl);
+  assert.ok(patchedPaste?.includes("/*codey-paste-attachment-threshold*/5e5"));
+  assert.equal(patch(patchedPaste, pasteUrl), null);
+  assert.equal(Function(`${patchedPaste};return exports.huD()`)(), 500_000);
+
+  // (f) Sidebar projectGroups updated_at recency sort (#31836)
+  const projectSortSource = [
+    "const k='SIDEBAR_PROJECT_THREAD_ORDERS',modeKey='chatgpt-work-flat-project-sidebar-mode-v2';",
+    "function computeGroups(groups,recencyMap,U,x){",
+    "const F=(key)=>recencyMap[key]??0,z=({getRecencyAt,items,sortMode})=>sortMode==='manual'?items.map(i=>i.key):[...items].sort((a,b)=>getRecencyAt(b.key)-getRecencyAt(a.key)).map(i=>i.key),R={vJ:(_old,next)=>next};",
+    "let er=groups,ei=[];",
+    'er=er.map(e=>{let t=z({getRecencyAt:F,items:e.threadKeys.map(k=>({key:k})),manualThreadIds:[],sortMode:U}),n=(0,R.vJ)(e.threadKeys,t);return n===e.threadKeys?e:{...e,threadKeys:n}}),"manual"===x&&(ei=[]);',
+    "return{pinnedProjectThreadKeys:[],projectSortMode:U,projectGroups:er}}",
+  ].join("");
+  const patchedProjectSort = patch(projectSortSource, mainChunkUrl);
+  assert.ok(patchedProjectSort?.includes("/*codey-project-groups-updated-sort*/"));
+  assert.equal(patch(patchedProjectSort, mainChunkUrl), null);
+  const computeGroups = Function(`${patchedProjectSort};return computeGroups`)();
+  const sampleGroups = [
+    { projectId: "old", threadKeys: ["t1"] },
+    { projectId: "empty", threadKeys: [] },
+    { projectId: "newest", threadKeys: ["t2", "t3"] },
+  ];
+  assert.deepEqual(
+    computeGroups(sampleGroups, { t1: 100, t2: 50, t3: 900 }, "updated_at", "updated_at").projectGroups.map((g) => g.projectId),
+    ["newest", "old", "empty"],
+  );
+  assert.deepEqual(
+    computeGroups(sampleGroups, { t1: 100, t2: 50, t3: 900 }, "manual", "manual").projectGroups.map((g) => g.projectId),
+    ["old", "empty", "newest"],
+  );
+
+  // (g.1) AirPods dictation clock=stopped fallback (#63267)
+  const btUrl = "app://-/assets/async/919295.2d97f3afdf.js";
+  const btSource = [
+    'const msg="Microphone input ended";',
+    "async function checkFrame(clockFn,E,e,T,t){",
+    "let R=1,g=2,d=!1,o=clockFn,i,n={y:(p)=>p},p={signal:{}},f=()=>clockFn();",
+    'if(R=g,g=R,d=!1,null!=o){let r=t;if(null==r)t=f(),d=!1;else if(e>=T){let[a,o]=await (0,n.y)(Promise.all([r,f()]),p.signal),s=a===o&&("recognized"===o||"hands_free"===o);d=s&&E>=3||"number"==typeof a&&"number"==typeof o&&o>a,i="number"==typeof o||"recognized"===o?o:void 0,t=Promise.resolve(o),s||(E=0),d||(T=e+50)}else d=!1}let A=E>0?"bluetooth_signal_ready":"bluetooth_silence_ready";return{d,E,A}}',
+  ].join("");
+  const patchedBt = patch(btSource, btUrl);
+  assert.ok(patchedBt?.includes("/*codey-bluetooth-clock-stopped-guard*/"));
+  assert.equal(patch(patchedBt, btUrl), null);
+  const checkFrame = Function(`${patchedBt};return checkFrame`)();
+  assert.equal((await checkFrame(async () => null, 3, 100, 0, Promise.resolve(null))).d, true, "clock=stopped (null) with 3 live signal frames resolves ready");
+  assert.equal((await checkFrame(async () => null, 0, 100, 0, Promise.resolve(null))).d, false, "clock=stopped with pure silence still waits");
+  assert.equal((await checkFrame(null, 3, 100, 0, null)).d, true, "missing native clock helper falls back to live frame streak");
+
+  // (g.2) Conversation eviction disposes browser sidebar tabs (#61121)
+  const disposeSource = [
+    "class Sidebar{constructor(bus){this.removed=[];this.mediaRefreshed=0;bus.subscribe(\"browser-sidebar-destroy-webview\",()=>{})}removeConversationBrowserStateIfEmpty(e){this.ownerRoutePathsByConversation.delete(e)}removeConversationTabs(e){this.removed.push(e)}emitMediaChange(){this.mediaRefreshed+=1}}",
+    'class Evictor{evictConversation(e,t){switch(t.reason){case"archive":case"archive-notification":break;case"delete":break;case"discard":break}}}',
+  ].join("");
+  const patchedDispose = patch(disposeSource, mainChunkUrl);
+  assert.ok(patchedDispose?.includes("/*codey-browser-sidebar-dispose*/"));
+  assert.equal(patch(patchedDispose, mainChunkUrl), null);
+  try {
+    const { Sidebar, Evictor } = Function(`${patchedDispose};return{Sidebar,Evictor}`)();
+    const sidebar = new Sidebar({ subscribe() {} });
+    const evictor = new Evictor();
+    evictor.evictConversation("conv-del", { reason: "delete" });
+    evictor.evictConversation("conv-arch", { reason: "archive" });
+    evictor.evictConversation("conv-empty", { reason: "empty-thread" });
+    assert.deepEqual(sidebar.removed, ["conv-del", "conv-arch"]);
+    assert.equal(sidebar.mediaRefreshed, 2);
+  } finally {
+    delete globalThis.__codeyDisposeBrowserSidebarConversation;
+  }
+
+  // (g.3) AI question card autoResolve timeout snooze & state cap (#29702/#31651)
+  const autoResolveSource = [
+    "function mount(nh,tl,eY,t,atom){",
+    "nh.appServices.owlBrowserCrashCounter.subscribe(()=>{});",
+    "function applyBgXp(e,h,n){let r={conversationId:n.conversationId,hostId:h};switch(n.kind){case\"removed\":{let x=e.get(atom,r);x?.requestId===n.requestId&&e.set(atom,r,null);break}case\"updated\":e.set(atom,r,{requestId:n.requestId,resolutionState:n.resolutionState})}}",
+    "tl.S=applyBgXp;",
+    'return function handle(e){switch(e.type){case"request-user-input-auto-resolution-changed":if("timed-out"===e.change.kind){(0,eY.we)(t,{hostId:e.hostId,requestId:e.change.requestId},e.change.timeoutMs);break}(0,tl.S)(t,e.hostId,e.change),"removed"===e.change.kind&&(0,eY.cC)(t,{hostId:e.hostId,requestId:e.change.requestId});break;case"request-user-input-auto-resolution-snapshot":for(let{conversationId:n,requestId:r,resolutionState:i}of e.pendingRequests)(0,tl.S)(t,e.hostId,{kind:"updated",conversationId:n,requestId:r,resolutionState:i});break}}}',
+  ].join("");
+  const patchedAutoResolve = patch(autoResolveSource, mainChunkUrl);
+  assert.ok(patchedAutoResolve?.includes("/*codey-user-input-auto-resolve-disable*/"));
+  assert.equal(patch(patchedAutoResolve, mainChunkUrl), null);
+  try {
+    const snoozedCalls = [];
+    const storeState = new Map();
+    const store = {
+      get: (_a, k) => storeState.get(`${k.hostId}:${k.conversationId}`) ?? null,
+      set: (_a, k, v) => storeState.set(`${k.hostId}:${k.conversationId}`, v),
+    };
+    const handle = Function(`${patchedAutoResolve};return mount`)()(
+      {
+        appServices: {
+          owlBrowserCrashCounter: { subscribe() {} },
+          requestUserInputAutoResolution: { snooze: (arg) => snoozedCalls.push(arg) },
+        },
+      },
+      {},
+      { we() {}, cC() {} },
+      store,
+      "atom",
+    );
+    handle({
+      type: "request-user-input-auto-resolution-changed",
+      hostId: "local",
+      change: {
+        kind: "updated",
+        conversationId: "conv-1",
+        requestId: "req-1",
+        resolutionState: { status: "scheduled", deadlineMs: 99999 },
+      },
+    });
+    // Duplicate scheduled updates for the same request must not loop IPC snooze calls.
+    handle({
+      type: "request-user-input-auto-resolution-changed",
+      hostId: "local",
+      change: {
+        kind: "updated",
+        conversationId: "conv-1",
+        requestId: "req-1",
+        resolutionState: { status: "scheduled", deadlineMs: 99999 },
+      },
+    });
+    assert.deepEqual(snoozedCalls, [{ conversationId: "conv-1", hostId: "local", requestId: "req-1" }]);
+    assert.deepEqual(storeState.get("local:conv-1"), {
+      requestId: "req-1",
+      resolutionState: { status: "snoozed" },
+    });
+  } finally {
+    delete globalThis.__codeyAppServices;
+    delete globalThis.__codeySnoozedInputRequests;
+  }
+
   assert.deepEqual(logs, []);
 });

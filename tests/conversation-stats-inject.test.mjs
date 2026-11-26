@@ -549,7 +549,7 @@ test("ignores streaming child churn and visibility flips inside conversation tur
   }
 });
 
-for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-sidebar-thread-active"]) {
+for (const attribute of ["data-conversation-id", "data-app-action-sidebar-thread-active"]) {
   test(`refreshes fallback session context on ${attribute} changes`, async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const env = createEnvironment({ anchor: false, statsBySession: {

@@ -272,52 +272,45 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
   assert.equal(localCalls.length, 0);
 
   const response = await window.electronBridge.sendMessageFromView({
-    channel: "list-plugins",
-    options: { includeHidden: false, includeRemote: false },
+    method: "plugin/list",
+    params: { cwds: ["/workspace"] },
   });
   assert.equal(localCalls.length, 1);
   assert.equal(localCalls[0][0], "/plugins/list");
-  assert.equal(nativeCalls[1][0].options.includeHidden, true);
-  assert.equal(nativeCalls[1][0].options.includeRemote, true);
   assert.equal(response.plugins[0].hidden, false);
   assert.equal(response.plugins.some((plugin) => plugin.id === "local-tool@local"), true);
 
   await window.electronBridge.sendMessageFromView({
-    channel: "invoke",
-    payload: {
-      method: "list-plugins",
-      options: { includeHidden: false, includeRemote: false },
+    type: "mcp-request",
+    request: {
+      id: "req-1",
+      method: "plugin/list",
+      params: {},
     },
   });
   assert.equal(localCalls.length, 2);
-  assert.equal(nativeCalls[2][0].payload.options.includeHidden, true);
-  assert.equal(nativeCalls[2][0].payload.options.includeRemote, true);
 
-  await window.electronBridge.sendMessageFromView({
-    type: "invoke",
-    payload: {
-      request: {
-        method: "list-plugins",
-        options: { includeHidden: false, includeRemote: false },
-      },
+  await window.electronBridge.sendMessageFromView("mcp-request", {
+    request: {
+      id: "req-2",
+      method: "plugin/installed",
+      params: {},
     },
   });
   assert.equal(localCalls.length, 3);
-  assert.equal(nativeCalls[3][0].payload.request.options.includeHidden, true);
-  assert.equal(nativeCalls[3][0].payload.request.options.includeRemote, true);
 
   const cyclicPluginPayload = {
-    channel: "list-plugins",
-    options: { includeHidden: false },
+    method: "plugin/list",
+    params: {},
   };
   cyclicPluginPayload.self = cyclicPluginPayload;
   await window.electronBridge.sendMessageFromView(cyclicPluginPayload);
   assert.equal(localCalls.length, 4);
-  assert.equal(nativeCalls[4][0].options.includeHidden, true);
+  assert.equal(nativeCalls[4][0], cyclicPluginPayload);
   assert.equal(nativeCalls[4][0].self, nativeCalls[4][0]);
 
   const throwingPayload = {};
-  Object.defineProperty(throwingPayload, "channel", {
+  Object.defineProperty(throwingPayload, "method", {
     enumerable: true,
     get() {
       throw new Error("hostile getter");
@@ -329,7 +322,7 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
 
   assert.doesNotMatch(source, /JSON\.stringify\(args\)/);
   assert.doesNotMatch(source, /new MutationObserver/);
-  assert.match(source, /directRequestKeys/);
+  assert.doesNotMatch(source, /directRequestKeys/);
   assert.match(source, /bridgeRetryDelay = Math\.min\(bridgeRetryDelay \* 2, 2_000\)/);
   assert.match(source, /const delay = fastRetry \? bridgeRetryDelay : 30_000/);
 
@@ -344,11 +337,11 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
     window,
   });
   await window.electronBridge.sendMessageFromView({
-    channel: "list-plugins",
-    options: { includeHidden: false },
+    type: "mcp-request",
+    request: { method: "plugin/list" },
   });
   assert.equal(localCalls.length, 5);
-  assert.equal(replacementCalls[0][0].options.includeHidden, true);
+  assert.equal(replacementCalls[0][0].request.method, "plugin/list");
 });
 
 test("plugin fetch wrapper returns unrelated native requests without promise or header work", async () => {
@@ -483,7 +476,8 @@ test("a stalled local plugin refresh cannot block the native marketplace list", 
   });
 
   const responsePromise = window.electronBridge.sendMessageFromView({
-    channel: "list-plugins",
+    type: "mcp-request",
+    request: { method: "plugin/list" },
   });
   await Promise.resolve();
   await Promise.resolve();
@@ -591,9 +585,9 @@ test("plugin mutations queue one trailing list refresh while a refresh is in fli
     window,
   });
 
-  await window.electronBridge.sendMessageFromView({ method: "install-plugin" });
+  await window.electronBridge.sendMessageFromView({ method: "plugin/install" });
   assert.equal(listCalls, 1);
-  await window.electronBridge.sendMessageFromView({ method: "uninstall-plugin" });
+  await window.electronBridge.sendMessageFromView({ method: "plugin/uninstall" });
   assert.equal(listCalls, 1);
   listResolvers.shift()({ plugins: [] });
   await new Promise((resolve) => setImmediate(resolve));

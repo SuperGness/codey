@@ -70,6 +70,15 @@
     "Reached the post-login Statsig bootstrap deadline",
     "CodexStatsigProvider.async.identity",
     "useStatsigInternalClientFactoryAsync=function(",
+    "review.fileSource.breadcrumb.ariaLabel",
+    "tokenizeTimeLimit:0",
+    "operationSource:\"turn_diff_analytics\"",
+    ".appServices.customAvatars.load()",
+    "huD:()=>5e3",
+    "chatgpt-work-flat-project-sidebar-mode-v2",
+    "bluetooth_signal_ready",
+    "removeConversationBrowserStateIfEmpty(",
+    "request-user-input-auto-resolution-changed",
   ];
   const rendererGateFailureExcerpts = (source) => {
     const excerpts = [];
@@ -134,7 +143,7 @@
     }
     return patched;
   };
-  const draftFactoryPattern = /\b[$A-Z_a-z][$\w]*=(?:[$A-Z_a-z][$\w]*|\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\([$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?,[$A-Z_a-z][$\w]*=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:null\}\)\)/g;
+  const draftFactoryPattern = /\b[$A-Z_a-z][$\w]*=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\([$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:null\}\)\)/g;
   // 把未手动选择的新草稿的推理强度初值换成 medium；管理员下发的新会话设置和
   // 草稿内的手动选择保持原样。返回改写后的源码；无法唯一识别时返回匹配次数。
   const patchNativeDraftReasoningEffort = (source) => {
@@ -151,7 +160,7 @@
     const hookEnd = source.indexOf("}function ", hook.index + hook[0].length);
     if (hookEnd < 0) return 0;
     const scope = source.slice(hook.index, hookEnd);
-    const calls = [...scope.matchAll(/(\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)|\b[$A-Z_a-z][$\w]*)\(\{userSavedModelString:/g)];
+    const calls = [...scope.matchAll(/(\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\(\{userSavedModelString:/g)];
     if (calls.length !== 1) return calls.length;
     const resolver = calls[0][1];
     const call = `${resolver}({userSavedModelString:`;
@@ -217,7 +226,16 @@
     { "kind": "css", "allOf": [":has(:is(button[data-state=open]))"] },
     { "allOf": ["Timed out while fetching post-login Statsig bootstrap", "Reached the post-login Statsig bootstrap deadline"] },
     { "allOf": ["CodexStatsigProvider.async.identity"] },
-    { "allOf": ["useStatsigInternalClientFactoryAsync=function(", ".initializeAsync().catch("] }
+    { "allOf": ["useStatsigInternalClientFactoryAsync=function(", ".initializeAsync().catch("] },
+    { "allOf": ["review.fileSource.breadcrumb.ariaLabel", "currentCSSZoom", "paddingInlineEnd"] },
+    { "allOf": ["tokenizeTimeLimit:0", "tokenizeMaxLineLength:", "cssVariablePrefix:"] },
+    { "allOf": ["operationSource:\"turn_diff_analytics\"", "turn-diff-capture-start", "turn-diff-capture-complete", "visualizationSnapshot:"] },
+    { "allOf": [".appServices.customAvatars.load()", "\"custom-avatars\""] },
+    { "allOf": ["huD:()=>5e3"] },
+    { "allOf": ["chatgpt-work-flat-project-sidebar-mode-v2", "SIDEBAR_PROJECT_THREAD_ORDERS", "manualThreadIds:"] },
+    { "allOf": ["bluetooth_signal_ready", "hands_free", "Microphone input ended"] },
+    { "allOf": ["removeConversationBrowserStateIfEmpty(", "ownerRoutePathsByConversation.delete(", "evictConversation("] },
+    { "allOf": ["request-user-input-auto-resolution-changed", "request-user-input-auto-resolution-snapshot", "owlBrowserCrashCounter"] }
   ]/*end-codey-renderer-patch-rules*/;
   const jsRendererPatchRules = rendererPatchRules.filter((rule) => rule.kind !== "css");
   const hostedTurnCall = "(globalThis.__codeyModelWhitelistPatch?.hostedTurnCall??((t,m,...a)=>t[m](...a)))";
@@ -312,24 +330,23 @@
     }
     if (source.includes("electron-app-state-snapshot-request")
       && !source.includes("/*codey-heartbeat-snapshot-skip*/")
-      && /case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
+      && source.includes("case\"electron-app-state-snapshot-request\":")) {
       // Main asks the focused window for a full app-state snapshot every 30 s,
       // then adds process sampling, a debug log and a Sentry breadcrumb. Skip
       // only the heartbeat reason; other diagnostic triggers still reply, and
       // main expires unanswered requests on its own TTL.
-      // Builds differ only in whether the switch break is labelled.
       patched = replaceUniqueRendererGate(
         patched,
-        /(case[`"]electron-app-state-snapshot-request[`"]:\{)(?=[\s\S]{0,2000}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\2\.reason\)[\s\S]{0,2000}?dispatchMessage\([`"]electron-app-state-snapshot-response[`"][^;]{0,400};break((?: [$A-Z_a-z][$\w]*)?)\})/g,
+        /(case"electron-app-state-snapshot-request":\{)(?=[\s\S]{0,2000}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\2\.reason\)[\s\S]{0,2000}?dispatchMessage\("electron-app-state-snapshot-response"[^;]{0,400};break((?: [$A-Z_a-z][$\w]*)?)\})/g,
         (_match, prefix, messageName, label) =>
-          `${prefix}/*codey-heartbeat-snapshot-skip*/if(${messageName}.reason===\`heartbeat\`)break${label};`,
+          `${prefix}/*codey-heartbeat-snapshot-skip*/if("heartbeat"===${messageName}.reason)break${label};`,
         "app state heartbeat snapshot",
       );
     }
     if (
       source.includes("activeInteractions=new Map") &&
       source.includes("beginCpuSampling") &&
-      /ensureHeartbeat\(\)\{(?:this\.heartbeatTimer\?\?=|null==this\.heartbeatTimer&&\(this\.heartbeatTimer=)setInterval/.test(source)
+      source.includes("ensureHeartbeat(){null==this.heartbeatTimer&&(this.heartbeatTimer=setInterval")
     ) {
       // Codey launches app-server with analytics.enabled=false, so renderer
       // interaction telemetry is discarded after paying for main/renderer CPU
@@ -337,13 +354,13 @@
       // removing only those two recurring/IPC costs.
       patched = replaceUniqueRendererGate(
         patched,
-        /cpuSampling:(?:[$A-Z_a-z][$\w]*===[`"]dropped[`"]|[`"]dropped[`"]===[$A-Z_a-z][$\w]*)\|\|(?:[$A-Z_a-z][$\w]*\.backfilled===!0|!0===[$A-Z_a-z][$\w]*\.backfilled)\?null:this\.beginCpuSampling\(\)/g,
+        /cpuSampling:"dropped"===[$A-Z_a-z][$\w]*\|\|!0===[$A-Z_a-z][$\w]*\.backfilled\?null:this\.beginCpuSampling\(\)/g,
         "cpuSampling:null",
         "interaction CPU sampling",
       );
       patched = replaceUniqueRendererGate(
         patched,
-        /ensureHeartbeat\(\)\{(?:this\.heartbeatTimer\?\?=setInterval\(\(\)=>\{let ([$A-Z_a-z][$\w]*)=this\.now\(\),([$A-Z_a-z][$\w]*)=this\.wallNow\(\);for\(let ([$A-Z_a-z][$\w]*) of this\.activeInteractions\.values\(\)\)this\.recordHeartbeat\(\3,\1,\2\)\},[$A-Z_a-z][$\w]*\)|null==this\.heartbeatTimer&&\(this\.heartbeatTimer=setInterval\(\(\)=>\{let ([$A-Z_a-z][$\w]*)=this\.now\(\),([$A-Z_a-z][$\w]*)=this\.wallNow\(\);for\(let ([$A-Z_a-z][$\w]*) of this\.activeInteractions\.values\(\)\)this\.recordHeartbeat\(\6,\4,\5\)\},[$\w.]+\)\))\}/g,
+        /ensureHeartbeat\(\)\{null==this\.heartbeatTimer&&\(this\.heartbeatTimer=setInterval\(\(\)=>\{let ([$A-Z_a-z][$\w]*)=this\.now\(\),([$A-Z_a-z][$\w]*)=this\.wallNow\(\);for\(let ([$A-Z_a-z][$\w]*) of this\.activeInteractions\.values\(\)\)this\.recordHeartbeat\(\3,\1,\2\)\},[$\w.]+\)\)\}/g,
         "ensureHeartbeat(){}",
         "interaction heartbeat",
       );
@@ -351,14 +368,28 @@
     if (
       !source.includes("/*codey-pierre-pool-size*/")
       && source.includes("totalASTLRUCacheSize:")
-      && /poolSize:(?:[2-9]\d*)/.test(source)
+      && (/poolSize:[2-9]\d*/.test(source) || /totalASTLRUCacheSize:(?:3[3-9]|[4-9]\d|\d{3,})\b/.test(source))
     ) {
-      // 代码高亮与 diff 池默认按 4 个常驻 Web Worker 启动，缩减到 1 个减少内存与线程占用。
+      // 代码高亮与 diff 池收敛到单常驻 Web Worker 且限制 AST LRU 缓存容量，减少线程与内存占用。
       patched = replaceUniqueRendererGate(
         patched,
-        /(\{workerFactory:[$A-Z_a-z][$\w]*,poolSize:)[2-9]\d*(,totalASTLRUCacheSize:\d+\})/g,
-        (_match, prefix, suffix) => `${prefix}/*codey-pierre-pool-size*/1${suffix}`,
+        /(\{workerFactory:[$A-Z_a-z][$\w]*,poolSize:)[1-9]\d*(,totalASTLRUCacheSize:)\d+(\})/g,
+        (_match, prefix, mid, suffix) => `${prefix}/*codey-pierre-pool-size*/1${mid}32${suffix}`,
         "syntax highlight worker pool",
+      );
+    }
+    if (
+      !source.includes("/*codey-shiki-tokenize-time-limit*/")
+      && source.includes("tokenizeTimeLimit:0")
+      && source.includes("tokenizeMaxLineLength:")
+      && source.includes("cssVariablePrefix:")
+    ) {
+      // 恢复 Shiki 单行语法高亮超时上限（250ms），避免超长单行或病理正则让 Worker 持续满载卡死（#55225）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(cssVariablePrefix:(?:\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)|[$A-Z_a-z][$\w]*)\("token"\),tokenizeMaxLineLength:[$A-Z_a-z][$\w]*,tokenizeTimeLimit:)0\b/g,
+        (_match, prefix) => `${prefix}/*codey-shiki-tokenize-time-limit*/250`,
+        "shiki tokenize time limit",
       );
     }
     if (
@@ -508,6 +539,157 @@
         "statsig async client init cap",
       );
     }
+    if (
+      !source.includes("/*codey-breadcrumb-subpixel-guard*/")
+      && source.includes("review.fileSource.breadcrumb.ariaLabel")
+      && source.includes("currentCSSZoom")
+      && source.includes("paddingInlineEnd")
+    ) {
+      // 文件预览面包屑增加 0.5px 亚像素溢出容差，并在恢复可见路径段循环之后再计算前导省略号 showRoot，防止 ResizeObserver 振荡死循环（#62669）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /,(?<overflow>[$A-Z_a-z][$\w]*)=(?<avail>[$A-Z_a-z][$\w]*)<(?<widths>[$A-Z_a-z][$\w]*)\.reduce\((?<sumFn>[$A-Z_a-z][$\w]*|\([^)]*\)=>[^,]+),0\)\?\k<widths>\.length-1:0,(?<rem>[$A-Z_a-z][$\w]*)=\k<avail>-(?<lastWidth>[$A-Z_a-z][$\w]*)-(?<ellipsisWidth>[$A-Z_a-z][$\w]*),(?<root>[$A-Z_a-z][$\w]*)=\k<overflow>>0&&\k<rem>>=0;(?<loop>for\(;\k<overflow>>0&&\k<rem>>=Math\.min\(\k<widths>\[\k<overflow>-1\],\k<ellipsisWidth>\+[$A-Z_a-z][$\w]*\);\)\k<overflow>-=1,\k<rem>-=\k<widths>\[\k<overflow>\];)(?=let [$A-Z_a-z][$\w]*=`\$\{[$A-Z_a-z][$\w]*\/(?:\()?[$A-Z_a-z][$\w]*\.currentCSSZoom)/g,
+        (...args) => {
+          const { overflow, avail, widths, sumFn, rem, lastWidth, ellipsisWidth, root, loop } = args.at(-1);
+          return `,${overflow}=/*codey-breadcrumb-subpixel-guard*/(${avail}+.5)<${widths}.reduce(${sumFn},0)?${widths}.length-1:0,${rem}=${avail}-${lastWidth}-${ellipsisWidth};${loop}let ${root}=${overflow}>0&&${rem}>=0;`;
+        },
+        "file breadcrumb resize observer guard",
+      );
+    }
+    if (
+      !source.includes("/*codey-turn-diff-analytics-skip*/")
+      && source.includes("operationSource:\"turn_diff_analytics\"")
+      && source.includes("turn-diff-capture-start")
+      && source.includes("turn-diff-capture-complete")
+      && source.includes("visualizationSnapshot:")
+    ) {
+      // 停用每轮遥测专用的后台 Git 全仓快照与可视化文件扫描，保留手动 Review 面板的 review_model 与 git 操作（#54955）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /capture:async function\([$\w,]+\)\{try\{return await \(0,[$\w]+\.[$\w]+\)\("git"\)\.request\(\{method:"turn-diff-capture-start",params:\{[^{}]*operationSource:"turn_diff_analytics"[^{}]*\}\}\)\}catch\([$\w]+\)\{return [$\w.]+\("Failed to start turn diff analytics capture",[\s\S]{0,160}?,null\}\}\([^;]{0,200}?\),visualizationSnapshot:\(async function\([$\w,]+\)\{[\s\S]{0,2400}?"Failed to start visualization turn diff snapshot",\{safe:\{\},sensitive:\{error:[$\w]+\}\}\),null\)\)/g,
+        "capture:/*codey-turn-diff-analytics-skip*/Promise.resolve(null),visualizationSnapshot:Promise.resolve(null)",
+        "turn diff analytics start capture",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(let\[(?<diffResult>[$A-Z_a-z][$\w]*),[$A-Z_a-z][$\w]*\]=await Promise\.all\(\[)\(0,[$\w]+\.[$\w]+\)\("git"\)\.request\(\{method:"turn-diff-capture-complete",params:\{[^{}]*operationSource:"turn_diff_analytics"[^{}]*\}\}\),null==[$A-Z_a-z][$\w]*\|\|![$A-Z_a-z][$\w]*\(\)\?null:\(async function\([$\w,=]+\)\{[\s\S]{0,2400}?"Failed to complete visualization turn diff snapshot",\{safe:\{\},sensitive:\{error:[$\w]+\}\}\),null\)\)\](\);if\()(?![\s\S]{0,24}null==)/g,
+        (...args) => {
+          const [, prefix, , suffix] = args;
+          const { diffResult } = args.at(-1);
+          return `${prefix}/*codey-turn-diff-complete-skip*/Promise.resolve(null),null]${suffix}null==${diffResult}||`;
+        },
+        "turn diff analytics complete capture",
+      );
+    }
+    if (
+      !source.includes("/*codey-custom-avatars-slim-skip*/")
+      && source.includes(".appServices.customAvatars.load()")
+      && source.includes("\"custom-avatars\"")
+    ) {
+      // 宠物精简开启时短路 customAvatars.load()，避免解码超大自定义精灵图导致开屏 512MiB RPC 卡死（#61498）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\{queryKey:[$A-Z_a-z][$\w]*,queryFn:\(\)=>)(?<call>[$A-Z_a-z][$\w]*\.appServices\.customAvatars\.load\(\))(?=,enabled:!0,networkMode:"always")/g,
+        (_match, prefix, call) =>
+          `${prefix}/*codey-custom-avatars-slim-skip*/(globalThis.__codeyPetControlShield?.enabled?Promise.resolve([]):${call})`,
+        "custom avatars slim short-circuit",
+      );
+    }
+    if (
+      !source.includes("/*codey-paste-attachment-threshold*/")
+      && source.includes("huD:()=>5e3")
+    ) {
+      // 将粘贴文本自动转 .txt/.md 附件的阈值从 5,000 字提升至 500,000 字（#25144）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /\bhuD:\(\)=>5e3\b/g,
+        "huD:()=>/*codey-paste-attachment-threshold*/5e5",
+        "paste attachment character threshold",
+      );
+    }
+    if (
+      !source.includes("/*codey-project-groups-updated-sort*/")
+      && source.includes("chatgpt-work-flat-project-sidebar-mode-v2")
+      && source.includes("SIDEBAR_PROJECT_THREAD_ORDERS")
+      && source.includes("manualThreadIds:")
+    ) {
+      // 侧边栏切换为按最近更新排序（updated_at）时，同步按组内最新会话时间排列未固定项目组（#31836）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(?<groupsMap>\b(?<groups>[$A-Z_a-z][$\w]*)=\k<groups>\.map\([$A-Z_a-z][$\w]*=>\{let [$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\(\{getRecencyAt:(?<recency>[$A-Z_a-z][$\w]*),items:[\s\S]{0,320}?,sortMode:(?<sortMode>[$A-Z_a-z][$\w]*)\}\),[$A-Z_a-z][$\w]*=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\([$A-Z_a-z][$\w]*\.threadKeys,[$A-Z_a-z][$\w]*\);return [$A-Z_a-z][$\w]*===[$A-Z_a-z][$\w]*\.threadKeys\?[$A-Z_a-z][$\w]*:\{\.\.\.[$A-Z_a-z][$\w]*,threadKeys:[$A-Z_a-z][$\w]*\}\}\)),(?="manual"===[$A-Z_a-z][$\w]*&&)/g,
+        (...args) => {
+          const { groupsMap, groups, recency, sortMode } = args.at(-1);
+          return `${groupsMap},/*codey-project-groups-updated-sort*/("updated_at"===${sortMode}&&(${groups}=${groups}.map((__g,__i)=>({__g,__i,__r:__g.threadKeys.length>0?${recency}(__g.threadKeys[0]):-1/0})).sort((__a,__b)=>__b.__r-__a.__r||__a.__i-__b.__i).map(__e=>__e.__g))),`;
+        },
+        "sidebar project groups updated_at sort",
+      );
+    }
+    if (
+      !source.includes("/*codey-bluetooth-clock-stopped-guard*/")
+      && source.includes("bluetooth_signal_ready")
+      && source.includes("hands_free")
+      && source.includes("Microphone input ended")
+    ) {
+      // AirPods 等蓝牙麦克风已持续产出有效非静音 PCM 帧（E>=3）但 CoreAudio 时钟回报 stopped/unavailable 时立即放行，避免 10s 误超时（#63267）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(?<head>if\([$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*,(?<ready>[$A-Z_a-z][$\w]*)=!1,null!=[$A-Z_a-z][$\w]*\)\{[\s\S]{0,240}?)(?<stable>[$A-Z_a-z][$\w]*)=(?<prev>[$A-Z_a-z][$\w]*)===(?<curr>[$A-Z_a-z][$\w]*)&&\("recognized"===\k<curr>\|\|"hands_free"===\k<curr>\)(?<mid>;\k<ready>=\k<stable>&&(?<streak>[$A-Z_a-z][$\w]*)>=3\|\|"number"==typeof \k<prev>&&"number"==typeof \k<curr>&&\k<curr>>\k<prev>[\s\S]{0,180}?else \k<ready>=!1\})/g,
+        (...args) => {
+          const { head, ready, stable, prev, curr, mid, streak } = args.at(-1);
+          return `${head}${stable}=/*codey-bluetooth-clock-stopped-guard*/${prev}===${curr}&&(null===${curr}||"unavailable"===${curr}||"recognized"===${curr}||"hands_free"===${curr})${mid}else ${ready}=${streak}>=3;`;
+        },
+        "bluetooth dictation clock stopped fallback",
+      );
+    }
+    if (
+      !source.includes("/*codey-browser-sidebar-dispose*/")
+      && source.includes("removeConversationBrowserStateIfEmpty(")
+      && source.includes("ownerRoutePathsByConversation.delete(")
+      && source.includes("evictConversation(")
+    ) {
+      // 会话删除、归档或丢弃时同步清理渲染侧浏览器边栏宿主与媒体标签状态，避免后台残留 webview（#61121）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /([$\w.]+\.subscribe\("browser-sidebar-destroy-webview",)/g,
+        (_match, subscribeCall) =>
+          `globalThis.__codeyDisposeBrowserSidebarConversation=__id=>{try{this.removeConversationTabs(__id),this.emitMediaChange()}catch{}},${subscribeCall}`,
+        "browser sidebar conversation disposer export",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(evictConversation\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{)(?=switch\(\3\.reason\)\{case"archive":case"archive-notification":)/g,
+        (_match, prefix, convId, opts) =>
+          `${prefix}/*codey-browser-sidebar-dispose*/("delete"===${opts}.reason||"archive"===${opts}.reason||"archive-notification"===${opts}.reason||"discard"===${opts}.reason)&&globalThis.__codeyDisposeBrowserSidebarConversation?.(${convId});`,
+        "evict conversation browser sidebar cleanup",
+      );
+    }
+    if (
+      !source.includes("/*codey-user-input-auto-resolve-disable*/")
+      && source.includes("request-user-input-auto-resolution-changed")
+      && source.includes("request-user-input-auto-resolution-snapshot")
+      && source.includes("owlBrowserCrashCounter")
+    ) {
+      // 禁用 AI 提问卡片超时自动跳过：向宿主登记 snooze 取消倒计时，并将前端状态固定为 snoozed（#29702/#31651）。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(([$A-Z_a-z][$\w]*)\.appServices\.owlBrowserCrashCounter\.subscribe)/g,
+        (_match, expr, servicesHolder) => `(globalThis.__codeyAppServices=${servicesHolder}.appServices,${expr})`,
+        "desktop appServices reference for input snooze",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(case"request-user-input-auto-resolution-changed":)(if\("timed-out"===([$A-Z_a-z][$\w]*)\.change\.kind\)\{[\s\S]{0,240}?;break\}\(0,([$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*)\)\(([$A-Z_a-z][$\w]*),\3\.hostId,\3\.change\),"removed"===\3\.change\.kind&&\([^;]+\);break;case"request-user-input-auto-resolution-snapshot":for\(let\{conversationId:([$A-Z_a-z][$\w]*),requestId:([$A-Z_a-z][$\w]*),resolutionState:([$A-Z_a-z][$\w]*)\}of \3\.pendingRequests\)\(0,\4\)\(\5,\3\.hostId,\{kind:"updated",conversationId:\6,requestId:\7,resolutionState:\8\}\);break)/g,
+        (_match, caseHead, body, msg, _applyState, _store, snapConv, snapReq, snapState) =>
+          `${caseHead}/*codey-user-input-auto-resolve-disable*/(()=>{let __s=globalThis.__codeySnoozedInputRequests??(globalThis.__codeySnoozedInputRequests=new Set),__k=\`\${${msg}.hostId}:\${${msg}.change.requestId}\`;if("removed"===${msg}.change.kind)__s.delete(__k);else if("updated"===${msg}.change.kind&&"snoozed"!==${msg}.change.resolutionState?.status&&!__s.has(__k)){__s.size>=256&&__s.clear(),__s.add(__k);try{globalThis.__codeyAppServices?.requestUserInputAutoResolution?.snooze?.({conversationId:${msg}.change.conversationId,hostId:${msg}.hostId,requestId:${msg}.change.requestId})}catch{}}})();${body.replace(`for(let{conversationId:${snapConv},requestId:${snapReq},resolutionState:${snapState}}of ${msg}.pendingRequests)`, `for(let{conversationId:${snapConv},requestId:${snapReq},resolutionState:${snapState}}of ${msg}.pendingRequests){let __s=globalThis.__codeySnoozedInputRequests??(globalThis.__codeySnoozedInputRequests=new Set),__k=\`\${${msg}.hostId}:\${${snapReq}}\`;if("snoozed"!==${snapState}?.status&&!__s.has(__k)){__s.size>=256&&__s.clear(),__s.add(__k);try{globalThis.__codeyAppServices?.requestUserInputAutoResolution?.snooze?.({conversationId:${snapConv},hostId:${msg}.hostId,requestId:${snapReq}})}catch{}}}`)}`,
+        "user input auto resolution snooze dispatch",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(case"removed":\{let [$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\.get\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\);[$A-Z_a-z][$\w]*\?\.requestId===([$A-Z_a-z][$\w]*)\.requestId&&[$A-Z_a-z][$\w]*\.set\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*,null\);break\}case"updated":[$A-Z_a-z][$\w]*\.set\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*,\{requestId:\2\.requestId,resolutionState:)\2\.resolutionState(\}\))/g,
+        (_match, prefix, _change, suffix) => `${prefix}{status:"snoozed"}${suffix}`,
+        "user input auto resolution state snoozed",
+      );
+    }
     return patched;
   };
   const patchCodexRendererAsset = (source, requestUrl) => {
@@ -606,7 +788,7 @@
       // 实际接入时留下标记供诊断。
       patched = replaceUniqueRendererGate(
         patched,
-        /(if\((?:[$A-Z_a-z][$\w]*==null|null==[$A-Z_a-z][$\w]*)\)throw Error\([`"]Desktop host did not provide its AppServerManager service[`"]\);)/g,
+        /(if\(null==[$A-Z_a-z][$\w]*\)throw Error\("Desktop host did not provide its AppServerManager service"\);)/g,
         (_match, check) => `${check}globalThis.__codeyAppServerManagerHosted=true;`,
         "hosted app server manager marker",
       );
@@ -635,6 +817,7 @@
       );
     }
     if (
+      !source.includes("/*codey-third-party-ultra*/") &&
       source.includes("includeUltraReasoningEffort:") &&
       source.includes("isCustomModelProvider:") &&
       source.includes("teamCatalog:") &&
@@ -647,7 +830,7 @@
         /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*(?<ultra>[$A-Z_a-z][$\w]*)(?:=!0)?[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*(?<get>[$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[\s\S]{0,1600}?\b(?<flag>[$A-Z_a-z][$\w]*)\s*=\s*\k<ultra>\s*&&\s*)(?<gate>\k<get>\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(?<quote>["'`])1186680773\k<quote>\s*\))(?=[\s\S]{0,2000}?\bincludeUltraReasoningEffort\s*:\s*\k<flag>\s*,\s*isCustomModelProvider\s*:\s*(?<custom>[$A-Z_a-z][$\w]*)\b)/g,
         (_match, prefix, ...rest) => {
           const { custom, gate } = rest.at(-1);
-          return `${prefix}(${custom}||${gate})`;
+          return `${prefix}(${custom}||${gate})/*codey-third-party-ultra*/`;
         },
         "third-party Ultra reasoning",
       );
@@ -663,7 +846,7 @@
       // allows every tier; the model's serviceTiers still decide what exists.
       patched = replaceUniqueRendererGate(
         patched,
-        /if\s*\(\s*(?:([$A-Z_a-z][$\w]*)\s*==\s*null|null\s*==\s*([$A-Z_a-z][$\w]*))\s*\)\s*return\s*!1\s*;\s*let\s+([$A-Z_a-z][$\w]*)\s*=\s*[$A-Z_a-z][$\w]*\(\s*([$A-Z_a-z][$\w]*)\s*\)\s*;\s*return\s*(?:\4\s*===\s*[`"]flex[`"]|[`"]flex[`"]\s*===\s*\4)\s*\|\|\s*(?:\1|\2)\[\s*\3\s*\?\?\s*[`"]fast[`"]\s*\]/g,
+        /if\(null==([$A-Z_a-z][$\w]*)\)return!1;let ([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\(([$A-Z_a-z][$\w]*)\);return"flex"===\3\|\|\1\[\2\?\?"fast"\]/g,
         "/*codey-service-tier-access*/return!0",
         "service tier access",
       );
@@ -676,7 +859,7 @@
       // grant so visibility follows the model's own service tiers.
       patched = replaceUniqueRendererGate(
         patched,
-        /(\b([$A-Z_a-z][$\w]*)=)[$A-Z_a-z][$\w]*&&![$A-Z_a-z][$\w]*&&(?:[$A-Z_a-z][$\w]*!=null|null!=[$A-Z_a-z][$\w]*)\?(?:[$A-Z_a-z][$\w]*|\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\([$A-Z_a-z][$\w]*\):null(?=[^;]{0,200};let [$A-Z_a-z][$\w]*=\2(?:,[$A-Z_a-z][$\w]*)?;return[^;]{0,200}?\{serviceTierAccess:)/g,
+        /(\b([$A-Z_a-z][$\w]*)=)[$A-Z_a-z][$\w]*&&![$A-Z_a-z][$\w]*&&null!=[$A-Z_a-z][$\w]*\?\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\([$A-Z_a-z][$\w]*\):null(?=[^;]{0,200};let [$A-Z_a-z][$\w]*=\2(?:,[$A-Z_a-z][$\w]*)?;return[^;]{0,200}?\{serviceTierAccess:)/g,
         (_match, assignment) => `${assignment}{fast:!0,ultrafast:!0}`,
         "service tier access state",
       );

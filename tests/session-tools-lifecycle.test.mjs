@@ -334,13 +334,13 @@ test("disposal preserves native wait settlement and prevents a subsequent reconc
   };
   const runtime = fixture({ controller });
   runtime.load();
-  const active = new FakeElement("div", { "data-session-id": "thread-1" });
+  const active = new FakeElement("div", { "data-conversation-id": "thread-1" });
   runtime.document.body.appendChild(active);
   const result = runtime.window.__codeyReconcileStaleCompletedTask();
   await settle();
   assert.equal(reconcileCalls, 1);
   runtime.window.__codeySessionToolsInstall.dispose();
-  active.setAttribute("data-session-id", "thread-2");
+  active.setAttribute("data-conversation-id", "thread-2");
   runtime.runTimeout(5_000);
   assert.equal(await result, false);
   assert.equal(reconcileCalls, 1);

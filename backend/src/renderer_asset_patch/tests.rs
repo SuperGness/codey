@@ -719,6 +719,15 @@ fn compound_rule_matcher_requires_all_literals_and_splits_js_from_css() {
         "Reached the post-login Statsig bootstrap deadline Timed out while fetching post-login Statsig bootstrap"
     ));
 
+    // 26.1120.50957 新增性能/体验规则前置字面量校验。
+    assert!(matcher.matches("tokenizeTimeLimit:0 tokenizeMaxLineLength: cssVariablePrefix:"));
+    assert!(matcher.matches("huD:()=>5e3"));
+    assert!(matcher.matches(
+        "operationSource:\"turn_diff_analytics\" turn-diff-capture-start turn-diff-capture-complete visualizationSnapshot:"
+    ));
+    assert!(matcher.matches(".appServices.customAvatars.load() \"custom-avatars\""));
+    assert!(matcher.matches("bluetooth_signal_ready hands_free Microphone input ended"));
+
     // JS 与 CSS 规则互不误命中。
     assert!(!matcher.matches_asset(
         "app://-/assets/1.aaaaaaaa.js",

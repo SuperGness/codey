@@ -93,11 +93,7 @@
   const canonicalConversationTurnSelector = "[data-turn-key]";
   const sessionIdentityAttributes = [
     "data-above-composer-conversation-id",
-    "data-session-id",
     "data-conversation-id",
-    "data-thread-id",
-    "data-request-user-input-auto-resolution-conversation-id",
-    "data-response-annotation-conversation",
   ];
   const sessionIdentitySelector = sessionIdentityAttributes
     .map((attribute) => `[${attribute}]`)
@@ -279,7 +275,165 @@
   };
 
   const wakeSessionWatcherFromKey = (event) => {
-    if (event.key === "Enter" && !event.isComposing) wakeSessionWatcher();
+    if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) wakeSessionWatcher();
+  };
+
+  // #11026 / #20767: CJK 输入法组合态及 compositionend 后 60ms 保护窗内，阻止候选确认
+  // Enter 穿透提交回答、阻止取消拼音/假名 Escape 冒泡触发全局打断生成。
+  // #59463: 语音听写控制条激活时，阻止焦点误落取消按钮或全局未组合 Enter 误触丢弃录音。
+  const imePostCompositionGuardMs = 60;
+  const editableKeyTargetSelector = [
+    "input",
+    "textarea",
+    ".ProseMirror",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']",
+    "[role='textbox']",
+  ].join(", ");
+  const dictationSubmitLabelPattern = /^(?:transcribe and send|send dictated message|end voice input and submit|转录并发送|结束语音输入并提交|发送语音输入的消息|轉錄並傳送|結束語音輸入並提交|傳送語音輸入的訊息)$/i;
+  const dictationStopInsertLabelPattern = /^(?:stop dictation|停止听写|停止聽寫)$/i;
+  let imeComposingTarget = null;
+  let imeCompositionEndedTarget = null;
+  let imeCompositionEndedAt = -Infinity;
+
+  const resolveEditableKeyTarget = (target) => {
+    const candidate = target instanceof HTMLElement
+      ? target
+      : target?.parentElement instanceof HTMLElement
+        ? target.parentElement
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+    if (!candidate) return null;
+    if (candidate.isContentEditable === true) {
+      return candidate.closest?.(".ProseMirror, [contenteditable='true'], [contenteditable='plaintext-only'], [role='textbox']") || candidate;
+    }
+    return candidate.closest?.(editableKeyTargetSelector) || null;
+  };
+
+  const handleWindowCompositionStart = (event) => {
+    imeComposingTarget = resolveEditableKeyTarget(event?.target);
+    imeCompositionEndedTarget = null;
+    imeCompositionEndedAt = -Infinity;
+  };
+
+  const handleWindowCompositionEnd = (event) => {
+    const editable = resolveEditableKeyTarget(event?.target) || imeComposingTarget;
+    imeComposingTarget = null;
+    imeCompositionEndedTarget = editable;
+    imeCompositionEndedAt = Date.now();
+  };
+
+  const collectMatchingElements = (selector) => {
+    const seen = new Set();
+    const result = [];
+    const addAll = (list) => {
+      for (const item of list || []) {
+        if (item && !seen.has(item)) {
+          seen.add(item);
+          result.push(item);
+        }
+      }
+    };
+    addAll(document.querySelectorAll?.(selector));
+    if (!result.length) {
+      addAll(document.body?.querySelectorAll?.(selector));
+      addAll(document.documentElement?.querySelectorAll?.(selector));
+    }
+    return result;
+  };
+
+  const findActiveDictationSubmitButton = () => {
+    for (const candidate of collectMatchingElements("button[aria-label], [role=button]")) {
+      if (!(candidate instanceof HTMLElement) || candidate.isConnected === false) continue;
+      if (candidate.closest?.("[hidden], [aria-hidden='true']")) continue;
+      const label = String(candidate.getAttribute?.("aria-label") || "").replace(/\s+/g, " ").trim();
+      if (label && dictationSubmitLabelPattern.test(label)) return candidate;
+    }
+    return null;
+  };
+
+  const handleWindowCaptureKeyDown = (event) => {
+    if (!event || disposed) return;
+    const key = String(event.key || "");
+    const code = String(event.code || "");
+    const keyCode = Number(event.keyCode ?? event.which ?? 0);
+    const isModifierOnly = key === "Shift" || key === "Control" || key === "Alt" || key === "Meta";
+    const isEnter = key === "Enter" || (
+      (key === "Process" || key === "Unidentified")
+      && (code === "Enter" || code === "NumpadEnter")
+    );
+    const isEscape = key === "Escape" || key === "Esc" || (
+      (key === "Process" || key === "Unidentified")
+      && code === "Escape"
+    );
+    const editable = resolveEditableKeyTarget(event.target);
+    const inActiveComposition = (
+      event.isComposing === true
+      || keyCode === 229
+      || (imeComposingTarget !== null && editable === imeComposingTarget)
+    );
+    let inPostCompositionWindow = false;
+    if (!inActiveComposition && imeCompositionEndedAt !== -Infinity) {
+      const elapsed = Date.now() - imeCompositionEndedAt;
+      if (
+        editable !== null
+        && editable === imeCompositionEndedTarget
+        && elapsed >= 0
+        && elapsed <= imePostCompositionGuardMs
+      ) {
+        inPostCompositionWindow = true;
+      }
+      if (!isModifierOnly) {
+        imeCompositionEndedAt = -Infinity;
+        imeCompositionEndedTarget = null;
+      }
+    }
+    if ((inActiveComposition || inPostCompositionWindow) && editable !== null) {
+      if (isEnter || isEscape) {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
+      }
+      return;
+    }
+
+    if (
+      key !== "Enter"
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+    ) {
+      return;
+    }
+    const submitButton = findActiveDictationSubmitButton();
+    if (!submitButton) return;
+    const focusTarget = event.target instanceof HTMLElement
+      ? event.target
+      : document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    if (focusTarget) {
+      if (focusTarget === submitButton || submitButton.contains?.(focusTarget)) return;
+      const focusedButton = focusTarget.closest?.("button, [role=button]");
+      if (focusedButton) {
+        const focusedLabel = String(focusedButton.getAttribute?.("aria-label") || "").replace(/\s+/g, " ").trim();
+        if (focusedLabel && dictationStopInsertLabelPattern.test(focusedLabel)) return;
+      }
+      const modal = focusTarget.closest?.("dialog, [role='dialog'], [role='alertdialog'], [aria-modal='true']");
+      if (modal && !modal.contains?.(submitButton)) return;
+    }
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    event.stopImmediatePropagation?.();
+    if (
+      !event.repeat
+      && !submitButton.disabled
+      && submitButton.getAttribute?.("aria-busy") !== "true"
+    ) {
+      submitButton.click?.();
+    }
   };
 
   const normalizeMessageId = (value) => {
@@ -2832,13 +2986,215 @@
     return null;
   };
 
+  // #60607 / #61121: 单条/批量硬删除会话时，同步移除关联的内置浏览器侧栏容器与内嵌 <webview>，
+  // 释放后台进程内存与播放中的音频。
+  const browserSidebarWebviewContainerSelector = "[data-browser-sidebar-webview]";
+  const browserSidebarConversationAttribute = "data-browser-sidebar-conversation-id";
+  const normalizeConversationIdValue = (value) => (
+    String(value || "").trim().replace(/^local:/, "").trim()
+  );
+
+  const destroyBrowserWebviewElement = (webview) => {
+    if (!webview || typeof webview !== "object") return;
+    try { webview.setAudioMuted?.(true); } catch {}
+    try { webview.stop?.(); } catch {}
+    try {
+      if (typeof webview.loadURL === "function") webview.loadURL("about:blank");
+    } catch {}
+    try { webview.setAttribute?.("src", "about:blank"); } catch {}
+    try { if ("src" in webview) webview.src = "about:blank"; } catch {}
+    try { webview.remove?.(); } catch {}
+  };
+
+  const cleanupDeletedSessionWebviews = (conversationIds) => {
+    const rawList = Array.isArray(conversationIds) || conversationIds instanceof Set
+      ? [...conversationIds]
+      : [conversationIds];
+    const targetIds = new Set(
+      rawList.map(normalizeConversationIdValue).filter(Boolean),
+    );
+    if (!targetIds.size) return 0;
+    const matchesTargetConversation = (element) => {
+      if (!element || typeof element.getAttribute !== "function") return false;
+      for (const attr of [browserSidebarConversationAttribute, "data-conversation-id"]) {
+        const candidateId = normalizeConversationIdValue(element.getAttribute(attr));
+        if (candidateId && targetIds.has(candidateId)) return true;
+      }
+      return false;
+    };
+    const matchedContainers = new Set();
+    const matchedWebviews = new Set();
+    for (const container of collectMatchingElements(browserSidebarWebviewContainerSelector)) {
+      const innerWebviews = queryWithin(container, "webview");
+      if (matchesTargetConversation(container)) {
+        matchedContainers.add(container);
+        innerWebviews.forEach((webview) => matchedWebviews.add(webview));
+        continue;
+      }
+      const matchingInner = innerWebviews.filter(matchesTargetConversation);
+      if (matchingInner.length) {
+        matchingInner.forEach((webview) => matchedWebviews.add(webview));
+        if (matchingInner.length === innerWebviews.length) {
+          matchedContainers.add(container);
+        }
+      }
+    }
+    for (const webview of collectMatchingElements("webview")) {
+      if (!matchesTargetConversation(webview)) continue;
+      matchedWebviews.add(webview);
+      const container = webview.closest?.(browserSidebarWebviewContainerSelector);
+      if (container) {
+        const remaining = queryWithin(container, "webview").filter(
+          (item) => !matchedWebviews.has(item) && !matchesTargetConversation(item),
+        );
+        if (!remaining.length) matchedContainers.add(container);
+      }
+    }
+    for (const webview of matchedWebviews) {
+      destroyBrowserWebviewElement(webview);
+    }
+    for (const container of matchedContainers) {
+      try { container.remove?.(); } catch {}
+    }
+    return matchedContainers.size || matchedWebviews.size;
+  };
+
+  const extractDeleteDialogSessionIds = (dialogElement) => {
+    const ids = new Set();
+    if (!dialogElement || typeof dialogElement !== "object") return ids;
+    const keys = Object.keys(dialogElement).filter((key) => (
+      key.startsWith("__reactFiber$") || key.startsWith("__reactProps$")
+    ));
+    for (const key of keys) {
+      let current = dialogElement[key];
+      for (let depth = 0; current && depth < 24; depth += 1) {
+        const props = current.memoizedProps ?? current.pendingProps ?? current;
+        if (Array.isArray(props?.threads)) {
+          for (const entry of props.threads) {
+            const id = normalizeConversationIdValue(
+              typeof entry === "string" ? entry : (entry?.threadId ?? entry?.conversationId),
+            );
+            if (id) ids.add(id);
+          }
+        } else {
+          const single = normalizeConversationIdValue(props?.threadId ?? props?.conversationId);
+          const typeName = String(current.type?.displayName || current.type?.name || "");
+          if (single && /delete/i.test(typeName)) ids.add(single);
+        }
+        current = current.return;
+      }
+    }
+    return ids;
+  };
+
+  const collectSidebarTargetSessionIds = (row) => {
+    const ids = new Set();
+    const rows = Array.isArray(row) ? row : [row];
+    for (const entry of rows) {
+      const id = normalizeConversationIdValue(entry?.getAttribute?.("data-app-action-sidebar-thread-id"));
+      if (id) ids.add(id);
+      if (
+        entry?.getAttribute?.("data-app-action-sidebar-thread-selected") === "true"
+        || entry?.getAttribute?.("aria-selected") === "true"
+      ) {
+        for (const selected of collectMatchingElements(
+          '[data-app-action-sidebar-thread-selected="true"][data-app-action-sidebar-thread-id], [aria-selected="true"][data-app-action-sidebar-thread-id]',
+        )) {
+          const selectedId = normalizeConversationIdValue(selected.getAttribute?.("data-app-action-sidebar-thread-id"));
+          if (selectedId) ids.add(selectedId);
+        }
+      }
+    }
+    return ids;
+  };
+
+  const findOpenDeleteDialog = () => {
+    const dialogs = collectMatchingElements("dialog, [role=dialog], [role=alertdialog]")
+      .filter((element) => element instanceof HTMLElement && element.isConnected !== false);
+    return dialogs.at(-1) || null;
+  };
+
+  let pendingSessionDeleteDialog = null;
+  let confirmedSessionDeletes = null;
+
+  const flushConfirmedSessionDeletes = () => {
+    if (!confirmedSessionDeletes) return;
+    const { dialog, sessionIds } = confirmedSessionDeletes;
+    if (!dialog || dialog.isConnected === false || !dialog.parentElement) {
+      confirmedSessionDeletes = null;
+      cleanupDeletedSessionWebviews(sessionIds);
+      return;
+    }
+    const cleaned = [];
+    for (const id of sessionIds) {
+      const stillMounted = collectMatchingElements("[data-app-action-sidebar-thread-id]").some(
+        (thread) => thread.isConnected !== false
+          && Boolean(thread.parentElement)
+          && normalizeConversationIdValue(thread.getAttribute?.("data-app-action-sidebar-thread-id")) === id,
+      );
+      if (!stillMounted) cleaned.push(id);
+    }
+    if (cleaned.length) {
+      cleaned.forEach((id) => sessionIds.delete(id));
+      cleanupDeletedSessionWebviews(cleaned);
+      if (!sessionIds.size) confirmedSessionDeletes = null;
+    }
+  };
+
+  const recordDeleteDialogConfirmation = (dialog) => {
+    const ids = extractDeleteDialogSessionIds(dialog);
+    if (pendingSessionDeleteDialog?.dialog === dialog) {
+      pendingSessionDeleteDialog.sessionIds.forEach((id) => ids.add(id));
+    }
+    if (!ids.size) return;
+    confirmedSessionDeletes = { dialog, sessionIds: ids };
+    pendingSessionDeleteDialog = null;
+    Promise.resolve().then(() => {
+      if (!disposed) flushConfirmedSessionDeletes();
+    });
+    window.setTimeout?.(() => {
+      if (!disposed) flushConfirmedSessionDeletes();
+    }, 0);
+  };
+
+  const handleDeleteDialogSubmitCapture = (event) => {
+    if (disposed) return;
+    const target = event?.target instanceof HTMLElement ? event.target : null;
+    const dialog = target?.closest?.("dialog, [role=dialog], [role=alertdialog]");
+    if (!dialog) return;
+    recordDeleteDialogConfirmation(dialog);
+  };
+
+  const handleDeleteDialogClickCapture = (event) => {
+    if (disposed) return;
+    const target = event?.target instanceof HTMLElement ? event.target : event?.target?.parentElement;
+    const button = target?.closest?.("button, [role=button]");
+    if (!(button instanceof HTMLElement) || button.disabled) return;
+    const dialog = button.closest?.("dialog, [role=dialog], [role=alertdialog]");
+    if (!dialog) return;
+    const isSubmitButton = button.getAttribute("type") === "submit" || button.type === "submit";
+    const label = String(button.getAttribute("aria-label") || button.textContent || "").replace(/\s+/g, " ").trim();
+    if (!isSubmitButton && !/^(?:delete|删除|刪除|永久删除|永久刪除)$/i.test(label)) return;
+    recordDeleteDialogConfirmation(dialog);
+  };
+
   const openOfficialSessionDelete = async (row) => {
     if (disposed) return false;
+    const targetRow = Array.isArray(row) ? row[0] : row;
+    const targetIds = collectSidebarTargetSessionIds(row);
     try {
-      const menuItem = findMenuItemById(await sidebarRowMenuItems(row), sessionDeleteMenuItemId);
+      const menuItem = findMenuItemById(await sidebarRowMenuItems(targetRow), sessionDeleteMenuItemId);
       if (disposed) return false;
       if (typeof menuItem?.onSelect === "function" && !menuItem.disabled) {
+        const dialogBefore = findOpenDeleteDialog();
         await menuItem.onSelect();
+        const dialogAfter = findOpenDeleteDialog();
+        if (dialogAfter && dialogAfter !== dialogBefore) {
+          extractDeleteDialogSessionIds(dialogAfter).forEach((id) => targetIds.add(id));
+          pendingSessionDeleteDialog = { dialog: dialogAfter, sessionIds: targetIds };
+        } else if (targetIds.size) {
+          cleanupDeletedSessionWebviews(targetIds);
+        }
         return true;
       }
     } catch {
@@ -4617,11 +4973,7 @@
       "data-message-author-role",
       "data-testid",
       "data-above-composer-conversation-id",
-      "data-session-id",
       "data-conversation-id",
-      "data-thread-id",
-      "data-request-user-input-auto-resolution-conversation-id",
-      "data-response-annotation-conversation",
       "data-app-action-sidebar-thread-active",
       "data-app-action-sidebar-thread-host-id",
       "data-app-action-sidebar-thread-id",
@@ -4732,14 +5084,24 @@
     updateSessionMutationPending();
     pendingThreadUpdatedAtRefs.clear();
     threadUpdatedAtRows.clear();
+    imeComposingTarget = null;
+    imeCompositionEndedTarget = null;
+    imeCompositionEndedAt = -Infinity;
+    pendingSessionDeleteDialog = null;
+    confirmedSessionDeletes = null;
     // Native-operation timeout promises must still settle after disposal.
     // Resource cleanup timers (toast, file input, object URL) also finish.
     if (window.__codeyShowRuntimeToast === showRuntimeToast) delete window.__codeyShowRuntimeToast;
     if (window.__codeyReadAccountRateLimits === readAccountRateLimits) delete window.__codeyReadAccountRateLimits;
     if (window.__codeyReloadMcpServers === reloadMcpServers) delete window.__codeyReloadMcpServers;
+    if (window.__codeyCleanupDeletedSessionWebviews === cleanupDeletedSessionWebviews) {
+      delete window.__codeyCleanupDeletedSessionWebviews;
+    }
     window.__codeySessionToolsInjectLoaded = false;
   };
+  window.__codeyCleanupDeletedSessionWebviews = cleanupDeletedSessionWebviews;
   window.__codeySessionToolsInstall = {
+    cleanupDeletedSessionWebviews,
     dispose: disposeInstall,
     openOfficialSessionDelete,
     tooltip: {
@@ -4791,13 +5153,25 @@
       [document, "visibilitychange", reconcileOnVisible, undefined],
       [document, "pointerdown", wakeSessionWatcher, pointerdownOptions],
       [document, "keydown", wakeSessionWatcherFromKey, true],
+      [document, "submit", handleDeleteDialogSubmitCapture, true],
+      [document, "click", handleDeleteDialogClickCapture, true],
     );
     document.addEventListener("visibilitychange", wakeSessionWatcher);
     document.addEventListener("visibilitychange", reconcileOnVisible);
     document.addEventListener("pointerdown", wakeSessionWatcher, pointerdownOptions);
     document.addEventListener("keydown", wakeSessionWatcherFromKey, true);
+    document.addEventListener("submit", handleDeleteDialogSubmitCapture, true);
+    document.addEventListener("click", handleDeleteDialogClickCapture, true);
   }
   if (typeof window.addEventListener === "function") {
+    installedListeners.push(
+      [window, "compositionstart", handleWindowCompositionStart, true],
+      [window, "compositionend", handleWindowCompositionEnd, true],
+      [window, "keydown", handleWindowCaptureKeyDown, true],
+    );
+    window.addEventListener("compositionstart", handleWindowCompositionStart, true);
+    window.addEventListener("compositionend", handleWindowCompositionEnd, true);
+    window.addEventListener("keydown", handleWindowCaptureKeyDown, true);
     for (const type of ["focus", "pageshow"]) {
       for (const handler of [wakeSessionWatcher, refreshThreadUpdatedTimesOnReturn, reconcileStaleCompletedTask]) {
         installedListeners.push([window, type, handler, undefined]);

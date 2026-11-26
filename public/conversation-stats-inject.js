@@ -16,11 +16,7 @@
   // 会话元素属性、活动侧边栏项，最后退回 URL。
   const sessionIdAttributes = [
     conversationAttribute,
-    "data-session-id",
     "data-conversation-id",
-    "data-thread-id",
-    "data-request-user-input-auto-resolution-conversation-id",
-    "data-response-annotation-conversation",
   ];
   const sessionAttributeSelector = sessionIdAttributes
     .map((attribute) => `[${attribute}]`)
@@ -1069,7 +1065,7 @@
     const activeComposerHost = () => !statsElement?.hidden && composerHost?.isConnected ? composerHost : null;
     const inComposer = (target) => Boolean(target && !containsStats(target) && activeComposerHost()?.contains(target));
     listen(document, "keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && inComposer(event.target)) {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && inComposer(event.target)) {
         wake(SUBMIT_POLL_DELAY_MS, true);
       }
     }, true);

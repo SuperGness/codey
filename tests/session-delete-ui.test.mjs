@@ -20,6 +20,14 @@ class FakeElement extends FakeElementCore {
   constructor(tagName = "div", attributes = {}) {
     super(tagName, { attributes });
     this.innerHTML = "";
+    this.isContentEditable = attributes.contenteditable === "true";
+  }
+
+  setAttribute(name, value) {
+    super.setAttribute(name, value);
+    if (name === "contenteditable") {
+      this.isContentEditable = String(value) === "true";
+    }
   }
 
   async click() {
@@ -141,13 +149,33 @@ function loadInjection({
   const bridgeCalls = [];
   const timers = new Map();
   let nextTimerId = 0;
+  let nowMs = 1_700_000_000_000;
   const location = { pathname: "/", reload() {}, search: "" };
   const documentListeners = new Map();
+  const windowListeners = new Map();
+  const addTrackedListener = (map, type, listener, options) => {
+    const entries = map.get(type) || [];
+    entries.push({
+      capture: options === true || Boolean(options?.capture),
+      listener,
+    });
+    map.set(type, entries);
+  };
+  const removeTrackedListener = (map, type, listener) => {
+    const entries = map.get(type);
+    if (!entries) return;
+    if (!listener) {
+      map.delete(type);
+      return;
+    }
+    map.set(type, entries.filter((entry) => entry.listener !== listener));
+  };
   const document = {
+    activeElement: null,
     body,
     documentElement,
-    addEventListener(type, listener) {
-      documentListeners.set(type, listener);
+    addEventListener(type, listener, options) {
+      addTrackedListener(documentListeners, type, listener, options);
     },
     createElement(tagName) {
       return new FakeElement(tagName);
@@ -181,13 +209,17 @@ function loadInjection({
       if (selector === "button[aria-label]") {
         return body.querySelectorAll("button").filter((button) => button.hasAttribute("aria-label"));
       }
+      if (selector === "button[aria-label], [role=button]") {
+        return body.querySelectorAll("button, [role=button]")
+          .filter((el) => el.hasAttribute("aria-label") || el.getAttribute("role") === "button");
+      }
       if (selector === "button, [role=button], a") {
         return body.querySelectorAll("button, [role=button], a");
       }
-      return [];
+      return body.querySelectorAll(selector);
     },
-    removeEventListener(type) {
-      documentListeners.delete(type);
+    removeEventListener(type, listener) {
+      removeTrackedListener(documentListeners, type, listener);
     },
   };
   const window = {
@@ -196,7 +228,9 @@ function loadInjection({
       if (bridge) return bridge(path, payload);
       return { status: "ok" };
     },
-    addEventListener() {},
+    addEventListener(type, listener, options) {
+      addTrackedListener(windowListeners, type, listener, options);
+    },
     clearTimeout(id) { timers.delete(id); },
     dispatchEvent() {},
     innerHeight: 800,
@@ -210,7 +244,9 @@ function loadInjection({
       length: 0,
       setItem: () => {},
     },
-    removeEventListener() {},
+    removeEventListener(type, listener) {
+      removeTrackedListener(windowListeners, type, listener);
+    },
     setTimeout(callback, delay = 0) {
       const id = ++nextTimerId;
       if (delay > 1000) timers.set(id, { callback, delay });
@@ -228,11 +264,16 @@ function loadInjection({
       this.detail = init?.detail;
     }
   }
+  class ControlledDate extends Date {
+    static now() {
+      return nowMs;
+    }
+  }
 
   vm.runInNewContext(source, {
     Blob,
     CustomEvent,
-    Date,
+    Date: ControlledDate,
     Error,
     HTMLElement: FakeElement,
     MouseEvent: mouseEvent ?? undefined,
@@ -244,14 +285,55 @@ function loadInjection({
     location,
     window,
   });
+  const dispatchWindowEvent = (type, init = {}) => {
+    let defaultPrevented = false;
+    let propagationStopped = false;
+    let immediateStopped = false;
+    const event = {
+      type,
+      ...init,
+      get defaultPrevented() {
+        return defaultPrevented;
+      },
+      preventDefault() {
+        defaultPrevented = true;
+      },
+      stopPropagation() {
+        propagationStopped = true;
+      },
+      stopImmediatePropagation() {
+        propagationStopped = true;
+        immediateStopped = true;
+      },
+    };
+    for (const { listener } of windowListeners.get(type) || []) {
+      if (immediateStopped) break;
+      listener(event);
+    }
+    return {
+      defaultPrevented,
+      immediateStopped,
+      propagationStopped,
+    };
+  };
+  const dispatchDocumentEvent = (type, init = {}) => {
+    for (const { listener } of documentListeners.get(type) || []) {
+      listener({ type, ...init });
+    }
+  };
   return {
     actionBar,
+    advanceNow(ms) {
+      nowMs += ms;
+    },
     archiveButton,
     archiveTooltip,
     hoverCard,
     pinButton,
     bridgeCalls,
     dispatched,
+    dispatchDocumentEvent,
+    dispatchWindowEvent,
     document,
     documentElement,
     project,
@@ -449,4 +531,211 @@ test("mounting multiple sidebar thread rows reuses wrapper placement without per
     assert.deepEqual(actionBar.children, [archiveButton, deleteButton]);
     assert.equal(actionBar.getAttribute("data-codey-session-action-row"), "true");
   }
+});
+
+function appendBrowserWebview(body, conversationId, tabId = "tab-1") {
+  const container = new FakeElement("div", {
+    "data-browser-sidebar-webview": `${conversationId}:${tabId}`,
+  });
+  const webview = new FakeElement("webview", {
+    "data-browser-sidebar-browser-tab-id": tabId,
+    "data-browser-sidebar-conversation-id": conversationId,
+    src: "https://localhost:3000",
+  });
+  webview.src = "https://localhost:3000";
+  webview.mutedCalls = [];
+  webview.stopped = 0;
+  webview.loadedUrls = [];
+  webview.setAudioMuted = (muted) => webview.mutedCalls.push(muted);
+  webview.stop = () => { webview.stopped += 1; };
+  webview.loadURL = (url) => webview.loadedUrls.push(url);
+  const overlay = new FakeElement("div", {
+    "data-browser-sidebar-cursor-overlay-host": `${conversationId}:${tabId}`,
+  });
+  container.append(webview, overlay);
+  body.appendChild(container);
+  return { container, overlay, webview };
+}
+
+test("destroys and removes residual browser <webview> containers on single and batch session deletion", async () => {
+  const runtime = loadInjection({
+    menuItems: [
+      deleteMenuItem(() => {
+        // Direct delete removes the thread row without mounting a dialog.
+        runtime.thread.remove();
+      }),
+    ],
+  });
+  const targetBrowser = appendBrowserWebview(runtime.document.body, "thread-1", "tab-a");
+  const survivorBrowser = appendBrowserWebview(runtime.document.body, "thread-keep", "tab-b");
+
+  await runtime.thread.querySelector("[data-codey-session-delete]").click();
+  await Promise.resolve();
+
+  assert.deepEqual(targetBrowser.webview.mutedCalls, [true]);
+  assert.equal(targetBrowser.webview.stopped, 1);
+  assert.equal(targetBrowser.webview.src, "about:blank");
+  assert.equal(targetBrowser.webview.parentElement, null);
+  assert.equal(targetBrowser.container.parentElement, null);
+  assert.equal(survivorBrowser.container.parentElement, runtime.document.body);
+  assert.equal(survivorBrowser.webview.stopped, 0);
+
+  // Batch DeleteThreadDialog confirmation cleans up all deleted threads while sparing cancelled ones.
+  const batchA = appendBrowserWebview(runtime.document.body, "batch-1", "tab-1");
+  const batchB = appendBrowserWebview(runtime.document.body, "batch-2", "tab-2");
+  const dialog = new FakeElement("div", { role: "dialog" });
+  dialog.__reactFiber$test = {
+    memoizedProps: {},
+    return: {
+      memoizedProps: {
+        threads: [
+          { hostId: "local", threadId: "local:batch-1" },
+          { hostId: "local", threadId: "batch-2" },
+        ],
+      },
+      type: function DeleteThreadDialog() {},
+    },
+  };
+  const form = dialog.appendChild(new FakeElement("form"));
+  const cancelBtn = form.appendChild(new FakeElement("button", { type: "button" }));
+  cancelBtn.textContent = "Cancel";
+  const confirmBtn = form.appendChild(new FakeElement("button", { type: "submit" }));
+  confirmBtn.textContent = "Delete";
+  runtime.document.body.appendChild(dialog);
+
+  // Clicking Cancel closes the dialog without touching any webviews.
+  runtime.dispatchDocumentEvent("click", { target: cancelBtn });
+  dialog.remove();
+  await Promise.resolve();
+  assert.equal(batchA.container.parentElement, runtime.document.body);
+  assert.equal(batchB.container.parentElement, runtime.document.body);
+
+  // Submitting the DeleteThreadDialog form destroys all batch threads' webviews once the dialog closes.
+  runtime.document.body.appendChild(dialog);
+  runtime.dispatchDocumentEvent("submit", { target: form });
+  dialog.remove();
+  await Promise.resolve();
+
+  assert.equal(batchA.container.parentElement, null);
+  assert.equal(batchB.container.parentElement, null);
+  assert.equal(batchA.webview.stopped, 1);
+  assert.equal(batchB.webview.stopped, 1);
+  assert.equal(survivorBrowser.container.parentElement, runtime.document.body);
+});
+
+test("blocks CJK IME Enter submit and Escape turn-interrupt during composition and 60ms post-compositionend window", () => {
+  const runtime = loadInjection();
+  const composer = new FakeElement("div", {
+    class: "ProseMirror",
+    contenteditable: "true",
+    role: "textbox",
+  });
+  runtime.document.body.appendChild(composer);
+
+  // 1. Active composition (isComposing: true) blocks Enter and Escape in composer.
+  runtime.dispatchWindowEvent("compositionstart", { target: composer });
+  const composingEnter = runtime.dispatchWindowEvent("keydown", {
+    isComposing: true,
+    key: "Enter",
+    keyCode: 13,
+    target: composer,
+  });
+  assert.equal(composingEnter.defaultPrevented, true);
+  assert.equal(composingEnter.immediateStopped, true);
+
+  const composingEscape = runtime.dispatchWindowEvent("keydown", {
+    isComposing: true,
+    key: "Escape",
+    keyCode: 27,
+    target: composer,
+  });
+  assert.equal(composingEscape.defaultPrevented, true);
+  assert.equal(composingEscape.immediateStopped, true);
+
+  // 2. Chromium/macOS keyCode 229 with isComposing: false is also guarded.
+  const key229Enter = runtime.dispatchWindowEvent("keydown", {
+    code: "Enter",
+    isComposing: false,
+    key: "Process",
+    keyCode: 229,
+    target: composer,
+  });
+  assert.equal(key229Enter.defaultPrevented, true);
+  assert.equal(key229Enter.immediateStopped, true);
+
+  // 3. Within 60ms after compositionend, trailing Enter is blocked once; subsequent Enter passes through.
+  runtime.dispatchWindowEvent("compositionend", { target: composer });
+  runtime.advanceNow(35);
+  const postEndEnter = runtime.dispatchWindowEvent("keydown", {
+    isComposing: false,
+    key: "Enter",
+    keyCode: 13,
+    target: composer,
+  });
+  assert.equal(postEndEnter.defaultPrevented, true);
+  assert.equal(postEndEnter.immediateStopped, true);
+
+  const secondNormalEnter = runtime.dispatchWindowEvent("keydown", {
+    isComposing: false,
+    key: "Enter",
+    keyCode: 13,
+    target: composer,
+  });
+  assert.equal(secondNormalEnter.defaultPrevented, false);
+  assert.equal(secondNormalEnter.propagationStopped, false);
+
+  // 4. After >60ms post-compositionend, normal Escape and Enter pass through untouched.
+  runtime.dispatchWindowEvent("compositionstart", { target: composer });
+  runtime.dispatchWindowEvent("compositionend", { target: composer });
+  runtime.advanceNow(85);
+  const lateEscape = runtime.dispatchWindowEvent("keydown", {
+    isComposing: false,
+    key: "Escape",
+    keyCode: 27,
+    target: composer,
+  });
+  assert.equal(lateEscape.defaultPrevented, false);
+  assert.equal(lateEscape.propagationStopped, false);
+});
+
+test("prevents Enter on focused dictation Cancel button from discarding voice and triggers Transcribe and send when ready", () => {
+  const runtime = loadInjection();
+  const dictationBar = runtime.document.body.appendChild(new FakeElement("div"));
+  const cancelButton = dictationBar.appendChild(new FakeElement("button", {
+    "aria-label": "Cancel",
+  }));
+  let cancelClicks = 0;
+  cancelButton.addEventListener("click", () => { cancelClicks += 1; });
+
+  const submitButton = dictationBar.appendChild(new FakeElement("button", {
+    "aria-busy": "true",
+    "aria-label": "Transcribe and send",
+  }));
+  let submitClicks = 0;
+  submitButton.addEventListener("click", () => { submitClicks += 1; });
+  runtime.document.activeElement = cancelButton;
+
+  // While transcribing (aria-busy="true" and Cancel autoFocused), Enter must NOT cancel or double-submit.
+  const busyEnter = runtime.dispatchWindowEvent("keydown", {
+    key: "Enter",
+    keyCode: 13,
+    target: cancelButton,
+  });
+  assert.equal(busyEnter.defaultPrevented, true);
+  assert.equal(busyEnter.immediateStopped, true);
+  assert.equal(cancelClicks, 0);
+  assert.equal(submitClicks, 0);
+
+  // Once ready (not busy, enabled), pressing Enter on Cancel or composer submits instead of cancelling.
+  submitButton.setAttribute("aria-busy", "false");
+  submitButton.setAttribute("aria-label", "转录并发送");
+  const readyEnter = runtime.dispatchWindowEvent("keydown", {
+    key: "Enter",
+    keyCode: 13,
+    target: cancelButton,
+  });
+  assert.equal(readyEnter.defaultPrevented, true);
+  assert.equal(readyEnter.immediateStopped, true);
+  assert.equal(cancelClicks, 0);
+  assert.equal(submitClicks, 1);
 });
