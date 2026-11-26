@@ -64,6 +64,7 @@ pub(crate) fn responses_to_anthropic_messages_request(
     if max_tokens == 0 {
         anyhow::bail!("max_output_tokens 必须大于 0");
     }
+    let requires_adaptive_thinking = claude_requires_adaptive_thinking(&model);
     let mut anthropic = serde_json::Map::from_iter([
         ("model".to_string(), Value::String(model)),
         ("messages".to_string(), Value::Array(messages)),
@@ -101,12 +102,28 @@ pub(crate) fn responses_to_anthropic_messages_request(
     {
         anthropic.insert("metadata".to_string(), json!({"user_id":user_id}));
     }
-    if let Some(effort) = chat
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        .map(normalize_anthropic_effort)
-    {
-        anthropic.insert("output_config".to_string(), json!({"effort":effort}));
+    let explicit_thinking = body
+        .get("thinking")
+        .or_else(|| chat.get("thinking"))
+        .filter(|value| !value.is_null());
+    if let Some(thinking) = explicit_thinking {
+        anthropic.insert("thinking".to_string(), thinking.clone());
+    }
+    if let Some(raw_effort) = chat.get("reasoning_effort").and_then(Value::as_str) {
+        let trimmed = raw_effort.trim();
+        if trimmed.eq_ignore_ascii_case("none") {
+            if requires_adaptive_thinking {
+                if explicit_thinking.is_none() {
+                    anthropic.insert("thinking".to_string(), json!({"type":"adaptive"}));
+                }
+                anthropic.insert("output_config".to_string(), json!({"effort":"low"}));
+            }
+        } else if let Some(effort) = normalize_anthropic_effort(trimmed) {
+            if explicit_thinking.is_none() {
+                anthropic.insert("thinking".to_string(), json!({"type":"adaptive"}));
+            }
+            anthropic.insert("output_config".to_string(), json!({"effort":effort}));
+        }
     }
 
     let parallel_tool_calls = chat
@@ -473,21 +490,23 @@ pub(crate) fn anthropic_stop_sequences(stop: &Value) -> Result<Value> {
     }
 }
 
-pub(crate) fn normalize_anthropic_effort(effort: &str) -> &'static str {
+pub(crate) fn normalize_anthropic_effort(effort: &str) -> Option<&'static str> {
     let effort = effort.trim();
     // `minimal` 已不再作为界面档位提供，但旧会话和自定义档位的 value 仍可能带上
-    // 它；它按最低推理强度处理，落入默认分支会被静默提升为高强度。
+    // 它；它按最低推理强度处理，不能落入高强度；`none` 单独由调用方按模型代际处理。
     if effort.eq_ignore_ascii_case("low") || effort.eq_ignore_ascii_case("minimal") {
-        "low"
+        Some("low")
     } else if effort.eq_ignore_ascii_case("medium") {
-        "medium"
+        Some("medium")
+    } else if effort.eq_ignore_ascii_case("high") {
+        Some("high")
     } else if effort.eq_ignore_ascii_case("max")
         || effort.eq_ignore_ascii_case("xhigh")
         || effort.eq_ignore_ascii_case("ultra")
     {
-        "max"
+        Some("max")
     } else {
-        "high"
+        None
     }
 }
 
@@ -620,5 +639,116 @@ mod tests {
             headers.get("anthropic-beta").unwrap(),
             "prompt-caching-2024-07-31, context-1m-2025-08-07"
         );
+    }
+
+    #[test]
+    fn anthropic_effort_writes_adaptive_thinking_and_handles_none_by_generation() {
+        for (raw, expected) in [
+            ("minimal", "low"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "max"),
+            ("ultra", "max"),
+            ("max", "max"),
+        ] {
+            let anthropic = responses_to_anthropic_messages_body(&json!({
+                "model": "claude-sonnet-4-5",
+                "input": "hello",
+                "reasoning": {"effort": raw},
+                "max_output_tokens": 16_000,
+            }))
+            .unwrap();
+            assert_eq!(
+                anthropic["thinking"],
+                json!({"type": "adaptive"}),
+                "effort={raw}"
+            );
+            assert_eq!(
+                anthropic["output_config"],
+                json!({"effort": expected}),
+                "effort={raw}"
+            );
+        }
+
+        // 显式自带 thinking 时不覆盖原字段。
+        let explicit = responses_to_anthropic_messages_body(&json!({
+            "model": "claude-opus-4-6",
+            "input": "hello",
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "reasoning": {"effort": "high"},
+            "max_output_tokens": 16_000,
+        }))
+        .unwrap();
+        assert_eq!(
+            explicit["thinking"],
+            json!({"type": "enabled", "budget_tokens": 4096})
+        );
+        assert_eq!(explicit["output_config"], json!({"effort": "high"}));
+
+        // 强制自适应思考代际在 effort="none" 时降级为 adaptive + low，避免 400。
+        for mandatory_model in [
+            "claude-opus-5.5",
+            "claude-sonnet-5-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4.6",
+            "claude-4-6-opus",
+            "claude-fable-5",
+            "claude-mythos",
+            "relay/claude-opus-5[1m]",
+        ] {
+            assert!(
+                claude_requires_adaptive_thinking(mandatory_model),
+                "{mandatory_model}"
+            );
+            for none_variant in ["none", "NONE", " none "] {
+                let anthropic = responses_to_anthropic_messages_body(&json!({
+                    "model": mandatory_model,
+                    "input": "hello",
+                    "reasoning": {"effort": none_variant},
+                }))
+                .unwrap();
+                assert_eq!(
+                    anthropic["thinking"],
+                    json!({"type": "adaptive"}),
+                    "{mandatory_model} {none_variant}"
+                );
+                assert_eq!(
+                    anthropic["output_config"],
+                    json!({"effort": "low"}),
+                    "{mandatory_model} {none_variant}"
+                );
+            }
+        }
+
+        // 可关闭思考型号在 effort="none" 时不写 thinking 与 output_config，绝不反向抬升为 high。
+        for optional_model in [
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-opus-4-1-20250805",
+            "claude-3-7-sonnet-20250219",
+            "claude-haiku-4-5",
+            "claude-sonnet-test",
+            "deepseek-v4",
+        ] {
+            assert!(
+                !claude_requires_adaptive_thinking(optional_model),
+                "{optional_model}"
+            );
+            let anthropic = responses_to_anthropic_messages_body(&json!({
+                "model": optional_model,
+                "input": "hello",
+                "reasoning": {"effort": "none"},
+            }))
+            .unwrap();
+            assert!(
+                anthropic.get("thinking").is_none(),
+                "{optional_model}: {anthropic}"
+            );
+            assert!(
+                anthropic.get("output_config").is_none(),
+                "{optional_model}: {anthropic}"
+            );
+        }
     }
 }

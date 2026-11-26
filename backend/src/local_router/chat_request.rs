@@ -578,6 +578,34 @@ fn claude_output_token_cap(model: &str) -> Option<u64> {
     })
 }
 
+/// 识别强制要求自适应思考（不能关闭 thinking）的 Claude 代际：
+/// Claude Opus/Sonnet 4.6+、5.x 及 Fable/Mythos 必须携带 `thinking: {"type": "adaptive"}`，
+/// 若缺失或关闭会触发上游 `400 requires adaptive thinking`。
+pub(crate) fn claude_requires_adaptive_thinking(model: &str) -> bool {
+    let tokens = claude_model_tokens(model);
+    if !tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "claude" | "fable" | "mythos"))
+    {
+        return false;
+    }
+    let Some(index) = tokens.iter().position(|token| {
+        matches!(
+            token.as_str(),
+            "opus" | "sonnet" | "haiku" | "fable" | "mythos"
+        )
+    }) else {
+        return false;
+    };
+    match tokens[index].as_str() {
+        "fable" | "mythos" => true,
+        "opus" | "sonnet" => version_after(&tokens, index)
+            .or_else(|| version_before(&tokens, index))
+            .is_some_and(|(major, minor)| major >= 5 || (major == 4 && minor >= 6)),
+        _ => false,
+    }
+}
+
 fn claude_model_tokens(model: &str) -> Vec<String> {
     let trimmed = model.trim();
     let without_marker = strip_anthropic_context_1m_model(trimmed).unwrap_or(trimmed);
