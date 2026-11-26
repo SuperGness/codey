@@ -202,6 +202,7 @@ pub(crate) struct ResponsesSseRewriter<'a> {
     validate_terminal: bool,
     terminal: bool,
     retry_advice: Option<&'a ResponseRetryAdvice>,
+    rejected_reasoning_recorder: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     buffer: Vec<u8>,
     cursor: SseCursor,
     forwarded: usize,
@@ -249,6 +250,7 @@ impl<'a> ResponsesSseRewriter<'a> {
             validate_terminal: false,
             terminal: false,
             retry_advice,
+            rejected_reasoning_recorder: None,
             buffer: Vec::new(),
             cursor: SseCursor::default(),
             forwarded: 0,
@@ -258,6 +260,14 @@ impl<'a> ResponsesSseRewriter<'a> {
 
     pub(crate) fn with_terminal_validation(mut self) -> Self {
         self.validate_terminal = true;
+        self
+    }
+
+    pub(crate) fn with_rejected_reasoning_recorder(
+        mut self,
+        recorder: &'a (dyn Fn(&str) + Send + Sync),
+    ) -> Self {
+        self.rejected_reasoning_recorder = Some(recorder);
         self
     }
 
@@ -401,7 +411,9 @@ impl<'a> ResponsesSseRewriter<'a> {
             return passthrough();
         }
         let check_terminal = self.validate_terminal && !self.terminal;
-        if !check_terminal && !self.normalize_failures && self.response_fix.is_none() {
+        let observe_failures =
+            self.normalize_failures || self.rejected_reasoning_recorder.is_some();
+        if !check_terminal && !observe_failures && self.response_fix.is_none() {
             return passthrough();
         }
         let event_kind = match serde_json::from_str::<ResponsesEventKind<'_>>(&data) {
@@ -416,7 +428,7 @@ impl<'a> ResponsesSseRewriter<'a> {
         if check_terminal {
             self.terminal |= is_terminal_responses_sse_event(event_kind.kind.as_ref());
         }
-        if !self.normalize_failures && self.response_fix.is_none() {
+        if !observe_failures && self.response_fix.is_none() {
             return passthrough();
         }
         if self.response_fix.is_none() {
@@ -429,6 +441,11 @@ impl<'a> ResponsesSseRewriter<'a> {
         let Ok(mut event) = serde_json::from_str::<Value>(&data) else {
             return passthrough();
         };
+        if let Some(recorder) = self.rejected_reasoning_recorder
+            && let Some(item_id) = responses_event_rejected_reasoning_item(&event)
+        {
+            recorder(item_id);
+        }
         let mut changed =
             self.normalize_failures && normalize_response_failure(&mut event, self.retry_advice);
         if let Some(fix) = self.response_fix {
@@ -820,5 +837,25 @@ mod tests {
         let event = rewritten_event(&rewritten);
         assert_eq!(event["type"], "response.function_call_arguments.done");
         assert_eq!(event["arguments"], "{\"n\":1}");
+    }
+
+    #[test]
+    fn responses_rewriter_records_rejected_reasoning_before_failure_normalization() {
+        let recorded = Mutex::new(Vec::<String>::new());
+        let record_cb = |id: &str| {
+            recorded.lock().unwrap().push(id.to_string());
+        };
+        let mut rewriter = ResponsesSseRewriter::new(None, true, None)
+            .with_terminal_validation()
+            .with_rejected_reasoning_recorder(&record_cb);
+        let frame = b"event: error\ndata: {\"type\":\"error\",\"status\":400,\"error\":{\"code\":\"invalid_encrypted_content\",\"message\":\"The encrypted content for item rs_sse_unit_01 could not be verified.\"}}\n\n";
+        let rewritten = rewriter.push(frame).unwrap();
+        let event = rewritten_event(&rewritten);
+        assert_eq!(event["type"], "response.failed");
+        assert_eq!(event["response"]["error"]["code"], "invalid_prompt");
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            &["rs_sse_unit_01".to_string()]
+        );
     }
 }

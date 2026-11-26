@@ -40,26 +40,108 @@ fn rejected_reasoning_items() -> std::sync::MutexGuard<'static, RejectedReasonin
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// `invalid_encrypted_content` 只在消息正文里给出 item id，例如
-/// "The encrypted content for item rs_… could not be verified."
-pub(crate) fn rejected_reasoning_item_id(error: &Value) -> Option<&str> {
-    if error.get("code").and_then(Value::as_str) != Some("invalid_encrypted_content") {
-        return None;
-    }
-    let id = error
-        .get("message")
-        .and_then(Value::as_str)?
-        .split_once("for item ")?
-        .1
-        .split_whitespace()
-        .next()?
-        .trim_end_matches(['.', ',', ':', ';']);
+const ITEM_ID_TRIM_CHARS: [char; 11] = ['.', ',', ':', ';', '\'', '"', '`', '(', ')', '[', ']'];
+
+fn valid_reasoning_item_id(candidate: &str) -> Option<&str> {
+    let id = candidate.trim_matches(ITEM_ID_TRIM_CHARS);
     (!id.is_empty()
         && id.len() <= MAX_REASONING_ITEM_ID_BYTES
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
     .then_some(id)
+}
+
+fn valid_rs_reasoning_item_id(candidate: &str) -> Option<&str> {
+    valid_reasoning_item_id(candidate).filter(|id| id.starts_with("rs_") && id.len() > 3)
+}
+
+fn extract_for_item_id(message: &str) -> Option<&str> {
+    let rest = message.split_once("for item ")?.1;
+    let token = rest.split_whitespace().next()?;
+    valid_reasoning_item_id(token)
+}
+
+fn extract_unique_rs_item_id(message: &str) -> Option<&str> {
+    if let Some(id) = extract_for_item_id(message).filter(|id| id.starts_with("rs_") && id.len() > 3)
+    {
+        return Some(id);
+    }
+    let mut found: Option<&str> = None;
+    for raw_token in message.split(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '\'' | '"' | '`' | '(' | ')' | '[' | ']' | ',' | ';')
+    }) {
+        let token = raw_token.trim_end_matches(['.', ':']);
+        let Some(id) = valid_rs_reasoning_item_id(token) else {
+            continue;
+        };
+        match found {
+            None => found = Some(id),
+            Some(existing) if existing == id => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+fn message_describes_encrypted_decode_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("encrypted")
+        && [
+            "decode",
+            "decoding",
+            "decrypt",
+            "decrypting",
+            "corrupted",
+            "malformed",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// 识别上游明确拒绝的 reasoning 项 ID：
+/// 1. `invalid_encrypted_content` 密文校验失败（如 `"The encrypted content for item rs_… could not be verified."`）；
+/// 2. 加密输出/密文解码报错（带明确 `rs_` item ID）；
+/// 3. `rs_` 推理项的 `item_conflict` 冲突（带明确 `rs_` item ID）。
+pub(crate) fn rejected_reasoning_item_id(error: &Value) -> Option<&str> {
+    let codes = [
+        error.get("code").and_then(Value::as_str),
+        error.pointer("/codey/originalCode").and_then(Value::as_str),
+        error.pointer("/codey/upstreamCode").and_then(Value::as_str),
+        error.get("type").and_then(Value::as_str),
+    ];
+    let has_code = |expected: &str| codes.into_iter().flatten().any(|code| code == expected);
+    let explicit_item_id = error.get("item_id").and_then(Value::as_str);
+    let message = error.get("message").and_then(Value::as_str);
+
+    if has_code("invalid_encrypted_content") {
+        return explicit_item_id
+            .and_then(valid_reasoning_item_id)
+            .or_else(|| message.and_then(extract_for_item_id))
+            .or_else(|| message.and_then(extract_unique_rs_item_id));
+    }
+
+    if has_code("item_conflict") {
+        return explicit_item_id
+            .and_then(valid_rs_reasoning_item_id)
+            .or_else(|| message.and_then(extract_unique_rs_item_id));
+    }
+
+    let explicit_decode_code = [
+        "encrypted_content_decode_error",
+        "invalid_encrypted_output",
+        "decryption_failed",
+        "failed_to_decode_encrypted_content",
+    ]
+    .iter()
+    .any(|code| has_code(code));
+    if explicit_decode_code || message.is_some_and(message_describes_encrypted_decode_failure) {
+        return explicit_item_id
+            .and_then(valid_rs_reasoning_item_id)
+            .or_else(|| message.and_then(extract_unique_rs_item_id));
+    }
+
+    None
 }
 
 pub(crate) fn responses_event_rejected_reasoning_item(event: &Value) -> Option<&str> {
@@ -73,7 +155,11 @@ pub(crate) fn responses_event_rejected_reasoning_item(event: &Value) -> Option<&
 
 pub(crate) fn http_error_rejected_reasoning_item(body: &[u8]) -> Option<String> {
     let body = serde_json::from_slice::<Value>(body).ok()?;
-    rejected_reasoning_item_id(body.get("error")?).map(str::to_string)
+    let error = body
+        .get("error")
+        .or_else(|| body.pointer("/response/error"))
+        .unwrap_or(&body);
+    rejected_reasoning_item_id(error).map(str::to_string)
 }
 
 pub(crate) fn record_rejected_reasoning_item(id: &str) {
@@ -381,6 +467,176 @@ mod tests {
         }
         client.close(None).await.unwrap();
         upstream.await.unwrap();
+        router.stop().await.unwrap();
+    }
+
+    #[test]
+    fn encrypted_decode_errors_and_rs_item_conflicts_extract_explicit_reasoning_ids() {
+        let id = "rs_decode_conflict_01";
+        for accepted in [
+            json!({
+                "code": "encrypted_content_decode_error",
+                "message": format!("Failed to decode encrypted output for item {id}."),
+            }),
+            json!({
+                "code": "invalid_request_error",
+                "message": format!("Could not decrypt encrypted_content for '{id}'"),
+            }),
+            json!({
+                "code": "invalid_encrypted_output",
+                "item_id": id,
+                "message": "Unable to decode payload",
+            }),
+            json!({
+                "code": "item_conflict",
+                "item_id": id,
+                "message": "Duplicate item in input",
+            }),
+            json!({
+                "code": "item_conflict",
+                "message": format!("Item '{id}' already exists in conversation state."),
+            }),
+            json!({
+                "code": "invalid_prompt",
+                "codey": {"originalCode": "item_conflict"},
+                "message": format!("Conflict on item {id}"),
+            }),
+        ] {
+            assert_eq!(
+                rejected_reasoning_item_id(&accepted),
+                Some(id),
+                "{accepted}"
+            );
+        }
+
+        for ignored in [
+            json!({
+                "code": "item_conflict",
+                "item_id": "msg_12345",
+                "message": "Item msg_12345 already exists",
+            }),
+            json!({
+                "code": "item_conflict",
+                "message": "Duplicate item without explicit id",
+            }),
+            json!({
+                "code": "item_conflict",
+                "message": "Conflict between rs_first and rs_second",
+            }),
+            json!({
+                "code": "invalid_request_error",
+                "message": format!("Item {id} is invalid"),
+            }),
+        ] {
+            assert_eq!(rejected_reasoning_item_id(&ignored), None, "{ignored}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_200_sse_stream_failures_record_rejected_reasoning_for_next_turn() {
+        let (encrypted_id, conflict_id) = (unique_id(), unique_id());
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let sse_error_id = encrypted_id.clone();
+        let sse_conflict_id = conflict_id.clone();
+        let upstream = tokio::spawn(async move {
+            let mut seen_inputs = Vec::new();
+            for step in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await.unwrap();
+                let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+                seen_inputs.push(body["input"].clone());
+                let sse = match step {
+                    0 => format!(
+                        "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp-1\",\"status\":\"in_progress\",\"output\":[]}}}}\n\nevent: error\ndata: {}\n\n",
+                        json!({
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "invalid_encrypted_content",
+                                "message": format!("The encrypted content for item {sse_error_id} could not be verified.")
+                            }
+                        })
+                    ),
+                    1 => format!(
+                        "event: response.failed\ndata: {}\n\n",
+                        json!({
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp-2",
+                                "status": "failed",
+                                "output": [],
+                                "error": {
+                                    "code": "item_conflict",
+                                    "message": format!("Duplicate reasoning item '{sse_conflict_id}' in input.")
+                                }
+                            }
+                        })
+                    ),
+                    _ => format!("data: {}\n\n", completed("resp-healed")),
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                            sse.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            seen_inputs
+        });
+
+        let (config, provider, model) = router_config(format!("http://{address}/v1"));
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let full_input = json!([
+            {"role": "user", "content": "task"},
+            {"type": "reasoning", "id": encrypted_id, "encrypted_content": "bad_cipher", "summary": [{"type": "summary_text", "text": "first plan"}]},
+            {"type": "reasoning", "id": conflict_id, "encrypted_content": "dup_cipher", "summary": []},
+            {"role": "user", "content": "continue"},
+        ]);
+
+        for _ in 0..3 {
+            let response = test_http_client()
+                .post(format!("{}/responses", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .json(&json!({
+                    "model": model_alias(&provider, &model),
+                    "input": full_input,
+                    "stream": true,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.text().await.unwrap();
+        }
+
+        let seen = upstream.await.unwrap();
+        assert_eq!(seen[0].as_array().unwrap().len(), 4);
+        // 第 2 轮已剥离第 1 轮 SSE error 中报错的 encrypted_id（保留可见摘要，去掉 id 与密文）。
+        assert_eq!(
+            seen[1],
+            json!([
+                {"role": "user", "content": "task"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "first plan"}]},
+                {"type": "reasoning", "id": conflict_id, "encrypted_content": "dup_cipher", "summary": []},
+                {"role": "user", "content": "continue"},
+            ])
+        );
+        // 第 3 轮连第 2 轮 SSE response.failed 报错的无摘要 conflict_id 也一并剥离。
+        assert_eq!(
+            seen[2],
+            json!([
+                {"role": "user", "content": "task"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "first plan"}]},
+                {"role": "user", "content": "continue"},
+            ])
+        );
         router.stop().await.unwrap();
     }
 }

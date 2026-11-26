@@ -150,6 +150,11 @@ const UPSTREAM_WEBSOCKET_BACKOFF_STEPS: [Duration; 4] = [
     Duration::from_secs(30),
     Duration::from_secs(60),
 ];
+const UPSTREAM_WEBSOCKET_HANDSHAKE_TIMEOUT_BACKOFF_STEPS: [Duration; 3] = [
+    Duration::from_secs(15),
+    Duration::from_secs(60),
+    Duration::from_secs(180),
+];
 const UPSTREAM_WEBSOCKET_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const UPSTREAM_WEBSOCKET_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_WEBSOCKET_MAX_REUSE_AGE: Duration = Duration::from_secs(55 * 60);

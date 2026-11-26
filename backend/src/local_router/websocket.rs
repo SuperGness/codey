@@ -806,11 +806,18 @@ impl WebSocketResponsesDownstream {
                             "websocket_endpoint_unsupported",
                         ));
                     }
-                    let (failure_count, backoff_duration) = self
-                        .websocket_backoffs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record_failure(backoff_key.clone(), Instant::now());
+                    let connect_timeout = upstream_websocket_connect_timed_out(&error);
+                    let (failure_count, backoff_duration) = {
+                        let mut backoffs = self
+                            .websocket_backoffs
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if connect_timeout {
+                            backoffs.record_handshake_timeout(backoff_key.clone(), Instant::now())
+                        } else {
+                            backoffs.record_failure(backoff_key.clone(), Instant::now())
+                        }
+                    };
                     record_router_failure_nonblocking(
                         "local_router_upstream_websocket_degraded",
                         "connect_responses_websocket",
@@ -820,14 +827,17 @@ impl WebSocketResponsesDownstream {
                             "routeName": route.route_name.as_str(),
                             "upstream": route.upstream_authority.as_str(),
                             "fallback": "http_sse",
+                            "connectTimeout": connect_timeout,
                             "failureCount": failure_count,
                             "backoffSeconds": backoff_duration.as_secs(),
                             "requestId": current_router_request_id(),
                         }),
                     );
-                    return Ok(UpstreamWebSocketAttempt::UseHttp(
-                        "websocket_connect_failed",
-                    ));
+                    return Ok(UpstreamWebSocketAttempt::UseHttp(if connect_timeout {
+                        "websocket_connect_timeout"
+                    } else {
+                        "websocket_connect_failed"
+                    }));
                 }
             }
         };
@@ -882,6 +892,19 @@ impl WebSocketResponsesDownstream {
                 }
             }
             Ok(Err(error)) => {
+                if websocket_error_is_message_too_big(&error) {
+                    restore_http_request_fields(body, http_stream, http_background, http_type);
+                    if let Some(probe) = probe {
+                        probe.mark_upstream_error_summary("Responses WebSocket 单帧超过大小限制 (1009)");
+                        probe.finish_upstream_attempt(
+                            crate::route_request_log::AttemptOutcome::Failed,
+                            crate::route_request_log::AttemptPhase::Send,
+                        );
+                    }
+                    return Ok(UpstreamWebSocketAttempt::UseHttp(
+                        "websocket_message_too_big",
+                    ));
+                }
                 if let Some(probe) = probe {
                     probe.finish_upstream_attempt(
                         crate::route_request_log::AttemptOutcome::Failed,
@@ -907,6 +930,10 @@ impl WebSocketResponsesDownstream {
         let response_deadline = tokio::time::Instant::now() + UPSTREAM_RESPONSE_TIMEOUT;
         let mut read_idle_deadline = tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT;
         let mut response_bytes = 0_usize;
+        let mut saw_upstream_event = false;
+        let mut http_stream = http_stream;
+        let mut http_background = http_background;
+        let mut http_type = http_type;
         loop {
             if tokio::time::Instant::now() >= response_deadline {
                 if let Some(probe) = probe {
@@ -1033,12 +1060,33 @@ impl WebSocketResponsesDownstream {
             let message = match message {
                 Ok(message) => message,
                 Err(error) => {
+                    if !saw_upstream_event && websocket_error_is_message_too_big(&error) {
+                        restore_http_request_fields(
+                            body,
+                            http_stream.take(),
+                            http_background.take(),
+                            http_type.take(),
+                        );
+                        if let Some(probe) = probe {
+                            probe.mark_upstream_error_summary(
+                                "Responses WebSocket 上游因单帧过大拒绝请求 (1009)",
+                            );
+                            probe.finish_upstream_attempt(
+                                crate::route_request_log::AttemptOutcome::Failed,
+                                crate::route_request_log::AttemptPhase::ResponseBody,
+                            );
+                        }
+                        return Ok(UpstreamWebSocketAttempt::UseHttp(
+                            "websocket_message_too_big",
+                        ));
+                    }
                     record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                     return Err(error).context("读取 Responses WebSocket 上游事件失败");
                 }
             };
             match message {
                 WebSocketMessage::Text(text) => {
+                    saw_upstream_event = true;
                     response_bytes = response_bytes.saturating_add(text.len());
                     if response_bytes > MAX_UPSTREAM_RESPONSE_BYTES {
                         anyhow::bail!("上游响应累计大小超过 Codey 安全上限");
@@ -1134,18 +1182,12 @@ impl WebSocketResponsesDownstream {
                                 route.official_account || route.supports_remote_compaction,
                             ) {
                                 self.native_history.mark_continuation_rejected();
-                                let object =
-                                    body.as_object_mut().expect("validated request object");
-                                for (name, value) in [
-                                    ("stream", http_stream),
-                                    ("background", http_background),
-                                    ("type", http_type),
-                                ] {
-                                    object.remove(name);
-                                    if let Some(value) = value {
-                                        object.insert(name.into(), value);
-                                    }
-                                }
+                                restore_http_request_fields(
+                                    body,
+                                    http_stream.take(),
+                                    http_background.take(),
+                                    http_type.take(),
+                                );
                                 if let Some(probe) = probe {
                                     probe.mark_upstream_error_summary(&redact_upstream_error_text(
                                         &event.to_string(),
@@ -1174,18 +1216,12 @@ impl WebSocketResponsesDownstream {
                                 && persisted_rejection_has_no_execution(&event)
                                 && strip_rejected_reasoning_items(body)
                             {
-                                let object =
-                                    body.as_object_mut().expect("validated request object");
-                                for (name, value) in [
-                                    ("stream", http_stream),
-                                    ("background", http_background),
-                                    ("type", http_type),
-                                ] {
-                                    object.remove(name);
-                                    if let Some(value) = value {
-                                        object.insert(name.into(), value);
-                                    }
-                                }
+                                restore_http_request_fields(
+                                    body,
+                                    http_stream.take(),
+                                    http_background.take(),
+                                    http_type.take(),
+                                );
                                 if let Some(probe) = probe {
                                     probe.mark_upstream_error_summary(&redact_upstream_error_text(
                                         &event.to_string(),
@@ -1327,7 +1363,27 @@ impl WebSocketResponsesDownstream {
                 WebSocketMessage::Pong(_) => upstream
                     .liveness
                     .record_pong(tokio::time::Instant::now().into_std()),
-                WebSocketMessage::Close(_) => {
+                WebSocketMessage::Close(frame) => {
+                    if !saw_upstream_event && websocket_close_is_message_too_big(frame.as_ref()) {
+                        restore_http_request_fields(
+                            body,
+                            http_stream.take(),
+                            http_background.take(),
+                            http_type.take(),
+                        );
+                        if let Some(probe) = probe {
+                            probe.mark_upstream_error_summary(
+                                "Responses WebSocket 上游返回 1009 (MessageTooBig)，当轮回退 HTTP SSE",
+                            );
+                            probe.finish_upstream_attempt(
+                                crate::route_request_log::AttemptOutcome::Failed,
+                                crate::route_request_log::AttemptPhase::ResponseBody,
+                            );
+                        }
+                        return Ok(UpstreamWebSocketAttempt::UseHttp(
+                            "websocket_message_too_big",
+                        ));
+                    }
                     record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                     anyhow::bail!("Responses WebSocket 上游在终态事件前关闭连接");
                 }
@@ -1675,6 +1731,44 @@ pub(crate) async fn connect_upstream_responses_websocket(
     Ok(socket)
 }
 
+fn restore_http_request_fields(
+    body: &mut Value,
+    http_stream: Option<Value>,
+    http_background: Option<Value>,
+    http_type: Option<Value>,
+) {
+    let object = body.as_object_mut().expect("validated request object");
+    for (name, value) in [
+        ("stream", http_stream),
+        ("background", http_background),
+        ("type", http_type),
+    ] {
+        object.remove(name);
+        if let Some(value) = value {
+            object.insert(name.into(), value);
+        }
+    }
+}
+
+pub(crate) fn websocket_close_is_message_too_big(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> bool {
+    frame.is_some_and(|frame| u16::from(frame.code) == 1009)
+}
+
+pub(crate) fn websocket_error_is_message_too_big(error: &WebSocketError) -> bool {
+    matches!(error, WebSocketError::Capacity(_))
+}
+
+pub(crate) fn upstream_websocket_connect_timed_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source.is::<tokio::time::error::Elapsed>()
+            || source
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::TimedOut)
+    })
+}
+
 pub(crate) fn upstream_websocket_endpoint_is_unsupported(error: &anyhow::Error) -> bool {
     error.chain().any(|source| {
         source
@@ -1959,6 +2053,9 @@ async fn forward_fallback_event(
     response_fix: Option<&NativeResponseFix>,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<bool> {
+    if let Some(item_id) = responses_event_rejected_reasoning_item(&event) {
+        record_rejected_reasoning_item(item_id);
+    }
     normalize_response_failure(&mut event, retry_advice);
     if let Some(fix) = response_fix {
         fix.apply(&mut event);

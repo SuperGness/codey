@@ -458,9 +458,34 @@ impl UpstreamWebSocketBackoffs {
         key: UpstreamWebSocketBackoffKey,
         now: Instant,
     ) -> (u32, Duration) {
+        self.record_failure_with_steps(key, now, &UPSTREAM_WEBSOCKET_BACKOFF_STEPS)
+    }
+
+    pub(crate) fn record_handshake_timeout(
+        &mut self,
+        key: UpstreamWebSocketBackoffKey,
+        now: Instant,
+    ) -> (u32, Duration) {
+        self.record_failure_with_steps(
+            key,
+            now,
+            &UPSTREAM_WEBSOCKET_HANDSHAKE_TIMEOUT_BACKOFF_STEPS,
+        )
+    }
+
+    fn record_failure_with_steps(
+        &mut self,
+        key: UpstreamWebSocketBackoffKey,
+        now: Instant,
+        steps: &[Duration],
+    ) -> (u32, Duration) {
+        let step_duration = |count: u32| {
+            let index = count.saturating_sub(1) as usize;
+            steps[index.min(steps.len() - 1)]
+        };
         self.supported.remove(&key);
         if !self.route_is_current(&key.route_id, &key.config_identity) {
-            return (1, upstream_websocket_backoff_duration(1));
+            return (1, step_duration(1));
         }
         // Concurrent failures belong to the same outage; only a failed retry
         // after the deadline advances backoff. Preserve unsupported endpoints too.
@@ -469,16 +494,14 @@ impl UpstreamWebSocketBackoffs {
         {
             return (backoff.failure_count, backoff.until.duration_since(now));
         }
-        let reset_after = *UPSTREAM_WEBSOCKET_BACKOFF_STEPS
-            .last()
-            .expect("WebSocket backoff steps must not be empty");
+        let reset_after = *steps.last().expect("WebSocket backoff steps must not be empty");
         let failure_count = self
             .entries
             .get(&key)
             .filter(|backoff| !backoff.unsupported && now <= backoff.until + reset_after)
             .map(|backoff| backoff.failure_count.saturating_add(1))
             .unwrap_or(1);
-        let duration = upstream_websocket_backoff_duration(failure_count);
+        let duration = step_duration(failure_count);
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
         self.entries.insert(
@@ -548,6 +571,7 @@ impl UpstreamWebSocketBackoffs {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn upstream_websocket_backoff_duration(failure_count: u32) -> Duration {
     let index = failure_count.saturating_sub(1) as usize;
     UPSTREAM_WEBSOCKET_BACKOFF_STEPS[index.min(UPSTREAM_WEBSOCKET_BACKOFF_STEPS.len() - 1)]

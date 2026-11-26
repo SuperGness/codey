@@ -2367,6 +2367,7 @@ impl RouterServer {
                     fallback_reason,
                     "websocket_persisted_context_rejected"
                         | "websocket_encrypted_reasoning_rejected"
+                        | "websocket_message_too_big"
                 ) || expanded_during_ws
                 {
                     // 重连可能已展开历史；同轮恢复也必须按恢复后的 HTTP 正文重新编码。

@@ -161,11 +161,12 @@ impl HttpExecution<'_> {
             && !self.resolved.route.official_account
     }
 
-    /// 官方账号同样可能拒绝历史中的 reasoning 密文；只在正文确实带密文时保留重发副本。
+    /// 官方账号同样可能拒绝历史中的 reasoning 密文或冲突 rs_ 项；只在正文确实包含相关推理条目时保留重发副本。
     fn encrypted_reasoning_retry_allowed(&self, encoded: &[u8]) -> bool {
         self.bridge == ProtocolBridge::NativeResponses
             && (!self.compacting || self.native_compaction)
-            && memchr::memmem::find(encoded, b"\"encrypted_content\"").is_some()
+            && (memchr::memmem::find(encoded, b"\"encrypted_content\"").is_some()
+                || memchr::memmem::find(encoded, b"\"rs_").is_some())
     }
 
     /// 只在明确的 400 reasoning 缺失或密文校验失败响应后构造修复请求。
@@ -275,7 +276,7 @@ impl HttpExecution<'_> {
                 head.record(downstream.request_log_probe());
                 return Ok(Some(ReceivedHttpResponse::Success(response)));
             }
-            let can_repair_reasoning = head.status == 400
+            let can_repair_reasoning = matches!(head.status, 400 | 409)
                 && retryable_encoded.is_some()
                 && attempts.can_retry(downstream.event_stream_started());
             if !can_repair_reasoning {
@@ -334,6 +335,11 @@ impl HttpExecution<'_> {
                     retain_compact_request_budget(&mut admission, encoded.len());
                     continue;
                 }
+            }
+            if self.bridge == ProtocolBridge::NativeResponses
+                && let Some(id) = http_error_rejected_reasoning_item(&body)
+            {
+                record_rejected_reasoning_item(&id);
             }
             if can_repair_reasoning {
                 head.record(downstream.request_log_probe());

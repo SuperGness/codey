@@ -323,3 +323,170 @@ async fn websocket_infrastructure_backoff_uses_cached_connection_identity() {
     }
     upstream_task.await.unwrap();
 }
+
+#[test]
+fn websocket_handshake_timeout_escalates_progressive_backoff_steps() {
+    let (mut config, provider_id, _) = router_config("http://127.0.0.1:9/v1".into());
+    config.profiles[0].supports_websockets = true;
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = &snapshot.routes[&provider_id];
+    let key = UpstreamWebSocketBackoffKey::for_route(
+        route,
+        route.upstream_websocket_url.as_ref().unwrap(),
+        UpstreamWebSocketAuthIdentity::default(),
+    );
+    let mut backoffs = UpstreamWebSocketBackoffs::default();
+    backoffs.update_routes(&snapshot);
+
+    let mut now = Instant::now();
+    for (expected_count, expected_secs) in [(1, 15), (2, 60), (3, 180), (4, 180)] {
+        let (count, duration) = backoffs.record_handshake_timeout(key.clone(), now);
+        assert_eq!(count, expected_count);
+        assert_eq!(duration, Duration::from_secs(expected_secs));
+        assert!(backoffs.is_backing_off(&key, now + Duration::from_secs(1)));
+        // 模拟用户在退避到期后 30 秒发起下一轮请求，退避档位应继续递进而不重置为首档。
+        now += duration + Duration::from_secs(30);
+    }
+
+    // 超出重置窗口后重新从 15s 起步；一旦握手并完成一轮请求则立即清空退避。
+    now += Duration::from_secs(181);
+    let (count, duration) = backoffs.record_handshake_timeout(key.clone(), now);
+    assert_eq!(count, 1);
+    assert_eq!(duration, Duration::from_secs(15));
+    backoffs.record_success(&key);
+    assert!(!backoffs.entries.contains_key(&key));
+
+    let io_timeout = anyhow::Error::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "handshake timed out",
+    ))
+    .context("连接 Responses WebSocket 上游超时");
+    assert!(upstream_websocket_connect_timed_out(&io_timeout));
+    let refused = anyhow::Error::new(std::io::Error::new(
+        std::io::ErrorKind::ConnectionRefused,
+        "refused",
+    ));
+    assert!(!upstream_websocket_connect_timed_out(&refused));
+}
+
+#[tokio::test]
+async fn websocket_1009_message_too_big_falls_back_to_http_sse_without_backoff_penalty() {
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        // 第 1 轮：建立并缓存 WS 连接。
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut ws1 = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_eq!(receive_upstream_request(&mut ws1).await["input"], "warm");
+        send_upstream_event(&mut ws1, completed_event("resp-warm")).await;
+
+        // 第 2 轮（带 previous_response_id 的大请求）：上游 WS 返回 1009 MessageTooBig。
+        let oversized = receive_upstream_request(&mut ws1).await;
+        assert_eq!(oversized["previous_response_id"], "resp-warm");
+        ws1.send(WebSocketMessage::Close(Some(CloseFrame {
+            code: CloseCode::Size,
+            reason: "Message too big".into(),
+        })))
+        .await
+        .unwrap();
+
+        // 同轮应立即干净回退到 HTTP SSE（展开完整历史且无 type 字段）。
+        let (mut http_stream, _) = upstream.accept().await.unwrap();
+        let http_req = read_http_request(&mut http_stream).await.unwrap();
+        assert_eq!(http_req.method, "POST");
+        assert_eq!(http_req.path, "/v1/responses");
+        let fallback_body: Value = serde_json::from_slice(&http_req.body).unwrap();
+        assert!(fallback_body.get("type").is_none(), "{fallback_body}");
+        assert!(fallback_body.get("previous_response_id").is_none());
+        let sse = format!("data: {}\n\n", completed_event("resp-http-fallback"));
+        http_stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                    sse.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        // 第 3 轮：由于 1009 未惩罚线路 WS 可用性，下一轮直接恢复走 WS！
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut ws2 = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let resumed = receive_upstream_request(&mut ws2).await;
+        assert!(resumed.get("previous_response_id").is_none());
+        send_upstream_event(&mut ws2, completed_event("resp-ws-resumed")).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws2.next()).await;
+    });
+
+    let (mut config, provider_id, model) = router_config(format!("http://{address}/v1"));
+    config.profiles[0].supports_websockets = true;
+    let router = LocalRouter::start(&config).await.unwrap();
+    let alias = model_alias(&provider_id, &model);
+    let mut client = connect_router_websocket(&router.endpoint()).await;
+
+    let first = send_router_websocket_request(&mut client, &alias, "warm").await;
+    assert_eq!(first.last().unwrap()["response"]["id"], "resp-warm");
+
+    client
+        .send(WebSocketMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": alias,
+                "previous_response_id": "resp-warm",
+                "input": [{"role": "user", "content": "huge-turn"}],
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let WebSocketMessage::Text(second_text) =
+        tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected fallback completion");
+    };
+    let second_event: Value = serde_json::from_str(&second_text).unwrap();
+    assert_eq!(second_event["type"], "response.completed");
+    assert_eq!(second_event["response"]["id"], "resp-http-fallback");
+    assert!(
+        router.websocket_backoffs.lock().unwrap().entries.is_empty(),
+        "1009 MessageTooBig must not penalize route WebSocket availability"
+    );
+
+    client
+        .send(WebSocketMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": alias,
+                "previous_response_id": "resp-http-fallback",
+                "input": [{"role": "user", "content": "normal-turn"}],
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let WebSocketMessage::Text(third_text) =
+        tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected resumed ws completion");
+    };
+    let third_event: Value = serde_json::from_str(&third_text).unwrap();
+    assert_eq!(third_event["response"]["id"], "resp-ws-resumed");
+
+    client.close(None).await.unwrap();
+    upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+}

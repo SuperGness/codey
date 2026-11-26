@@ -383,7 +383,9 @@ pub(crate) async fn write_proxy_response(
                 retry_advice.as_ref(),
             );
             if validate_responses {
-                rewriter.with_terminal_validation()
+                rewriter
+                    .with_terminal_validation()
+                    .with_rejected_reasoning_recorder(&record_rejected_reasoning_item)
             } else {
                 rewriter
             }
