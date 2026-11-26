@@ -535,7 +535,7 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div
-                        className={`flex size-[30px] shrink-0 items-center justify-center rounded-lg transition-colors ${
+                        className={`flex size-9 shrink-0 items-center justify-center rounded-[10px] transition-colors ${
                           plugin.enabled
                             ? "bg-[var(--codey-surface-sunken)] text-foreground"
                             : "bg-[var(--codey-surface-sunken)] text-muted"
@@ -545,7 +545,7 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <h4 className="m-0 truncate text-[13px] font-semibold text-foreground">
+                          <h4 className="m-0 truncate text-[14px] font-semibold tracking-[-0.01em] text-foreground">
                             {plugin.name}
                           </h4>
                           <span className="inline-flex items-center rounded-full bg-[var(--codey-surface-sunken)] px-2 py-px font-mono text-[11px] font-medium text-muted">
@@ -601,9 +601,6 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                       </div>
                     </div>
                     <div className="flex items-center gap-2.5 shrink-0">
-                      <span className={`codey-plugin-state${plugin.enabled ? " is-on" : ""}`}>
-                        {plugin.enabled ? "已启用" : "未启用"}
-                      </span>
                       <Switch
                         size="sm"
                         checked={plugin.enabled}
@@ -621,13 +618,13 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                   </div>
 
                   {plugin.description && (
-                    <p className="mb-0 mt-1.5 line-clamp-2 text-xs text-muted leading-relaxed sm:ml-[42px]">
+                    <p className="mb-0 mt-1.5 line-clamp-2 text-xs text-muted leading-relaxed sm:ml-12">
                       {plugin.description}
                     </p>
                   )}
 
                   {plugin.capabilities && plugin.capabilities.length > 0 && (
-                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-[42px]">
+                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-12">
                       {plugin.capabilities.map((cap) => (
                         <span
                           key={cap}
@@ -640,19 +637,19 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                   )}
 
                   {plugin.restartRequired && (
-                    <div className="mt-3 rounded-[10px] bg-[var(--codey-amber-soft)] px-3 py-2 text-xs text-[var(--codey-amber)] sm:ml-[42px]">
+                    <div className="mt-3 rounded-[10px] bg-[var(--codey-amber-soft)] px-3 py-2 text-xs text-[var(--codey-amber)] sm:ml-12">
                       需要重启 Codey 或停用后重新启用，以应用版本更新或配置变更。
                     </div>
                   )}
 
                   {plugin.lastError && (
-                    <div role="alert" className="mt-3 rounded-[10px] bg-[var(--codey-red-soft)] px-3 py-2 text-xs text-[var(--codey-red)] sm:ml-[42px]">
+                    <div role="alert" className="mt-3 rounded-[10px] bg-[var(--codey-red-soft)] px-3 py-2 text-xs text-[var(--codey-red)] sm:ml-12">
                       {plugin.lastError}
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-[42px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-12">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="whitespace-nowrap text-xs text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
                       日志 {plugin.logSizeBytes == null ? "大小未知" : formatBytes(plugin.logSizeBytes)}

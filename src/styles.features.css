@@ -1226,7 +1226,7 @@
   border-top: 1px solid var(--codey-border-subtle);
 }
 
-.extension-feed-item.is-selected {
+.extension-feed-item.is-selected::before {
   background: var(--codey-blue-soft);
 }
 
@@ -1639,33 +1639,49 @@
   border-top: 1px solid var(--codey-border-subtle);
 }
 
-.extension-card-list > .extension-feed-item.extension-item-card.is-selected,
-.extension-card-list > .extension-feed-item.extension-item-card.is-invalid {
-  margin-inline: -12px;
-  padding-inline: 12px;
-  border-radius: 10px;
+.extension-card-list > .extension-feed-item.extension-item-card.is-selected::before {
   background: var(--codey-blue-soft);
 }
 
-.extension-card-list > .extension-feed-item.extension-item-card.is-invalid:not(.is-selected) {
+.extension-card-list > .extension-feed-item.extension-item-card.is-invalid:not(.is-selected)::before {
   background: var(--codey-red-soft);
 }
 
+.extension-card-list > .extension-feed-item.extension-item-card.is-selected,
+.extension-card-list > .extension-feed-item.extension-item-card.is-invalid,
 .extension-card-list > .extension-feed-item.extension-item-card.is-selected + .extension-feed-item.extension-item-card,
 .extension-card-list > .extension-feed-item.extension-item-card.is-invalid + .extension-feed-item.extension-item-card {
   border-top-color: transparent;
+}
+
+/* 行内次要操作默认安静，悬停到整行时才显出浅灰胶囊底。 */
+.extension-item-actions .button--outline {
+  --button-bg: transparent;
+}
+
+.extension-feed-item:hover .extension-item-actions .button--outline,
+.extension-feed-item:focus-within .extension-item-actions .button--outline {
+  --button-bg: rgba(var(--codey-ink-rgb), 0.06);
+}
+
+.extension-item-actions .button--ghost {
+  color: var(--codey-muted);
+}
+
+.extension-item-actions .button--ghost:hover:not(:disabled) {
+  color: var(--codey-text);
 }
 
 /* 卡片克制圆角方标图标 + 状态角标 */
 .extension-item-avatar {
   position: relative;
   display: flex;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--codey-surface-sunken);
   color: var(--codey-muted);
   border: 0;
@@ -1798,8 +1814,8 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 14px;
-  margin-top: 8px;
+  gap: 6px 14px;
+  margin-top: 6px;
   padding-top: 0;
   border-top: 0;
 }
@@ -1820,10 +1836,10 @@
   align-items: center;
   gap: 5px;
   max-width: min(100%, 340px);
-  padding: 1px 8px;
-  border-radius: 6px;
-  background: var(--codey-surface-sunken);
-  color: var(--codey-muted);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--codey-subtle);
   font-family: var(--codey-font-mono);
   font-size: 11.5px;
   line-height: 1.4;
@@ -1941,17 +1957,6 @@
 }
 
 
-
-/* Codey 插件状态文字 */
-.codey-plugin-state {
-  color: var(--mac-text-tertiary);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.codey-plugin-state.is-on {
-  color: var(--codey-green);
-}
 
 /* 插件导入面板：常驻在插件页顶部，选择或拖入后原地展开预览与确认。 */
 .plugin-import-panel {

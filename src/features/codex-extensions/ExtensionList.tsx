@@ -169,7 +169,7 @@ export function ExtensionList({
                   isEnabled && isKnown ? `is-active ${avatarTone}` : ""
                 }`}
               >
-                <EntryIcon size={19} stroke={1.8} aria-hidden="true" />
+                <EntryIcon size={19} stroke={1.75} aria-hidden="true" />
                 <span
                   className={`extension-item-avatar-dot ${
                     isInvalid
@@ -191,7 +191,7 @@ export function ExtensionList({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <h4
                         title={entry.name}
-                        className="m-0 max-w-full truncate text-[13.5px] font-semibold text-foreground"
+                        className="m-0 max-w-full truncate text-[14px] font-semibold tracking-[-0.01em] text-foreground"
                       >
                         <button
                           type="button"
@@ -304,25 +304,14 @@ export function ExtensionList({
                       </Badge>
                     ) : (
                       <>
-                        <Badge
-                          variant={
-                            !isKnown
-                              ? "secondary"
-                              : isEnabled
-                                ? "success"
-                                : "secondary"
-                          }
-                        >
-                          {working &&
+                        {/* 开关本身即表达启停，文字徽章只在保存中或状态未知时出现。 */}
+                        {(working &&
                           (busyAction === "set_mcp_enabled" ||
-                            busyAction === "set_skill_enabled")
-                            ? "正在保存…"
-                            : !isKnown
-                              ? "状态待确认"
-                              : isEnabled
-                                ? "已启用"
-                                : "已禁用"}
-                        </Badge>
+                            busyAction === "set_skill_enabled")) || !isKnown ? (
+                          <Badge variant="secondary">
+                            {!isKnown ? "状态待确认" : "正在保存…"}
+                          </Badge>
+                        ) : null}
                         {!toggleable ? (
                           <Tooltip
                             content={
@@ -385,7 +374,7 @@ export function ExtensionList({
                 {"error" in entry && entry.error && (
                   <div
                     role="alert"
-                    className="mt-2.5 flex items-start gap-2 rounded-xl border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-3 py-2 text-[12px] text-[var(--codey-red)] break-words"
+                    className="mt-2.5 flex items-start gap-2 rounded-[10px] bg-[var(--codey-red-soft)] px-3 py-2 text-[12.5px] text-[var(--codey-red)] break-words"
                   >
                     <IconAlertCircle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                     <span className="min-w-0 flex-1">{entry.error}</span>
@@ -397,10 +386,10 @@ export function ExtensionList({
                   <div
                     id={`check-panel-${entry.id}`}
                     role={checkResult.ok ? "status" : "alert"}
-                    className={`mt-2.5 rounded-xl border p-3 text-xs ${
+                    className={`mt-2.5 rounded-xl p-3 text-xs ${
                       checkResult.ok
-                        ? "border-[var(--codey-green-border)] bg-[var(--codey-green-soft)] text-foreground"
-                        : "border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] text-foreground"
+                        ? "bg-[var(--codey-green-soft)] text-foreground"
+                        : "bg-[var(--codey-amber-soft)] text-foreground"
                     }`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">

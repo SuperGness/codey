@@ -65,6 +65,7 @@
 
   --codey-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --codey-pill: 980px;
+  --codey-row-hover: rgba(29, 29, 31, 0.035);
 }
 
 /* 深色模式：参照 Apple 深色界面的近黑层级与系统色，保持清晰对比。 */
@@ -94,6 +95,7 @@
   --codey-hover: rgba(245, 245, 247, 0.06);
   --codey-press: rgba(245, 245, 247, 0.1);
   --codey-nav-active: rgba(64, 160, 255, 0.2);
+  --codey-row-hover: rgba(245, 245, 247, 0.05);
 
   --codey-blue: #40a0ff;
   --codey-blue-hover: #5cb0ff;
@@ -459,60 +461,67 @@ button,
   background: var(--codey-surface);
 }
 
+/* 反馈二维码以侧栏底部右侧操作组为定位基准，右对齐展开，避免越过侧栏被裁切；箭头对准反馈按钮。 */
 .config-header-feedback {
+  position: static;
+}
+
+.sidebar-footer-right:has(.config-header-feedback) {
   position: relative;
 }
 
 .feedback-qr-popover {
+  --feedback-arrow-right: calc(var(--feedback-trailing-width, 52px) + 13px);
   position: absolute;
   z-index: 60;
+  right: -2px;
   bottom: calc(100% + 10px);
-  left: 50%;
   display: grid;
-  width: 176px;
+  width: 184px;
   justify-items: center;
-  gap: 7px;
-  padding: 10px;
-  border: 1px solid var(--codey-border-strong);
-  border-radius: 12px;
-  background: var(--codey-surface, #ffffff);
+  gap: 8px;
+  padding: 12px 12px 10px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--codey-surface-elevated, #ffffff);
   box-shadow: var(--codey-popover-shadow);
   color: var(--codey-text-soft);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.4;
   opacity: 0;
   pointer-events: none;
-  transform: translate(-50%, 4px);
+  transform: translateY(4px);
   visibility: hidden;
   transition: opacity 150ms ease, transform 150ms ease, visibility 150ms ease;
 }
 
 .feedback-qr-popover::before {
   position: absolute;
+  right: calc(var(--feedback-arrow-right) + 2px);
   bottom: -5px;
-  left: 50%;
-  width: 9px;
-  height: 9px;
-  border-right: 1px solid var(--codey-border-strong);
-  border-bottom: 1px solid var(--codey-border-strong);
-  background: var(--codey-surface, #ffffff);
+  width: 10px;
+  height: 10px;
+  border-radius: 0 0 2px 0;
+  background: inherit;
+  box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.05);
   content: "";
-  transform: translateX(-50%) rotate(45deg);
+  transform: translateX(50%) rotate(45deg);
 }
 
 .feedback-qr-popover img {
   display: block;
-  width: 156px;
-  height: 156px;
-  border-radius: 8px;
-  object-fit: cover;
+  width: 160px;
+  height: auto;
+  max-height: 220px;
+  border-radius: 10px;
+  object-fit: contain;
 }
 
 .config-header-feedback:hover .feedback-qr-popover,
 .config-header-feedback > button:focus-visible + .feedback-qr-popover {
   opacity: 1;
-  transform: translate(-50%, 0);
+  transform: translateY(0);
   visibility: visible;
 }
 
@@ -1224,6 +1233,45 @@ button,
   transition:
     border-color 140ms ease,
     background-color 140ms ease;
+}
+
+/*
+ * 平铺列表行：悬停时在行外侧铺一块圆角浅灰底，盖住上下发丝线，
+ * 让整行像 Apple 设置列表一样被轻轻托起；选中、拖放等状态复用同一层底色。
+ */
+.extension-feed > .extension-feed-item,
+.provider-model-group,
+.settings-page .official-account-item,
+.overview-config .notification-channel-list > li:not(.notification-empty-card) {
+  position: relative;
+  isolation: isolate;
+}
+
+.extension-feed > .extension-feed-item::before,
+.provider-model-group::before,
+.settings-page .official-account-item::before,
+.overview-config .notification-channel-list > li:not(.notification-empty-card)::before {
+  position: absolute;
+  z-index: -1;
+  inset: -1px -12px;
+  border-radius: 12px;
+  background: transparent;
+  content: "";
+  pointer-events: none;
+  transition: background-color 160ms ease;
+}
+
+.extension-feed > .extension-feed-item:hover::before,
+.provider-model-group:hover::before,
+.settings-page .official-account-item:hover::before,
+.overview-config .notification-channel-list > li:not(.notification-empty-card):hover::before {
+  background: var(--codey-row-hover);
+}
+
+.extension-feed > .extension-feed-item:hover + .extension-feed-item,
+.provider-model-group:hover + .provider-model-group,
+.settings-page .official-account-item:hover + .official-account-item {
+  border-top-color: transparent;
 }
 
 /* HeroUI 标签页统一为 Apple 分段控件：浅灰轨道，选中项为白色浮起胶囊。 */
