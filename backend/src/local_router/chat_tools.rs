@@ -2945,11 +2945,8 @@ fn scan_json_string_span(bytes: &[u8], pos: &mut usize) -> Option<JsonKeySpan> {
                 *pos = pos.saturating_add(2);
             }
             _ => {
-                if let Some(offset) = memchr::memchr2(b'"', b'\\', &bytes[*pos..]) {
-                    *pos += offset;
-                } else {
-                    return None;
-                }
+                let offset = memchr::memchr2(b'"', b'\\', &bytes[*pos..])?;
+                *pos += offset;
             }
         }
     }
