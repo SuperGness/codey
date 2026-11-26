@@ -45,7 +45,7 @@
   ].join(", ");
   // Codex 把左侧图标栏收进 nav[data-app-navigation-rail]，图标栏底部的贴底
   // 堆栈里放着帮助与个人资料按钮，Codey 入口跟随它们落在这里。
-  const navigationRailSelector = '[data-app-navigation-rail="true"]';
+  const navigationRailSelector = "[data-app-navigation-rail]";
   const railHelpLabelPattern = /帮助|help/i;
   const railProfileLabelPattern = /个人资料|账户|账号|profile|account/i;
   const bootstrapProbeSelector = `${navigationRailSelector}, ${sidebarSelector}`;
@@ -138,7 +138,6 @@
       /* Codex 原生小按钮：28×28、圆角 12.5px、图标继承按钮前景色，
          Codey 入口按同一套数值对齐，保证与相邻原生按钮同色同尺寸。 */
       #${buttonId} { --codey-icon-size: 16px; --codey-icon-color: currentColor; -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 12.5px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
-      #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
       #${buttonId}[data-codey-rail-slot="true"] { --codey-icon-size: 20px; box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 36px; margin: 0; border-radius: 12.5px; color: color-mix(in srgb, CanvasText 52%, transparent); }
       #${buttonId}[data-codey-rail-slot="true"] .codey-settings-icon { width: 20px; height: 20px; }
       #${buttonId}[data-codey-rail-slot="true"]:hover { color: CanvasText; }
@@ -154,7 +153,6 @@
       #${buttonId}[data-codey-runtime-state="unavailable"] .codey-runtime-badge { opacity: 1; transform: scale(1); }
       #${buttonId}::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 999px; background: #ff3b30; box-shadow: 0 0 0 2px Canvas; opacity: 0; transform: scale(.7); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
       #${buttonId}[data-codey-update-available="true"]::after { opacity: 1; transform: scale(1); }
-      #${buttonId}[data-codey-header-actions="true"]::after { top: 4px; right: 4px; }
       #${buttonId}[data-codey-runtime-state="unavailable"][data-codey-update-available="true"]::after { top: auto; right: 3px; bottom: 3px; width: 5px; height: 5px; }
       /* 跟随宿主 color-scheme；明确的主题类优先于系统偏好。iOS 液态玻璃质感。 */
       @font-face { font-family: "Codey Chakra Petch"; font-style: normal; font-weight: 600 700; font-display: block; src: url("data:font/woff2;base64,d09GMgABAAAAAARcAA0AAAAACIgAAAQMAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG1wcLgZgAEQRCAqGXIUBCxwAATYCJAM0BCAFhCwHIBuwBsgEHvh38z03BAvwppal4lhFDWpG/WItzPSLibnyw/1M/2icgGuh2VB/5FtEWSRl4TDB1jrbrpsPW/FA+FSi85i+PDIj3o4ANPKpwNTS1hNg+/B8Msr2ydX5NbZHJaD+DTlyaTOKbYDn6ioKNgQ4NxIItnUL7NpvSb/ClRRSqLkz5ig2PlJQapR7MZcpRytjQHcvR8zgF/lLscOShbaVeze3dOtciE6l6cP/nwX1Q6VMF+IUExY/K/dKqY4JUKDHbg8Q2qvi3SvYFsd1sqg8E2yAePPSH6W/SL+8GVHkC0Q6zVYjcLW8XdmdgPxoFxUbgJqCAhDQK5o1ydlmVbXZrNvu4TBvv63NtsVmU4j6122zLtUZMjvVUdOoK6gEnKP1pjqtRqmdDYhRh6qNrog6rQZNjLqCLOLCOSoc1DrqRb4mHAVLnjcwSMAZcooVh+JAQxs1aWOseWCd0+TCiStIwHkUK9p21mHHzCn1ok4LUCuFU7hY1UNieIjHTa5AavTjPcrEBrQRcb62ydGFnkkxyrpCW3GsapMFIl/LJW9pVj86+YDxJ8568qy50sm8ScoSryYSZYk267fEPQffczt+ATfkn957yE3zkXtTZJ+50tbOxbSn4lLuLuWZC9XayuavGDKaauVWNtJPJp9MR7ie1lRUylwp79/beEj/R24mjxg6quzGSx4PJoNHpsw/+dXnM7ZQKDdTndzM+QyufptcPtwaDv8gZSFl8lMp3VIupiqNG43LrnxHyo+k9P+cMI4xju/oChks1Nlnkt8evnP1ifjk/d+33CylW8qbW76/X8qmP88xlo0bjWXjrhwjbjxqxA2q5XjKbVxtXJR6T8rPpPTL/d8r9+nNhoYN41bjBIOcc17s777++v1/vvDOWOvSeVOUNwYODVRhomp1vT4TmUC8hbveeftYeb89uVfObzWr6cl70jUPnXutddKff/l/ff0+rd6kfILC+iPjG5Oex/qP/+v5/Q73rtSaKTJfSy4TYWr+rcizl4lB2UerIUCbJUJrRlBmKlCjlioZZORS/ksBvkuQStnPRjJV6zDwwHddjY/mDM6t28d8ptoykgp35HfuR6L/XUhNl3ClVMThdaqaJgNSCTgm7BW+BVZIkiVOFBw8JQmyyRpykFrhJfFQYNzE2WcFDP2300Mwq80g2mWeAJZKEWKWIJmKEWWSEJTZ3OyhGFB0fbryltxr9WLuWmWcfksRYBS8a18ll341Gy8ij9+vC1xt4+c200I0+6OCsqKQtNtsMb5wDrh9W7kuhjh8vPiosG8C0S+hn5h5gU+LrLBHaDRqvEFbvHSQS6l7rE+JdYW2lex8Wkl0hYkTwEKFENofwsYRH9xdpvXtHyPs5o+Gs9G34KQAA") format("woff2"); unicode-range: U+25, U+30-39; }
@@ -518,9 +516,20 @@
     if (!payload || typeof payload !== "object") {
       return unavailable;
     }
-    // 账号摘要只读取通用额度，不能合并模型专属的 rateLimitsByLimitId。
+    // 账号摘要优先读取 rateLimitsByLimitId.codex，再回退通用 rateLimits，不合并模型专属桶。
     const buckets = [];
-    if (payload.rateLimits && typeof payload.rateLimits === "object") {
+    const codexBucket = payload.rateLimitsByLimitId?.codex;
+    if (codexBucket && typeof codexBucket === "object") {
+      buckets.push(codexBucket);
+    }
+    if (
+      payload.rateLimits
+      && typeof payload.rateLimits === "object"
+      && (
+        payload.rateLimits.limitId == null
+        || payload.rateLimits.limitId === "codex"
+      )
+    ) {
       buckets.push(payload.rateLimits);
     }
     const windowsByKind = new Map();
@@ -549,41 +558,13 @@
       .map((bucket) => bucket.planType)
       .find((value) => typeof value === "string" && value.trim())
       || (typeof payload.planType === "string" ? payload.planType : undefined);
-    const resetCredits = normalizeResetCreditsSummary(
-      payload.rateLimitResetCredits ?? payload.rate_limit_reset_credits
-        ?? payload.rateLimits?.rateLimitResetCredits ?? payload.rateLimits?.rate_limit_reset_credits,
-    );
     return {
       status: "ok",
       ...(planType ? { planType } : {}),
       ...(primary ? { primary } : {}),
       ...(secondary ? { secondary } : {}),
       ...(credits ? { credits } : {}),
-      ...(resetCredits ? { resetCredits } : {}),
       fetchedAt: Math.floor(Date.now() / 1000),
-    };
-  };
-
-  // AppServer 的 rateLimitResetCredits 带剩余次数与明细行；明细行取最近一次
-  // 过期时间，明细缺失时只保留次数。
-  const normalizeResetCreditsSummary = (summary) => {
-    if (!summary || typeof summary !== "object") return null;
-    const count = Number(summary.availableCount ?? summary.available_count);
-    if (!Number.isFinite(count)) return null;
-    let nextExpiresAt;
-    const rows = Array.isArray(summary.credits) ? summary.credits : [];
-    for (const row of rows) {
-      const status = String(row?.status || "");
-      if (status === "redeemed" || status === "unknown") continue;
-      const raw = Number(row?.expiresAt ?? row?.expires_at);
-      if (!Number.isFinite(raw) || raw <= 0) continue;
-      const expires = Math.round(raw > 10_000_000_000 ? raw / 1000 : raw);
-      if (expires * 1000 <= Date.now()) continue;
-      nextExpiresAt = nextExpiresAt === undefined ? expires : Math.min(nextExpiresAt, expires);
-    }
-    return {
-      availableCount: Math.max(0, Math.round(count)),
-      ...(nextExpiresAt ? { nextExpiresAt } : {}),
     };
   };
 
@@ -1983,6 +1964,7 @@
   const bootstrapMutationOptions = {
     attributes: true,
     attributeFilter: [
+      "data-app-navigation-rail",
       "data-app-action-sidebar-scroll",
       "data-app-action-sidebar-section",
       "data-app-action-sidebar-thread-id",

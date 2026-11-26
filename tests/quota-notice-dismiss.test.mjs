@@ -336,7 +336,7 @@ test("matches via React Fiber quota component props and ignores normal usage pan
     memoizedProps: {},
     return: {
       memoizedProps: {
-        resetCredits: 2,
+        remainingPercent: 80,
         resetsAt: "23:09",
       },
       type: function UsageSummaryCard() {},
@@ -352,9 +352,9 @@ test("matches via React Fiber quota component props and ignores normal usage pan
     memoizedProps: {},
     return: {
       memoizedProps: {
+        isOutOfUsage: true,
         onResetUsage() {},
         onUpgrade() {},
-        rateLimitResetCredits: 1,
         resetsAt: "23:09",
       },
       type: function RateLimitBanner() {},
@@ -416,7 +416,6 @@ test("never adds a close button to a paused or active goal bar beside or above a
       isOutOfUsage: true,
       onResetUsage() {},
       onUpgrade() {},
-      rateLimitResetCredits: 1,
       resetsAt: "23:09",
     },
     type: function ComposerBanners() {},
@@ -1026,4 +1025,100 @@ test("CDP preparation registers the script after bridge and status dependencies"
   );
   assert.ok(cdpSource.indexOf('"bridge-helpers"') < cdpSource.indexOf('"quota-notice-dismiss"'));
   assert.ok(cdpSource.indexOf('"security-warning-shield"') < cdpSource.indexOf('"quota-notice-dismiss"'));
+});
+
+test("covers 26.1120.50957 localConversation.usageLimit, enterprise upsellBanner, and chatgptConversations.rateLimitBanner variants", () => {
+  const cases = [
+    {
+      title: "You’ve hit your usage limit",
+      body: "Review your workspace's usage settings to keep working, or try again at 3:45 PM.",
+      cta: "Increase Usage Limit",
+    },
+    {
+      title: "你已达到使用上限",
+      body: "查看工作空间的使用设置，或者在 15:45 后重试。",
+      cta: "添加额度",
+    },
+    {
+      title: "你已达到使用上限",
+      body: "联系工作空间所有者以提高限额，或稍后再试。",
+      cta: "通知管理员",
+    },
+    {
+      title: "You’re approaching your usage limit",
+      body: "You’ve used 85% or more of your usage limit. Request an increase from your workspace admin.",
+      cta: "Request Increase",
+    },
+    {
+      title: "你的用量即将达到上限",
+      body: "用量已达到或超过限额的 90%。向工作空间管理员申请提高限额。",
+      cta: "申请提高限额",
+    },
+    {
+      title: "You’ve hit your usage limit",
+      body: "Upgrade your plan or add credits to continue.",
+      cta: "Upgrade to Pro",
+    },
+    {
+      title: "你已达到使用上限",
+      body: "升级套餐或充值额度以继续使用。",
+      cta: "查看套餐",
+    },
+  ];
+
+  for (const { title, body, cta } of cases) {
+    const runtime = createRuntime();
+    const banner = runtime.body.appendChild(createElement("section"));
+    const text = banner.appendChild(createElement("div"));
+    text.appendChild(createElement("h2", title));
+    text.appendChild(createElement("p", body));
+    const actions = banner.appendChild(createElement("div"));
+    actions.appendChild(createElement("button", cta));
+
+    runtime.window.__codeyQuotaNoticeDismiss.scan(banner);
+    const close = findCloseButton(banner);
+    assert.ok(close, `expected close button for "${title}" / "${cta}"`);
+    close.click();
+    assert.equal(banner.style.display, "none:important");
+  }
+});
+
+test("matches 26.1120.50957 upsellBanner React Fiber IDs and skips banners that already render a native dismiss button", () => {
+  const runtime = createRuntime();
+  const fiberBanner = runtime.body.appendChild(createElement("section"));
+  const heading = fiberBanner.appendChild(createElement("h2", "Localized warning"));
+  heading.__reactProps$test = { id: "codex.upsellBanner.enterprise.warning.title" };
+  const cta = fiberBanner.appendChild(createElement("button", "Action"));
+  cta.__reactProps$test = { id: "codex.upsellBanner.enterprise.warning.ownerCta" };
+
+  const nativeDismissBanner = runtime.body.appendChild(createElement("section"));
+  nativeDismissBanner.appendChild(createElement("h2", "You’re approaching your usage limit"));
+  nativeDismissBanner.appendChild(
+    createElement("p", "You’ve used 80% or more of your usage limit."),
+  );
+  nativeDismissBanner.appendChild(createElement("button", "Add credits"));
+  const nativeDismiss = nativeDismissBanner.appendChild(createElement("button", ""));
+  nativeDismiss.setAttribute("aria-label", "Dismiss usage banner");
+
+  const chineseNativeDismissBanner = runtime.body.appendChild(createElement("section"));
+  chineseNativeDismissBanner.appendChild(createElement("h2", "你的用量即将达到上限"));
+  chineseNativeDismissBanner.appendChild(createElement("button", "提升使用限额"));
+  const chineseDismiss = chineseNativeDismissBanner.appendChild(createElement("button", ""));
+  chineseDismiss.setAttribute("aria-label", "不再显示用量横幅");
+
+  const goalUsageLimitedBar = runtime.body.appendChild(createElement("section"));
+  goalUsageLimitedBar.appendChild(createElement("span", "目标使用受限"));
+  goalUsageLimitedBar.appendChild(createElement("button", "查看套餐"));
+
+  runtime.window.__codeyQuotaNoticeDismiss.scan(runtime.body);
+
+  assert.ok(findCloseButton(fiberBanner));
+  assert.equal(findCloseButton(nativeDismissBanner), null);
+  assert.equal(findCloseButton(chineseNativeDismissBanner), null);
+  assert.equal(findCloseButton(goalUsageLimitedBar), null);
+
+  // If a native Dismiss control renders on a late tick, any injected duplicate close button is removed.
+  const lateNativeClose = fiberBanner.appendChild(createElement("button", "Dismiss"));
+  runtime.emit([{ addedNodes: [lateNativeClose], target: fiberBanner, type: "childList" }]);
+  assert.equal(findCloseButton(fiberBanner), null);
 });

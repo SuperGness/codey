@@ -14,9 +14,8 @@
     "[role='dialog']",
     "[role='alertdialog']",
     "[aria-modal='true']",
-    "textarea",
+    ".ProseMirror",
     "[contenteditable='true']",
-    "[contenteditable='plaintext-only']",
     "[role='textbox']",
     "[data-app-action-sidebar-section]",
     "[data-app-action-sidebar-thread-row]",
@@ -27,34 +26,56 @@
   const scanningRootLimit = 24;
   const batchElementLimit = 160;
   const scanDelayMs = 40;
+  const nativeDismissLabels = [
+    /^(?:dismiss(?:\s+usage\s+banner)?|关闭|關閉|不再显示用量横幅|關閉用量橫幅)$/i,
+  ];
   const controlLabels = [
-    /^(?:reset\s+usage(?:\s+limit)?|reset\s+(?:my\s+)?(?:rate\s+limit|limit)|reset\s+limit|use\s+(?:a\s+)?rate\s+limit\s+reset)$/i,
-    /^(?:重新?置使用量|使用一次(?:速率限制)?重置(?:机会)?|重置(?:速率限制|使用量))$/,
-    /^申请更多使用额度$/,
-    /^request\s+more\s+usage$/i,
+    /^add\s+credits$/i,
+    /^request\s+(?:increase|more\s+usage)$/i,
+    /^increase\s+usage\s+limit$/i,
+    /^notify\s+admin$/i,
+    /^(?:use\s+available\s+reset|reset\s+usage(?:\s+limit)?)$/i,
+    /^(?:添加额度|充值额度|新增點數)$/,
+    /^(?:申请提高限额|申请增加用量|申请更多使用额度|申請提高使用上限|申請更多使用額度)$/,
+    /^(?:提升使用限额|提高使用額度上限)$/,
+    /^(?:通知管理员|通知管理員)$/,
+    /^(?:使用可用重置|重置使用量)$/,
   ];
   const actionControlLabels = [
     ...controlLabels,
-    /^(?:[^\p{L}\p{N}]*\s*)?(?:upgrade(?:\s+plan)?|升级(?:\s*套餐)?)$/iu,
+    /^(?:[^\p{L}\p{N}]*\s*)?(?:upgrade(?:\s+(?:plan|to\s+(?:pro|plus|go)))?|rejoin\s+pro|continue\s+with\s+plus|view\s+plans|升级(?:\s*套餐|至\s*(?:pro|plus|go)(?:\s*继续使用)?)?|重新订阅\s*pro|查看套餐|升級(?:\s*方案|至\s*(?:pro|plus|go)(?:\s*以繼續)?)?|重新訂閱\s*pro|查看方案)$/iu,
   ];
   const titlePatterns = [
-    /已达到使用额度上限/,
-    /you(?:'re|’re|\s+are)\s+out\s+of\s+(?:codex(?:\s*(?:和|与|及|and|&)\s*work)?|work)\s+usage/i,
-    /(?:you(?:'ve|’ve|\s+have)\s+(?:reached|hit)\s+your\s+|codex\s+)(?:usage|rate)\s+limits?(?:\s+(?:reached|exhausted))?/i,
-    /usage\s+limits?\s+reached/i,
-    /codex(?:\s*(?:和|与|及|and|&)\s*(?:work|工作(?:区)?))?[\s\S]{0,80}(?:使用\s*)?额度[\s\S]{0,40}(?:用完|耗尽|用尽|上限|达到限制|exhausted|reached|used\s+up)/i,
-    /codex(?:\s*(?:和|与|及|and|&)\s*(?:work|工作(?:区)?))?[\s\S]{0,80}(?:usage\s+limits?|limits?|quota)[\s\S]{0,40}(?:exhausted|reached|used\s+up)/i,
+    /you(?:'ve|\s+have)\s+(?:hit|reached)\s+your\s+usage\s+limits?/i,
+    /you(?:'re|\s+are)\s+approaching\s+your\s+usage\s+limit/i,
+    /you(?:'re|\s+are)\s+out\s+of\s+(?:codex\s+(?:and\s+work\s+)?)?usage/i,
+    /used\s+(?:at\s+least\s+)?\d+%\s+(?:or\s+more\s+)?of\s+your\s+usage\s+limit/i,
+    /(?:codex\s+(?:and|&)\s+work\s+(?:(?:usage|rate)\s+)?|(?:codex\s+)?(?:usage|rate)\s+)limits?\s+(?:reached|exhausted)/i,
+    /(?:codex(?:\s*(?:和|与|及|and|&)\s*(?:work|工作(?:区)?))?\s*)?(?:你已达(?:到)?使用(?:额度)?上限|已达到使用额度上限|你已達(?:到)?使用上限|使用额度已用完)/i,
+    /你的用量即将达到上限|你即將達到使用上限/,
+    /用量已达到或超过限额的\s*\d+%|使用量已達上限的\s*\d+%\s*以上|(?:已使用|已用掉)至少\s*\d+%\s*的(?:用量限额|使用額度)/,
   ];
   const noticeSupportPatterns = [
-    /请向管理员发送请求/,
-    /(?:send\s+a\s+request\s+to|contact|ask)\s+your\s+admin/i,
-    /(?:速率限制|使用额度|额度|配额)[\s\S]{0,80}(?:重置|恢复)/,
-    /使用一次[\s\S]{0,30}重置机会/,
-    /(?:rate\s+limit|usage\s+limit|quota)[\s\S]{0,100}(?:reset|renew)/i,
-    /(?:rate\s+limit\s+resets?\s+now|reset\s+opportunity)/i,
+    /review\s+your\s+workspace(?:'s)?\s+usage\s+settings/i,
+    /contact\s+your\s+workspace\s+owner/i,
+    /request\s+an\s+increase\s+from\s+your\s+workspace\s+admin/i,
+    /increase\s+your\s+usage\s+limit\s+to\s+keep\s+working/i,
+    /(?:upgrade(?:\s+your\s+plan)?|add\s+credits)(?:\s+or\s+add\s+credits)?\s+to\s+continue/i,
+    /try\s+again\s+(?:at\s+\S+|later)/i,
+    /(?:send\s+a\s+request\s+to|notify|contact)\s+your\s+(?:workspace\s+)?(?:admin|owner)/i,
+    /workspace\s+owner\s+(?:notified|was\s+already\s+notified)|limit\s+increase\s+(?:requested|was\s+already\s+requested)/i,
+    /(?:rate\s+limit|usage\s+limit)s?\s+resets?/i,
+    /查看工作空间的使用设置|檢查工作區的用量設定/,
+    /联系工作空间所有者|聯絡工作區擁有者/,
+    /向工作空间管理员申请提高限额|向工作區管理員申請提高上限/,
+    /提高用量限额[，,\s]*以便继续工作|提高用量上限[，,\s]*以繼續作業/,
+    /(?:升级套餐|充值(?:额度)?|升級方案|加(?:值|購)點數)[\s\S]{0,16}(?:继续|繼續)/,
+    /(?:请在\s*\S+\s*后重试|或在\s*\S+\s*再试|请稍后再试|请稍后重试|再試一次|請稍後再試)/,
+    /请向管理员发送请求|已通知(?:过)?管理员|请求已发送给管理员|已通知工作(?:空间所有者|區擁有者)|已申请提高(?:限额|使用上限)/,
+    /(?:速率限制|使用额度|用量)[\s\S]{0,40}重置/,
   ];
   const remainingQuotaTextPattern = /(?:剩余\s*\d+\s*%|\b\d+\s*%\s*(?:left|remaining)\b)/i;
-  const goalBannerPrefixPattern = /^(?:[^\p{L}\p{N}]*\s*)?(?:(?:已(?:暂停|完成|停止|取消)|进行中|运行中)的目标|目标已(?:暂停|完成|停止|取消)|(?:paused|active|running|completed|stopped|cancel+ed)\s+goal|goal\s+(?:paused|active|running|completed|stopped|cancel+ed))(?:\s|$)/iu;
+  const goalBannerPrefixPattern = /^(?:[^\p{L}\p{N}]*\s*)?(?:(?:已(?:暂停|达成|完成|停止|取消)|进行中|运行中)的目标|目标(?:已(?:暂停|达成|完成|停止|取消|停滞)|使用受限|受限)|目標(?:已(?:暫停|達成|完成|停止|取消)|停滯|使用次數受限|受限)|進行中的目標|(?:paused|active|running|completed|stopped|cancel+ed|stalled)\s+goal|goal\s+(?:paused|active|running|completed|stopped|cancel+ed|stalled|usage\s+limited|budget\s+limited))(?:\s|$)/iu;
   const reactInternalKeyPattern = /^__(?:reactProps|reactFiber)\$/;
   const reactTraversalIgnoredKeys = new Set([
     "return",
@@ -67,10 +88,11 @@
     "alternate",
   ]);
   const reactGoalIdPattern = /(?:^|[._:/-])(?:thread[_-]?goals?|goal[_-]?(?:banner|bar|card|pill|row|status|header|strip|tray)|paused[_-]?goal|active[_-]?goal)(?:$|[._:/-])/i;
-  const reactTitleIdPattern = /(?:^|[._:/-])(?:out[_-]?of[_-]?(?:[a-z0-9]+[_-]?)?usage|(?:usage|rate|quota)[_-]?limits?[_-]?(?:reached|exhausted|exceeded|banner|notice|alert|callout|hit)|(?:codex|work|team|workspace)[_-]?(?:and[_-]?work[_-]?)?(?:usage|rate|quota)[_-]?(?:limits?[_-]?)?(?:reached|exhausted|exceeded|out)|rate[_-]?limit[_-]?(?:banner|notice|callout|card)|usage[_-]?limit[_-]?(?:banner|notice|callout|card)|quota[_-]?(?:banner|notice|callout|card))(?:$|[._:/-])/i;
-  const reactSupportIdPattern = /(?:^|[._:/-])(?:rate[_-]?limit[_-]?(?:reset|resets|renews|status|description|body)|usage[_-]?limit[_-]?(?:reset|resets|renews|description|body)|out[_-]?of[_-]?usage[_-]?(?:description|body|subtitle)|reset[_-]?credits?|rate[_-]?limit[_-]?reset[_-]?credits?|request[_-]?more[_-]?usage|(?:contact|ask|request)[_-]?admin)(?:$|[._:/-])/i;
-  const reactControlIdPattern = /(?:^|[._:/-])(?:reset[_-]?(?:usage|rate[_-]?limit|limit)|use[_-]?(?:a[_-]?)?rate[_-]?limit[_-]?reset|request[_-]?more[_-]?usage|ask[_-]?admin(?:[_-]?for[_-]?(?:more[_-]?)?usage)?)(?:$|[._:/-])/i;
-  const reactActionControlIdPattern = /(?:^|[._:/-])(?:upgrade(?:[_-]?(?:plan|cta|button|now))?)(?:$|[._:/-])/i;
+  const reactNativeDismissIdPattern = /(?:^|[._:/-])(?:(?:rate[_-]?limit|usage[_-]?limit|upsell|quota)[a-z0-9_.-]*[._:/-]dismiss|dismiss[_-]?usage[_-]?banner)$/i;
+  const reactTitleIdPattern = /(?:^|[._:/-])(?:localConversation\.usageLimit(?:\.[a-z0-9_.-]+)?|(?:rate[_-]?limit[_-]?)?upsell[_-]?banner(?:\.enterprise\.warning\.title)?|out[_-]?of[_-]?(?:[a-z0-9]+[_-]?)?usage|(?:usage|rate|quota)[_-]?limits?[_-]?(?:reached|exhausted|exceeded|banner|notice|alert|callout|hit)|(?:codex|work|team|workspace)[_-]?(?:and[_-]?work[_-]?)?(?:usage|rate|quota)[_-]?(?:limits?[_-]?)?(?:reached|exhausted|exceeded|out)|rate[_-]?limit[_-]?(?:banner|notice|callout|card)|usage[_-]?limit[_-]?(?:banner|notice|callout|card)|quota[_-]?(?:banner|notice|callout|card))(?:$|[._:/-])/i;
+  const reactSupportIdPattern = /(?:^|[._:/-])(?:localConversation\.usageLimit\.[a-z0-9_.-]+|upsellBanner\.(?:enterprise\.warning\.(?:headline|ownerHeadline|limitContext)|notifyOwner\.(?:sent|cooldownActive|failed)|requestIncrease\.(?:sent|cooldownActive|failed))|creditRequest\.(?:success|alreadyRequested|error|requestedTooltip)|(?:rate|usage)[_-]?limit[_-]?(?:reset|resets|renews|status|description|body)|out[_-]?of[_-]?usage[_-]?(?:description|body|subtitle)|request[_-]?more[_-]?usage|(?:contact|ask|request|notify)[_-]?(?:admin|owner))(?:$|[._:/-])/i;
+  const reactControlIdPattern = /(?:^|[._:/-])(?:add[_-]?credits|request[_-]?(?:increase|more[_-]?usage)|ownerCta|increase[_-]?usage[_-]?limit|notify[_-]?admin|use[_-]?available[_-]?reset|reset[_-]?(?:usage|rate[_-]?limit|limit)|ask[_-]?admin(?:[_-]?for[_-]?(?:more[_-]?)?usage)?)(?:$|[._:/-])/i;
+  const reactActionControlIdPattern = /(?:^|[._:/-])(?:upgrade(?:[_-]?(?:plan|cta|button|now|to[_-]?(?:pro|plus|go)))?|rejoin[_-]?pro|continue[_-]?with[_-]?plus|view[_-]?plans)(?:$|[._:/-])/i;
   const pendingRoots = new Set();
   const pendingRootStates = new WeakMap();
   const dismissedNotices = new Set();
@@ -173,8 +195,10 @@
   const hasQuotaResetCallbackProp = (obj) => (
     typeof obj.onResetUsage === "function"
     || typeof obj.onResetRateLimit === "function"
-    || typeof obj.onUseRateLimitReset === "function"
     || typeof obj.onRequestMoreUsage === "function"
+    || typeof obj.onRequestIncrease === "function"
+    || typeof obj.onNotifyAdmin === "function"
+    || typeof obj.onAddCredits === "function"
   );
 
   const hasQuotaUpgradeCallbackProp = (obj) => (
@@ -185,12 +209,10 @@
   const hasQuotaResetStateProp = (obj) => (
     obj.resetsAt != null
     || obj.resetAt != null
+    || obj.resetDate != null
     || obj.rateLimitResetAt != null
     || obj.rate_limit_reset_at != null
-    || obj.rateLimitResetCredits != null
     || obj.rate_limit_reset_credits != null
-    || obj.resetCredits != null
-    || obj.availableResetCredits != null
   );
 
   const hasQuotaExhaustedFlagProp = (obj) => (
@@ -199,6 +221,7 @@
     || obj.usageLimitReached === true
     || obj.isUsageLimitReached === true
     || obj.rateLimitReached === true
+    || obj.isRateLimitReached === true
     || obj.isRateLimited === true
     || obj.isQuotaExhausted === true
     || obj.quotaExhausted === true
@@ -208,11 +231,11 @@
 
   const inspectElementReactSignals = (element) => {
     if (!(element instanceof Element)) {
-      return { actionControl: false, control: false, goal: false, support: false, title: false };
+      return { actionControl: false, control: false, goal: false, nativeDismiss: false, support: false, title: false };
     }
     const payloadEntries = collectElementReactPayloads(element);
     if (!payloadEntries.length) {
-      return { actionControl: false, control: false, goal: false, support: false, title: false };
+      return { actionControl: false, control: false, goal: false, nativeDismiss: false, support: false, title: false };
     }
     const payloads = payloadEntries.map((entry) => entry.value);
     const cached = reactSignalCache.get(element);
@@ -228,6 +251,7 @@
       actionControl: false,
       control: false,
       goal: false,
+      nativeDismiss: false,
       support: false,
       title: false,
     };
@@ -243,15 +267,21 @@
           || keyHint === "__componentName"
         ) {
           if (reactGoalIdPattern.test(text)) signals.goal = true;
-          if (reactTitleIdPattern.test(text)) signals.title = true;
-          if (reactSupportIdPattern.test(text)) signals.support = true;
+          if (reactNativeDismissIdPattern.test(text)) {
+            signals.nativeDismiss = true;
+            return;
+          }
           if (reactControlIdPattern.test(text)) {
             signals.control = true;
             signals.actionControl = true;
+            return;
           }
           if (reactActionControlIdPattern.test(text)) {
             signals.actionControl = true;
+            return;
           }
+          if (reactTitleIdPattern.test(text)) signals.title = true;
+          if (reactSupportIdPattern.test(text)) signals.support = true;
         }
         if (
           keyHint === "defaultMessage"
@@ -259,8 +289,13 @@
           || keyHint === "description"
           || keyHint === "label"
           || keyHint === "text"
+          || keyHint === "aria-label"
         ) {
           if (goalBannerPrefixPattern.test(text)) signals.goal = true;
+          if (matchesAny(text, nativeDismissLabels)) {
+            signals.nativeDismiss = true;
+            return;
+          }
           if (matchesAny(text, titlePatterns)) signals.title = true;
           if (matchesAny(text, noticeSupportPatterns)) signals.support = true;
           if (matchesAny(text, controlLabels)) {
@@ -430,6 +465,29 @@
     ));
   };
 
+  const isNativeDismissControl = (control, precomputedReact = null) => {
+    if (
+      !(control instanceof Element)
+      || !control.matches?.("button, [role=button]")
+      || control.getAttribute?.(closeAttribute) === "true"
+      || control.disabled
+      || control.closest?.(`[${dismissedAttribute}="true"]`)
+    ) {
+      return false;
+    }
+    const react = precomputedReact || inspectElementReactSignals(control);
+    return (
+      react.nativeDismiss
+      || controlAttributeCandidates(control).some((attr) => reactNativeDismissIdPattern.test(attr))
+      || controlLabelCandidates(control).some((label) => matchesAny(label, nativeDismissLabels))
+    );
+  };
+
+  const hasNativeDismissControl = (element) => (
+    typeof element?.querySelectorAll === "function"
+    && [...element.querySelectorAll("button, [role=button]")].some((control) => isNativeDismissControl(control))
+  );
+
   const hasNoticeControl = (element) => (
     typeof element?.querySelectorAll === "function"
     && [...element.querySelectorAll(controlSelector)].some(isNoticeControl)
@@ -505,6 +563,8 @@
 
   const createNoticeDetector = () => {
     const noticeControlCache = new WeakMap();
+    const actionControlCache = new WeakMap();
+    const nativeDismissCache = new WeakMap();
     const reactSubtreeCache = new WeakMap();
     const textCache = new WeakMap();
     const readText = (element) => {
@@ -522,6 +582,22 @@
         noticeControlCache.set(element, hasControl);
       }
       return hasControl;
+    };
+    const readHasActionControl = (element) => {
+      let hasAction = actionControlCache.get(element);
+      if (hasAction === undefined) {
+        hasAction = hasNoticeActionControl(element);
+        actionControlCache.set(element, hasAction);
+      }
+      return hasAction;
+    };
+    const readHasNativeDismiss = (element) => {
+      let hasDismiss = nativeDismissCache.get(element);
+      if (hasDismiss === undefined) {
+        hasDismiss = hasNativeDismissControl(element);
+        nativeDismissCache.set(element, hasDismiss);
+      }
+      return hasDismiss;
     };
     return (element) => {
       if (!(element instanceof Element)) return false;
@@ -542,6 +618,7 @@
       }
       const reactSignals = subtreeReactSignals(element, reactSubtreeCache);
       if (reactSignals.goal) return false;
+      if (readHasNativeDismiss(element)) return false;
       if (element.getAttribute?.(noticeAttribute) === "true") return true;
       if (element.querySelector?.(`[${noticeAttribute}="true"]`)) return false;
       const text = readText(element);
@@ -549,7 +626,7 @@
       const hasTitle = reactSignals.title || matchesAny(text, titlePatterns);
       const hasSupport = reactSignals.support || matchesAny(text, noticeSupportPatterns);
       if (hasTitle) {
-        return hasSupport || readHasControl(element);
+        return hasSupport || readHasControl(element) || readHasActionControl(element);
       }
       if (
         isComposerBannerSlot(element)
@@ -575,6 +652,7 @@
   const anchorsWithin = (root, { continuation = null, remaining = null } = {}) => {
     const titleAnchors = [];
     const noticeControls = [];
+    const actionControls = [];
     const traversal = window.__codeySharedRuntime.walkElementsBudgeted(
       root,
       (element) => {
@@ -592,6 +670,14 @@
           element.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
           return false;
         }
+        if (isNativeDismissControl(element, ownReact)) {
+          const decorated = element.closest?.(`[${noticeAttribute}="true"]`);
+          if (decorated) {
+            decorated.removeAttribute?.(noticeAttribute);
+            noticeSurface(decorated)?.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
+          }
+          return;
+        }
         if (
           ownReact.title
           || element.getAttribute?.(noticeAttribute) === "true"
@@ -600,12 +686,14 @@
           titleAnchors.push(element);
         }
         if (isNoticeControl(element, ownReact)) noticeControls.push(element);
+        else if (isNoticeActionControl(element, ownReact)) actionControls.push(element);
       },
       { continuation, remaining },
     );
     scannedElements += traversal.visited;
     childExpansions += traversal.childExpansions;
     return {
+      actionControls,
       continuation: traversal.continuation,
       noticeControls,
       titleAnchors,
@@ -635,11 +723,12 @@
     const searchRoot = notice || (start instanceof Element ? start : null);
     if (!searchRoot) return null;
     const {
+      actionControls,
       noticeControls,
       titleAnchors,
     } = anchorsWithin(searchRoot);
     const nested = innermostNotices(
-      [...titleAnchors, ...noticeControls]
+      [...titleAnchors, ...noticeControls, ...actionControls]
         .map((anchor) => nearestNotice(anchor, isNotice))
         .filter(Boolean),
     );
@@ -793,6 +882,11 @@
       hideNotice(notice);
       return null;
     }
+    if (hasNativeDismissControl(notice) || (surface !== notice && hasNativeDismissControl(surface))) {
+      notice.removeAttribute?.(noticeAttribute);
+      surface.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
+      return null;
+    }
     const existing = surface.querySelector?.(`[${closeAttribute}="true"]`);
     if (existing) return existing;
 
@@ -824,6 +918,7 @@
     scanCount += 1;
     addStyle();
     const {
+      actionControls,
       continuation: nextContinuation,
       noticeControls,
       titleAnchors,
@@ -831,6 +926,7 @@
     const starts = [
       ...titleAnchors,
       ...noticeControls,
+      ...actionControls,
     ];
     const matches = innermostNotices(
       starts.map((start) => nearestNotice(start, detector)).filter(Boolean),

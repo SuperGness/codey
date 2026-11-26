@@ -390,25 +390,27 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     rateLimits: {
       limitId: "codex",
       primary: {
-        usedPercent: 20,
+        usedPercent: 65,
         windowDurationMins: 10_080,
         resetsAt: Math.floor(tomorrowResetAt.getTime() / 1000),
       },
-      credits: {
-        hasCredits: true,
-        unlimited: false,
-        balance: "77",
-      },
-      planType: "plus",
-    },
-    rateLimitResetCredits: {
-      availableCount: 2,
-      credits: [
-        { id: "credit-1", status: "available", expiresAt: appServerCreditExpiresAt },
-        { id: "credit-2", status: "redeemed", expiresAt: Math.floor(tomorrowResetAt.getTime() / 1000) },
-      ],
+      planType: "free",
     },
     rateLimitsByLimitId: {
+      codex: {
+        limitId: "codex",
+        primary: {
+          usedPercent: 20,
+          windowDurationMins: 10_080,
+          resetsAt: Math.floor(tomorrowResetAt.getTime() / 1000),
+        },
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          balance: "77",
+        },
+        planType: "plus",
+      },
       codex_bengalfox: {
         limitId: "codex_bengalfox",
         primary: {
@@ -430,11 +432,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
       if (path === "/api/store_official_account_usage") {
         assert.equal(args.authGeneration, 1);
         assert.equal(args.snapshot.primary.usedPercent, 20);
-        assert.equal(args.snapshot.resetCredits.availableCount, 2);
-        assert.equal(
-          args.snapshot.resetCredits.nextExpiresAt,
-          appServerCreditExpiresAt,
-        );
+        assert.equal(args.snapshot.resetCredits, undefined);
         assert.ok(args.snapshot.fetchedAt > 0);
         return { status: "ok" };
       }
@@ -576,7 +574,8 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(singleWeeklySummary, /class="codey-usage-meter" aria-hidden="true"><span><\/span><\/span>/);
 
   accountUsageResult = { status: "error", message: "官方额度接口返回 401", authGeneration: 1 };
-  appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
+  appServerUsageResult.rateLimitsByLimitId.codex.primary.resetsAt =
+    Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
   await window.__codeyRefreshAccountUsage();
   assert.equal(appServerUsageCalls, 1);
   assert.equal(usage.dataset.windowCount, "1");
@@ -585,11 +584,8 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时额度/);
   assert.match(usage.getAttribute("aria-label"), /1 天 5 小时后重置/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
-  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?2 次[\s\S]*?\d{2}:\d{2} 过期/);
-  assert.equal(usage.dataset.creditExpiring, "true");
-  assert.match(usage.innerHTML, /codey-usage-credit-dot[\s\S]*?codey-usage-plan-tag/);
-  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-credit-dot[\s\S]*?is-expiring[\s\S]*?过期/);
-  assert.match(usage.getAttribute("aria-label"), /重置次数即将过期/);
+  assert.doesNotMatch(usage.innerHTML, /剩余重置次数|codey-usage-credit-dot/);
+  assert.equal(usage.dataset.creditExpiring, undefined);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-plan="plus">Plus<\/span>/);
 
   accountUsageResult = { status: "unavailable", reason: "third_party" };
