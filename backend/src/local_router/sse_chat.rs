@@ -559,10 +559,7 @@ impl ChatSseAccumulator {
             message.insert("reasoning_content".to_string(), Value::String(reasoning));
         }
         if !self.annotations.is_empty() {
-            message.insert(
-                "annotations".to_string(),
-                Value::Array(self.annotations),
-            );
+            message.insert("annotations".to_string(), Value::Array(self.annotations));
         }
         if !self.tool_calls.is_empty() {
             let mut calls = Vec::new();

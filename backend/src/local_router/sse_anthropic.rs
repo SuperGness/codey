@@ -904,10 +904,11 @@ pub(crate) fn chat_message_content_text(content: &Value) -> String {
 
 pub(crate) fn normalize_chat_annotation(annotation: &Value) -> Option<Value> {
     let object = annotation.as_object()?;
-    let kind = object
-        .get("type")
-        .and_then(Value::as_str)
-        .or_else(|| object.contains_key("url_citation").then_some("url_citation"))?;
+    let kind = object.get("type").and_then(Value::as_str).or_else(|| {
+        object
+            .contains_key("url_citation")
+            .then_some("url_citation")
+    })?;
     if kind == "url_citation" {
         let nested = object.get("url_citation").and_then(Value::as_object);
         let field = |name: &str| {

@@ -3844,7 +3844,16 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            ["user", "assistant", "tool", "tool", "user", "system", "user", "user"]
+            [
+                "user",
+                "assistant",
+                "tool",
+                "tool",
+                "user",
+                "system",
+                "user",
+                "user"
+            ]
         );
         assert_eq!(messages[2]["tool_call_id"], "call_img");
         assert_eq!(messages[3]["tool_call_id"], "call_cmd");
@@ -3852,10 +3861,7 @@ mod tests {
             messages[5]["content"],
             "<image_resize_notice>resized</image_resize_notice>"
         );
-        assert_eq!(
-            messages[7]["content"],
-            "now summarize"
-        );
+        assert_eq!(messages[7]["content"], "now summarize");
 
         // Anthropic Messages：同一 user 回合中两个 tool_result 必须紧邻排在辅助图片和提示之前。
         let anthropic = responses_to_anthropic_messages_body(&responses_body).unwrap();
@@ -3881,7 +3887,9 @@ mod tests {
             .iter()
             .map(|item| {
                 (
-                    item.get("type").and_then(Value::as_str).unwrap_or("message"),
+                    item.get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("message"),
                     item.get("call_id")
                         .or_else(|| item.get("role"))
                         .and_then(Value::as_str),
@@ -3942,10 +3950,7 @@ mod tests {
                 r#"{"arr":[{"k":"first","k":"second"}]}"#,
                 json!({"arr": [{"k": "second"}]}),
             ),
-            (
-                r#"{"a":1,"\u0061":2}"#,
-                json!({"a": 2}),
-            ),
+            (r#"{"a":1,"\u0061":2}"#, json!({"a": 2})),
         ] {
             assert!(json_str_has_duplicate_object_keys(raw), "{raw}");
             let deduped = deduplicate_json_object_keys(raw);

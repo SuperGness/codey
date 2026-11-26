@@ -63,7 +63,8 @@ fn extract_for_item_id(message: &str) -> Option<&str> {
 }
 
 fn extract_unique_rs_item_id(message: &str) -> Option<&str> {
-    if let Some(id) = extract_for_item_id(message).filter(|id| id.starts_with("rs_") && id.len() > 3)
+    if let Some(id) =
+        extract_for_item_id(message).filter(|id| id.starts_with("rs_") && id.len() > 3)
     {
         return Some(id);
     }

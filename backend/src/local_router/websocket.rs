@@ -895,7 +895,9 @@ impl WebSocketResponsesDownstream {
                 if websocket_error_is_message_too_big(&error) {
                     restore_http_request_fields(body, http_stream, http_background, http_type);
                     if let Some(probe) = probe {
-                        probe.mark_upstream_error_summary("Responses WebSocket 单帧超过大小限制 (1009)");
+                        probe.mark_upstream_error_summary(
+                            "Responses WebSocket 单帧超过大小限制 (1009)",
+                        );
                         probe.finish_upstream_attempt(
                             crate::route_request_log::AttemptOutcome::Failed,
                             crate::route_request_log::AttemptPhase::Send,

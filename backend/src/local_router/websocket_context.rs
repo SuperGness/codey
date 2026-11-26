@@ -494,7 +494,9 @@ impl UpstreamWebSocketBackoffs {
         {
             return (backoff.failure_count, backoff.until.duration_since(now));
         }
-        let reset_after = *steps.last().expect("WebSocket backoff steps must not be empty");
+        let reset_after = *steps
+            .last()
+            .expect("WebSocket backoff steps must not be empty");
         let failure_count = self
             .entries
             .get(&key)

@@ -16017,7 +16017,9 @@ async fn terminalless_empty_chat_sse_is_rejected_while_legitimate_empty_stop_suc
             .unwrap();
         let events = parse_responses_websocket_sse_events(&text).unwrap();
         assert!(
-            events.iter().any(|event| event["type"] == "response.failed"),
+            events
+                .iter()
+                .any(|event| event["type"] == "response.failed"),
             "streaming SSE must emit response.failed for {bad_sse:?}, got {events:?}"
         );
         assert!(

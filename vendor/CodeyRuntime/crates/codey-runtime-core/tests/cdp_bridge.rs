@@ -182,7 +182,10 @@ fn data_html_page_with_codex_in_title_or_content_is_not_a_codex_target() {
 fn primary_target_selection_skips_data_html_errors_before_normal_pages() {
     for (title, url) in [
         ("ChatGPT", "app://-/index.html"),
-        ("ChatGPT", "app://-/index.html?initialRoute=%2Flocal%2Fthread-1"),
+        (
+            "ChatGPT",
+            "app://-/index.html?initialRoute=%2Flocal%2Fthread-1",
+        ),
     ] {
         let targets = vec![
             target(
@@ -446,7 +449,13 @@ fn unrelated_blank_app_page_is_not_a_codex_target() {
 
 #[test]
 fn pick_injectable_codex_page_target_requires_websocket() {
-    let targets = vec![target("codex", "page", "ChatGPT", "app://-/index.html", None)];
+    let targets = vec![target(
+        "codex",
+        "page",
+        "ChatGPT",
+        "app://-/index.html",
+        None,
+    )];
 
     let error = pick_injectable_codex_page_target(&targets)
         .expect_err("Codex page without websocket must not be selected for injection");
@@ -695,7 +704,11 @@ async fn install_bridge_falls_back_to_runtime_evaluate_when_page_enable_fails() 
 
         let eval_bridge = recv_json(&mut socket).await;
         assert_eq!(eval_bridge["method"], "Runtime.evaluate");
-        send_json(&mut socket, json!({ "id": eval_bridge["id"], "result": {} })).await;
+        send_json(
+            &mut socket,
+            json!({ "id": eval_bridge["id"], "result": {} }),
+        )
+        .await;
 
         let eval_script = recv_json(&mut socket).await;
         assert_eq!(eval_script["method"], "Runtime.evaluate");
@@ -703,7 +716,11 @@ async fn install_bridge_falls_back_to_runtime_evaluate_when_page_enable_fails() 
             eval_script["params"]["expression"],
             "window.__codeyModelWhitelistPatch = {};"
         );
-        send_json(&mut socket, json!({ "id": eval_script["id"], "result": {} })).await;
+        send_json(
+            &mut socket,
+            json!({ "id": eval_script["id"], "result": {} }),
+        )
+        .await;
         close_socket(&mut socket).await;
     })
     .await;

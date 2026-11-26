@@ -166,7 +166,9 @@ async fn stalled_startup_page_enable_never_blocks_fetch_source_gate_patching() {
     assert_eq!(page_enable["sessionId"], "main-session");
     // Do NOT reply to Page.enable: simulate cold-start Page.enable stall (#63240).
     let url = "app://-/assets/async/49792.d8d33ace73.js";
-    service.send(paused("main-session", "r-gate", url, true)).await;
+    service
+        .send(paused("main-session", "r-gate", url, true))
+        .await;
     let body = service.expect("Fetch.getResponseBody").await;
     service
         .reply(

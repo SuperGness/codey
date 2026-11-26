@@ -381,7 +381,11 @@ pub async fn install_bridge_with_options(
         )?;
     } else {
         let eval_response = session
-            .send_command(7, "Runtime.evaluate", runtime_evaluate_params(&bridge_script))
+            .send_command(
+                7,
+                "Runtime.evaluate",
+                runtime_evaluate_params(&bridge_script),
+            )
             .await?;
         ensure_runtime_evaluate_succeeded(eval_response)?;
     }
