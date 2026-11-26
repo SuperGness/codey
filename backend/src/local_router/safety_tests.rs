@@ -910,3 +910,54 @@ async fn disabling_route_releases_idle_cached_socket_without_another_request() {
     assert!(result.unwrap().is_some());
     assert!(downstream.upstream.is_none());
 }
+
+#[tokio::test]
+async fn verify_router_endpoint_diagnoses_loopback_proxy_or_tun_hijack() {
+    for (raw_response, expect_proxy_hint) in [
+        (
+            "HTTP/1.1 502 Bad Gateway\r\nServer: clash\r\nContent-Length: 0\r\n\r\n",
+            true,
+        ),
+        (
+            "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\nContent-Length: 0\r\n\r\n",
+            true,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nVia: 1.1 mihomo\r\nContent-Type: text/html\r\n\r\n<html>hijacked</html>",
+            true,
+        ),
+        (
+            "HTTP/1.1 401 Unauthorized\r\nx-codey-request-id: req-1\r\nContent-Length: 0\r\n\r\n",
+            false,
+        ),
+    ] {
+        let hijacker = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = hijacker.local_addr().unwrap();
+        let payload = raw_response.as_bytes().to_vec();
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = hijacker.accept().await.unwrap();
+            let mut buf = [0_u8; 512];
+            let _ = socket.read(&mut buf).await;
+            socket.write_all(&payload).await.unwrap();
+        });
+        let endpoint = RuntimeRouterEndpoint {
+            base_url: format!("http://{addr}/v1"),
+            token: "codey-router-test".into(),
+            requires_openai_auth: false,
+            supports_remote_compaction: false,
+            supports_websockets: false,
+        };
+        let err = format!(
+            "{:#}",
+            verify_router_endpoint(&endpoint, Duration::from_secs(2))
+                .await
+                .unwrap_err()
+        );
+        assert_eq!(
+            err.contains("全局代理或 TUN 模式"),
+            expect_proxy_hint,
+            "unexpected error diagnostic: {err}"
+        );
+        server_task.await.unwrap();
+    }
+}

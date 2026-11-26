@@ -369,6 +369,43 @@ impl LocalRouter {
     }
 }
 
+pub(crate) fn router_readiness_loopback_proxy_hint(
+    status: &str,
+    raw_headers: &str,
+) -> Option<&'static str> {
+    const HINT: &str = "请检查系统全局代理或 TUN 模式是否误劫持了本机 127.0.0.1 回环流量";
+    let mut has_codey_request_id = false;
+    let mut has_proxy_header = false;
+    for line in raw_headers.lines().skip(1) {
+        let Some((name, _)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("x-codey-request-id") {
+            has_codey_request_id = true;
+        } else if name.eq_ignore_ascii_case("via")
+            || name.eq_ignore_ascii_case("proxy-authenticate")
+            || name.eq_ignore_ascii_case("proxy-agent")
+            || name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("x-proxy-error")
+            || name.eq_ignore_ascii_case("x-squid-error")
+            || name.eq_ignore_ascii_case("x-forwarded-for")
+            || name.eq_ignore_ascii_case("x-cache")
+            || name.eq_ignore_ascii_case("server")
+        {
+            has_proxy_header = true;
+        }
+    }
+    if has_codey_request_id {
+        return None;
+    }
+    let proxy_status = matches!(
+        status,
+        "301" | "302" | "307" | "308" | "403" | "407" | "502" | "503" | "504"
+    );
+    (has_proxy_header || proxy_status).then_some(HINT)
+}
+
 pub(super) async fn verify_router_endpoint(
     endpoint: &RuntimeRouterEndpoint,
     wait: Duration,
@@ -409,16 +446,31 @@ pub(super) async fn verify_router_endpoint(
         }
         let header_end =
             find_header_end(&response).context("本地路由就绪检查响应头无效")?;
-        let status_line = std::str::from_utf8(&response[..header_end])
-            .context("本地路由就绪检查响应头不是 UTF-8")?
-            .lines()
-            .next()
-            .unwrap_or_default();
+        let raw_headers = std::str::from_utf8(&response[..header_end])
+            .context("本地路由就绪检查响应头不是 UTF-8")?;
+        let status_line = raw_headers.lines().next().unwrap_or_default();
         let status = status_line.split_whitespace().nth(1).unwrap_or_default();
-        anyhow::ensure!(status == "200", "本地路由就绪检查返回状态 {status_line}");
-        let body: Value = serde_json::from_slice(&response[header_end + 4..])
-            .context("本地路由就绪检查响应无效")?;
-        anyhow::ensure!(body.is_array(), "本地路由就绪检查未返回并发状态");
+        let proxy_hint = router_readiness_loopback_proxy_hint(status, raw_headers);
+        if status != "200" {
+            match proxy_hint {
+                Some(hint) => {
+                    anyhow::bail!("本地路由就绪检查返回状态 {status_line}（{hint}）")
+                }
+                None => anyhow::bail!("本地路由就绪检查返回状态 {status_line}"),
+            }
+        }
+        let body: Value = serde_json::from_slice(&response[header_end + 4..]).with_context(|| {
+            match proxy_hint {
+                Some(hint) => format!("本地路由就绪检查响应无效（{hint}）"),
+                None => "本地路由就绪检查响应无效".to_string(),
+            }
+        })?;
+        if !body.is_array() {
+            match proxy_hint {
+                Some(hint) => anyhow::bail!("本地路由就绪检查未返回并发状态（{hint}）"),
+                None => anyhow::bail!("本地路由就绪检查未返回并发状态"),
+            }
+        }
         Ok(())
     })
     .await
