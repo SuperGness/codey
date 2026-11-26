@@ -126,9 +126,10 @@ function createRuntime(config, { deferTimers = false } = {}) {
 function appendEnglishWarning(body) {
   const warning = body.appendChild(new FakeElement(
     "section",
-    "Full access is on ChatGPT can run commands without your permission. Prompt injection.",
+    "Full access is on ChatGPT can edit any file and run commands with internet access without your approval. This increases the risk of data loss, exposed information, and unexpected changes.",
   ));
-  const button = warning.appendChild(new FakeElement("button", "Hide from this session"));
+  const button = warning.appendChild(new FakeElement("button", ""));
+  button.setAttribute("aria-label", "Dismiss Full access warning for this session");
   return { button, warning };
 }
 
@@ -302,7 +303,7 @@ test("a warning label that renders after insertion is still dismissed", async ()
   const runtime = createRuntime({ hideFullAccessWarning: true });
   const warning = runtime.body.appendChild(new FakeElement(
     "section",
-    "Full access is on ChatGPT can run commands without your permission. Prompt injection.",
+    "Full access is on ChatGPT can edit any file and run commands with internet access without your approval. This increases the risk of data loss, exposed information, and unexpected changes.",
   ));
   // The button exists before its label does, which is what React does when the
   // action text streams in a tick later.
@@ -310,8 +311,8 @@ test("a warning label that renders after insertion is still dismissed", async ()
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(button.clicks, 0);
 
-  button.textContent = "Hide from this session";
-  const label = new FakeElement("span", "Hide from this session");
+  button.textContent = "Don’t show again";
+  const label = new FakeElement("span", "Don’t show again");
   // A text-only or child insertion inside the existing button must still be
   // scanned; only the inserted node's own subtree is not enough.
   runtime.mutationCallback([{ addedNodes: [label], target: button, type: "childList" }]);
@@ -331,7 +332,7 @@ test("ignores streamed turn updates and still handles a late warning outside the
   turn.setAttribute("data-turn-key", "turn-1");
   const warning = turn.appendChild(new FakeElement("section"));
   const button = warning.appendChild(
-    new FakeElement("button", "Hide from this session"),
+    new FakeElement("button", "Don’t show again"),
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(button.clicks, 0);
@@ -377,9 +378,9 @@ test("keeps warning dialogs inside a conversation turn eligible", async () => {
   turn.setAttribute("data-turn-key", "turn-1");
   const dialog = turn.appendChild(new FakeElement("section"));
   dialog.setAttribute("role", "dialog");
-  dialog.textContent = "Full access is on without your permission";
+  dialog.textContent = "Full access is on ChatGPT can edit any file without your approval and increases the risk of data loss.";
   const button = dialog.appendChild(
-    new FakeElement("button", "Hide from this session"),
+    new FakeElement("button", "Don’t show again"),
   );
 
   runtime.mutationCallback([{
@@ -405,8 +406,8 @@ test("keeps a warning portal nested in a conversation turn eligible", async () =
   const host = turn.appendChild(new FakeElement("div"));
   const portal = host.appendChild(new FakeElement("section"));
   portal.setAttribute("data-radix-portal", "true");
-  portal.textContent = "Full access is on without your permission";
-  portal.appendChild(new FakeElement("button", "Hide from this session"));
+  portal.textContent = "Full access is on ChatGPT can edit any file without your approval and increases the risk of data loss.";
+  portal.appendChild(new FakeElement("button", "Don’t show again"));
 
   runtime.mutationCallback([{
     addedNodes: [portal],
@@ -431,7 +432,7 @@ test("dismisses a mounted turn portal when its action button arrives late", asyn
   portal.setAttribute("data-radix-portal", "true");
   const title = portal.appendChild(new FakeElement(
     "h2",
-    "Full access is on without your permission",
+    "Full access is on ChatGPT can edit any file without your approval and increases the risk of data loss.",
   ));
   portal.textContent = title.textContent;
   runtime.mutationCallback([{
@@ -442,7 +443,7 @@ test("dismisses a mounted turn portal when its action button arrives late", asyn
   runtime.flushNextTimer();
 
   const button = portal.appendChild(
-    new FakeElement("button", "Hide from this session"),
+    new FakeElement("button", "Don’t show again"),
   );
   runtime.mutationCallback([{
     addedNodes: [button],
@@ -467,7 +468,7 @@ test("dismisses a mounted turn portal when its warning text arrives late", async
   const portal = turn.appendChild(new FakeElement("div"));
   portal.setAttribute("data-radix-portal", "true");
   const button = portal.appendChild(
-    new FakeElement("button", "Hide from this session"),
+    new FakeElement("button", "Don’t show again"),
   );
   runtime.mutationCallback([{
     addedNodes: [button],
@@ -477,8 +478,8 @@ test("dismisses a mounted turn portal when its warning text arrives late", async
   runtime.flushNextTimer();
   assert.equal(button.clicks, 0);
 
-  portal.textContent = "Full access is on without your permission";
-  const risk = portal.appendChild(new FakeElement("p", "Prompt injection"));
+  portal.textContent = "Full access is on ChatGPT can edit any file without your approval and increases the risk of data loss.";
+  const risk = portal.appendChild(new FakeElement("p", "data loss"));
   runtime.mutationCallback([{
     addedNodes: [risk],
     target: portal,
@@ -594,9 +595,9 @@ test("a wrapper and its button mutations share one batch scan", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   const panel = runtime.body.appendChild(new FakeElement(
     "section",
-    "Full access is on ChatGPT can run without your permission. Prompt injection.",
+    "Full access is on ChatGPT can edit any file without your approval and increases the risk of data loss.",
   ));
-  const button = panel.appendChild(new FakeElement("button", "Hide from this session"));
+  const button = panel.appendChild(new FakeElement("button", "Don’t show again"));
   await new Promise((resolve) => setImmediate(resolve));
   const before = runtime.window.__codeySecurityWarningShield.snapshot();
 
@@ -752,4 +753,35 @@ test("enabled shield prefers session-only dismiss on dual-action Chinese and Eng
     assert.equal(sessionButton.clicks, 1);
     assert.equal(thirtyDayButton.clicks, 0);
   }
+});
+
+test("ignores pre-26.1120 legacy Hide from this session copy and covers Traditional Chinese 26.1120.50957 warnings", async () => {
+  const runtime = createRuntime({ hideFullAccessWarning: true });
+  const legacyWarning = runtime.body.appendChild(new FakeElement(
+    "section",
+    "Full access is on ChatGPT can run commands without your permission. Prompt injection.",
+  ));
+  const legacyButton = legacyWarning.appendChild(new FakeElement("button", "Hide from this session"));
+
+  const zhTwWarning = runtime.body.appendChild(new FakeElement(
+    "aside",
+    "完整存取權限已開啟 ChatGPT 可以在未經你核准的情況下編輯任何檔案並執行具網路連線能力的指令。這會提高資料遺失、資訊外洩及非預期變更的風險。",
+  ));
+  const zhTwSession = zhTwWarning.appendChild(new FakeElement("button", ""));
+  zhTwSession.setAttribute("aria-label", "關閉此工作階段的完整存取權限警告");
+  const zhTwPersistent = zhTwWarning.appendChild(new FakeElement("button", "不要再顯示"));
+
+  const zhTwUltra = runtime.body.appendChild(new FakeElement(
+    "section",
+    "要搭配完整存取權限使用 Ultra 嗎？開啟 Ultra 和完整存取權限後，ChatGPT 可以使用進階推理並在電腦各處執行指令、使用網路及編輯檔案。",
+  ));
+  const zhTwUltraConfirm = zhTwUltra.appendChild(new FakeElement("button", "使用完整存取權限"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(legacyButton.clicks, 0);
+  assert.equal(legacyWarning.style.display, undefined);
+  assert.equal(zhTwSession.clicks, 1);
+  assert.equal(zhTwPersistent.clicks, 0);
+  assert.equal(zhTwWarning.style.display, "none:important");
+  assert.equal(zhTwUltraConfirm.clicks, 1);
 });

@@ -7,45 +7,40 @@
   const injectionStatusChangedEvent = "codey-injection-status-changed";
   const dismissedAttribute = "data-codey-security-warning-dismissed";
   const sessionActionPatterns = [
-    /^hide from this session$/i,
     /^dismiss full access warning for this session$/i,
-    /^在(?:此|本次?)会话中(?:关闭|隐藏)完(?:全|整)访问权限警告$/,
-    /^(?:在|于)?本次会话(?:中)?(?:隐藏|不再显示)$/,
+    /^在此会话中关闭完整访问权限警告$/,
+    /^關閉此工作階段的完整存取權限警告$/,
   ];
   const persistentActionPatterns = [
     /^don['’]t show again$/i,
-    /^(?:隐藏|不再显示)(?:本次会话)?$/,
+    /^(?:不再显示|不要再顯示)$/,
   ];
   const actionPatterns = [
     ...sessionActionPatterns,
     ...persistentActionPatterns,
   ];
-  const titlePatterns = [
-    /full access is on/i,
-    /完(?:全|整)访问权限.*(?:已开启|开启中|已打开)/,
-    /(?:use|enable) ultra with full access/i,
-    /是否(?:使用|启用)\s*ultra\s*搭配完(?:整|全)访问权限/i,
-  ];
   const ultraTitlePatterns = [
-    /(?:use|enable) ultra with full access/i,
-    /是否(?:使用|启用)\s*ultra\s*搭配完(?:整|全)访问权限/i,
+    /\buse ultra with full access\?/i,
+    /是否启用\s*ultra\s*搭配完整访问权限[?？]?/i,
+    /要搭配完整存取權限使用\s*ultra\s*嗎[?？]?/i,
+  ];
+  const titlePatterns = [
+    /\bfull access is on\b/i,
+    /完整(?:访问权限已开启|存取權限已開啟)/,
+    ...ultraTitlePatterns,
   ];
   const ultraActionPatterns = [
     /^use full access$/i,
-    /^enable full access$/i,
-    /^使用完(?:整|全)访问权限$/,
+    /^使用完整(?:访问权限|存取權限)$/,
   ];
   const riskPatterns = [
-    /without your permission/i,
     /without your approval/i,
-    /without asking/i,
     /risk of data loss/i,
-    /prompt injection/i,
-    /未经(?:你|您)(?:的)?(?:许可|批准)/,
-    /数据丢失/,
-    /提示词?注入/,
-    /with ultra and full access (?:on|enabled)/i,
-    /开启\s*ultra\s*(?:和|与)完(?:整|全)访问权限后/i,
+    /with ultra and full access on\b/i,
+    /without asking/i,
+    /(?:无需|未经)你的?批准|無須你的核准/,
+    /数据丢失|資料遺失/,
+    /(?:开启|啟用|開啟)\s*ultra\s*和完整(?:访问权限后|存取權限(?:時|後))/i,
   ];
   const conversationTurnSelector = "[data-turn-key]";
   const warningSurfaceSelector = [
@@ -53,9 +48,8 @@
     "[role='dialog']",
     "[role='alertdialog']",
     "[aria-modal='true']",
-    "textarea",
+    ".ProseMirror",
     "[contenteditable='true']",
-    "[contenteditable='plaintext-only']",
     "[role='textbox']",
     "[data-app-action-sidebar-section]",
     "[data-app-action-sidebar-thread-row]",
