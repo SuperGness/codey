@@ -124,10 +124,13 @@ async fn startup_animation_resumes_the_page_before_registering_the_player() {
         .attach_page(
             "aux-session",
             "aux",
-            "app://-/index.html?initialRoute=%2Fhotkey-window",
-            false,
+            "app://-/index.html?initialRoute=%2Fglobal-dictation",
+            true,
         )
         .await;
+    // Auxiliary windows with an explicit initialRoute resume immediately without Page.enable.
+    let aux_resume = service.expect("Runtime.runIfWaitingForDebugger").await;
+    assert_eq!(aux_resume["sessionId"], "aux-session");
     service.attach_page("main-session", "main", "", true).await;
     // The renderer cannot acknowledge Page.enable while waiting for the debugger.
     let resume = service.expect("Runtime.runIfWaitingForDebugger").await;
@@ -144,6 +147,49 @@ async fn startup_animation_resumes_the_page_before_registering_the_player() {
     service
         .reply(&script, json!({ "identifier": "startup" }))
         .await;
+
+    service.finish().await;
+}
+
+#[tokio::test]
+async fn stalled_startup_page_enable_never_blocks_fetch_source_gate_patching() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut service = TestService::start_with(temp.path(), |context| {
+        context.startup_animation = true;
+    })
+    .await;
+    service.answer_startup(json!([])).await;
+    service.attach_page("main-session", "main", "", true).await;
+    let resume = service.expect("Runtime.runIfWaitingForDebugger").await;
+    assert_eq!(resume["sessionId"], "main-session");
+    let page_enable = service.expect("Page.enable").await;
+    assert_eq!(page_enable["sessionId"], "main-session");
+    // Do NOT reply to Page.enable: simulate cold-start Page.enable stall (#63240).
+    let url = "app://-/assets/async/49792.d8d33ace73.js";
+    service.send(paused("main-session", "r-gate", url, true)).await;
+    let body = service.expect("Fetch.getResponseBody").await;
+    service
+        .reply(
+            &body,
+            json!({ "body": "codex-message-from-view old.sendMessageFromView Failed to send message from view" }),
+        )
+        .await;
+    let evaluate = service.expect("Runtime.evaluate").await;
+    service
+        .reply(
+            &evaluate,
+            json!({ "result": { "type": "object", "objectId": "obj-gate" } }),
+        )
+        .await;
+    let call_fn = service.expect("Runtime.callFunctionOn").await;
+    service
+        .reply(
+            &call_fn,
+            json!({ "result": { "value": { "installed": true, "patched": "patchedGate()", "logs": [] } } }),
+        )
+        .await;
+    let fulfill = service.expect("Fetch.fulfillRequest").await;
+    service.reply(&fulfill, json!({})).await;
 
     service.finish().await;
 }

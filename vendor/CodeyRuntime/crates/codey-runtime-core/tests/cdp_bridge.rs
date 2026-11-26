@@ -119,15 +119,15 @@ fn pick_injectable_codex_page_target_rejects_non_codex_pages() {
         target(
             "browser",
             "browser",
-            "Codex",
-            "https://codex.test",
+            "ChatGPT",
+            "app://-/index.html",
             Some("ws://browser"),
         ),
         target(
             "other-page",
             "page",
-            "Other App",
-            "https://example.test",
+            "Codex Docs",
+            "https://codex.test",
             Some("ws://other"),
         ),
     ];
@@ -146,6 +146,7 @@ fn pick_injectable_codex_page_target_rejects_non_codex_pages() {
 fn pick_injectable_codex_page_target_rejects_legacy_chatgpt_web_pages() {
     for (title, url) in [
         ("ChatGPT", "https://chatgpt.com/"),
+        ("ChatGPT", "https://chatgpt.com/codex"),
         ("ChatGPT", "https://chat.openai.com/"),
         (
             "ChatGPT",
@@ -180,14 +181,14 @@ fn data_html_page_with_codex_in_title_or_content_is_not_a_codex_target() {
 #[test]
 fn primary_target_selection_skips_data_html_errors_before_normal_pages() {
     for (title, url) in [
-        ("Codex", "app://-/index.html"),
-        ("Codex", "https://codex.local/"),
+        ("ChatGPT", "app://-/index.html"),
+        ("ChatGPT", "app://-/index.html?initialRoute=%2Flocal%2Fthread-1"),
     ] {
         let targets = vec![
             target(
                 "error",
                 "page",
-                "Codex",
+                "ChatGPT",
                 "data:text/html;charset=utf-8,%3Cp%3ECodex%20failed%20to%20start%3C/p%3E",
                 Some("ws://error"),
             ),
@@ -206,14 +207,14 @@ fn avatar_overlay_target_detection_is_narrow() {
     let overlay = target(
         "avatar",
         "page",
-        "Codex Avatar Overlay",
+        "ChatGPT",
         "app://-/index.html?initialRoute=%2Favatar-overlay",
         Some("ws://avatar"),
     );
     let main = target(
         "main",
         "page",
-        "Codex",
+        "ChatGPT",
         "app://-/index.html",
         Some("ws://main"),
     );
@@ -237,21 +238,21 @@ fn primary_target_selection_skips_v1_and_v2_overlay_candidates() {
         target(
             "v1-overlay",
             "page",
-            "Codex",
+            "ChatGPT",
             "app://-/index.html?initialRoute=%2Favatar-overlay",
             Some("ws://v1"),
         ),
         target(
             "v2-overlay",
             "page",
-            "Codex",
+            "ChatGPT",
             "app://-/index.html?initialRoute=/avatar-overlay",
             Some("ws://v2"),
         ),
         target(
             "main",
             "page",
-            "Codex",
+            "ChatGPT",
             "app://-/index.html",
             Some("ws://main"),
         ),
@@ -264,34 +265,48 @@ fn primary_target_selection_skips_v1_and_v2_overlay_candidates() {
 
 #[test]
 fn prewarmed_auxiliary_windows_listed_first_never_replace_the_main_window() {
-    // `/json` 按最近活动排序：主窗口启动后预热的隐藏窗口常排在前面，Windows
-    // 版标题还可能就是应用名。
+    // `/json` 按最近活动排序：主窗口启动后预热的隐藏窗口与本地页面窗口常排在前面，
+    // 标题也同样是 `"ChatGPT"`。
     let targets = vec![
         target(
             "detached",
             "page",
-            "Codex",
+            "ChatGPT",
             "app://-/detached-window.html?initialRoute=%2Fdetached-window",
             Some("ws://detached"),
         ),
         target(
-            "hotkey",
+            "dictation",
             "page",
-            "Codex",
-            "app://-/index.html?initialRoute=%2Fhotkey-window",
-            Some("ws://hotkey"),
+            "ChatGPT",
+            "app://-/index.html?initialRoute=%2Fglobal-dictation",
+            Some("ws://dictation"),
+        ),
+        target(
+            "dictation-setup",
+            "page",
+            "ChatGPT",
+            "app://-/index.html?initialRoute=%2Fglobal-dictation%2Fsetup",
+            Some("ws://dictation-setup"),
+        ),
+        target(
+            "local-page",
+            "page",
+            "ChatGPT",
+            "app://-/index.html?initialRoute=%2Fspace%2Flocal-page-1",
+            Some("ws://local-page"),
         ),
         target(
             "spotlight",
             "page",
-            "Codex",
+            "ChatGPT",
             "app://-/index.html?initialRoute=/spotlight",
             Some("ws://spotlight"),
         ),
         target(
             "main",
             "page",
-            "修复启动问题",
+            "ChatGPT",
             "app://-/index.html",
             Some("ws://main"),
         ),
@@ -301,7 +316,7 @@ fn prewarmed_auxiliary_windows_listed_first_never_replace_the_main_window() {
         pick_injectable_codex_page_target(&targets).unwrap().id,
         "main"
     );
-    pick_injectable_codex_page_target(&targets[..3])
+    pick_injectable_codex_page_target(&targets[..5])
         .expect_err("auxiliary windows alone must not become the injection target");
 }
 
@@ -309,23 +324,23 @@ fn prewarmed_auxiliary_windows_listed_first_never_replace_the_main_window() {
 fn plain_main_document_outranks_routed_primary_windows_in_json_order() {
     let targets = vec![
         target(
-            "local-page",
+            "routed-thread",
             "page",
-            "Codex",
-            "app://-/index.html?initialRoute=%2Fspace%2Flocal-page-1",
-            Some("ws://local-page"),
+            "ChatGPT",
+            "app://-/index.html?initialRoute=%2Flocal%2Fthread-1",
+            Some("ws://routed-thread"),
         ),
         target(
             "main",
             "page",
-            "",
+            "ChatGPT",
             "app://-/index.html#/",
             Some("ws://main"),
         ),
         target(
             "second",
             "page",
-            "",
+            "ChatGPT",
             "app://-/index.html",
             Some("ws://second"),
         ),
@@ -336,7 +351,7 @@ fn plain_main_document_outranks_routed_primary_windows_in_json_order() {
     );
     assert_eq!(
         pick_injectable_codex_page_target(&targets[..1]).unwrap().id,
-        "local-page"
+        "routed-thread"
     );
 }
 
@@ -344,16 +359,23 @@ fn plain_main_document_outranks_routed_primary_windows_in_json_order() {
 fn auxiliary_window_urls_cover_route_and_document_forms() {
     for url in [
         "app://-/index.html?initialRoute=%2Favatar-overlay",
-        "app://-/index.html?initialroute=%2FHOTKEY-WINDOW&x=1",
+        "app://-/index.html?initialroute=%2FGLOBAL-DICTATION&x=1",
+        "app://-/index.html?initialRoute=%2Fglobal-dictation%2Fsetup",
+        "app://-/index.html?initialRoute=%2Fspace%2Flocal-page-9f0c2b10%3FstartedAt%3D1",
         "app://-/index.html?foo=1&initialRoute=/spotlight#top",
         "app://-/detached-window.html?initialRoute=%2Fdetached-window",
         "app://-/detached-window.html",
+        "app://-/global-dictation/setup",
+        "app://-/space/local-page-42",
         "APP://-/avatar-overlay",
     ] {
         assert!(is_auxiliary_codex_window_url(url), "{url}");
     }
     for url in [
         "app://-/index.html",
+        "app://-/index.html?initialRoute=%2Fhotkey-window",
+        "app://-/index.html?initialRoute=%2Fglobal-dictation-other",
+        "app://-/index.html?initialRoute=%2Fspace%2Fproject-1",
         "app://-/index.html?initialRoute=%2Flocal%2Fthread-1",
         "app://-/index.html?initialRoute=%2Fsettings",
         "https://example.test/detached-window.html",
@@ -424,7 +446,7 @@ fn unrelated_blank_app_page_is_not_a_codex_target() {
 
 #[test]
 fn pick_injectable_codex_page_target_requires_websocket() {
-    let targets = vec![target("codex", "page", "Codex", "https://codex.test", None)];
+    let targets = vec![target("codex", "page", "ChatGPT", "app://-/index.html", None)];
 
     let error = pick_injectable_codex_page_target(&targets)
         .expect_err("Codex page without websocket must not be selected for injection");
@@ -482,14 +504,14 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
     let log_path = temp.path().join("codey.log");
     codey_runtime_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
         }
 
         let evaluate = recv_json(&mut socket).await;
-        assert_eq!(evaluate["id"], 6);
+        assert_eq!(evaluate["id"], 7);
         assert_eq!(evaluate["method"], "Runtime.evaluate");
         send_json(
             &mut socket,
@@ -505,7 +527,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
             }),
         )
         .await;
-        send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
+        send_json(&mut socket, json!({ "id": 7, "result": {} })).await;
 
         let response = recv_json(&mut socket).await;
         assert_eq!(response["method"], "Runtime.evaluate");
@@ -556,7 +578,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
 #[tokio::test]
 async fn install_bridge_immediately_evaluates_new_document_scripts() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -616,11 +638,14 @@ async fn install_bridge_immediately_evaluates_new_document_scripts() {
 #[tokio::test]
 async fn document_scripts_are_registered_on_a_page_enabled_session() {
     // Page 域未启用的会话里注册的文档脚本不会在新文档中执行（Chromium 155 实测），
-    // 页面重载后桥接就无法自恢复。
+    // 页面重载后桥接就无法自恢复；同时显式禁用异步调用栈且不开启 Debugger 等重型域。
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
         let mut methods = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..7 {
             let command = recv_json(&mut socket).await;
+            if command["method"] == "Runtime.setAsyncCallStackDepth" {
+                assert_eq!(command["params"], json!({ "maxDepth": 0 }));
+            }
             methods.push(command["method"].as_str().unwrap().to_string());
             send_json(&mut socket, json!({ "id": command["id"], "result": {} })).await;
         }
@@ -628,6 +653,7 @@ async fn document_scripts_are_registered_on_a_page_enabled_session() {
             methods,
             [
                 "Runtime.enable",
+                "Runtime.setAsyncCallStackDepth",
                 "Runtime.removeBinding",
                 "Runtime.addBinding",
                 "Page.enable",
@@ -649,6 +675,54 @@ async fn document_scripts_are_registered_on_a_page_enabled_session() {
 }
 
 #[tokio::test]
+async fn install_bridge_falls_back_to_runtime_evaluate_when_page_enable_fails() {
+    let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
+        for expected_id in 1..=4 {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["id"], expected_id);
+            send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
+        }
+        let page_enable = recv_json(&mut socket).await;
+        assert_eq!(page_enable["method"], "Page.enable");
+        send_json(
+            &mut socket,
+            json!({
+                "id": page_enable["id"],
+                "error": { "code": -32000, "message": "Page domain busy" },
+            }),
+        )
+        .await;
+
+        let eval_bridge = recv_json(&mut socket).await;
+        assert_eq!(eval_bridge["method"], "Runtime.evaluate");
+        send_json(&mut socket, json!({ "id": eval_bridge["id"], "result": {} })).await;
+
+        let eval_script = recv_json(&mut socket).await;
+        assert_eq!(eval_script["method"], "Runtime.evaluate");
+        assert_eq!(
+            eval_script["params"]["expression"],
+            "window.__codeyModelWhitelistPatch = {};"
+        );
+        send_json(&mut socket, json!({ "id": eval_script["id"], "result": {} })).await;
+        close_socket(&mut socket).await;
+    })
+    .await;
+
+    let pump = bridge::install_bridge(
+        &url,
+        BRIDGE_BINDING_NAME,
+        noop_handler(),
+        &["window.__codeyModelWhitelistPatch = {};".to_string()],
+    )
+    .await
+    .expect("Page.enable failure must still install the live Runtime bridge");
+    request_rx
+        .await
+        .expect("server task should finish without panicking");
+    pump.close().await;
+}
+
+#[tokio::test]
 async fn install_probe_runs_on_the_bridge_session_without_failing_the_install() {
     for (probe_result, expected) in [
         (
@@ -658,7 +732,7 @@ async fn install_probe_runs_on_the_bridge_session_without_failing_the_install() 
         (json!({ "exceptionDetails": { "text": "Uncaught" } }), None),
     ] {
         let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
-            for _ in 0..8 {
+            for _ in 0..9 {
                 let command = recv_json(&mut socket).await;
                 send_json(&mut socket, json!({ "id": command["id"], "result": {} })).await;
             }
@@ -841,7 +915,7 @@ async fn install_bridge_rejects_javascript_exceptions_and_closes_failed_sessions
 #[tokio::test]
 async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -925,7 +999,7 @@ async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() 
 #[tokio::test]
 async fn bridge_pump_handle_close_stops_the_persistent_cdp_session() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1055,7 +1129,7 @@ async fn install_bridge_command_error_mentions_method_and_id() {
 #[tokio::test]
 async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparseable_payload() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1141,7 +1215,7 @@ async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparsea
 #[tokio::test]
 async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1203,7 +1277,7 @@ async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch()
 #[tokio::test]
 async fn install_bridge_does_not_wait_for_resolve_runtime_evaluate_ack() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1276,7 +1350,7 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
     let release_slow_handler = Arc::new(tokio::sync::Notify::new());
     let server_release = Arc::clone(&release_slow_handler);
     let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
-        for expected_id in 1..=6 {
+        for expected_id in 1..=7 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1378,14 +1452,14 @@ async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String)
         .await
         .expect("websocket should upgrade");
 
-    for expected_id in 1..=4 {
+    for expected_id in 1..=5 {
         let command = recv_json(&mut socket).await;
         assert_eq!(command["id"], expected_id);
         send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
     }
 
     let add_script = recv_json(&mut socket).await;
-    assert_eq!(add_script["id"], 5);
+    assert_eq!(add_script["id"], 6);
     assert_eq!(
         add_script["method"],
         "Page.addScriptToEvaluateOnNewDocument"
@@ -1395,12 +1469,12 @@ async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String)
             .as_str()
             .expect("bridge source should be a string"),
     );
-    send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
+    send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
 
     let evaluate = recv_json(&mut socket).await;
-    assert_eq!(evaluate["id"], 6);
+    assert_eq!(evaluate["id"], 7);
     assert_eq!(evaluate["method"], "Runtime.evaluate");
-    send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
+    send_json(&mut socket, json!({ "id": 7, "result": {} })).await;
     (socket, session_token)
 }
 

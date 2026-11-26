@@ -1,14 +1,22 @@
 //! Cold-start artwork served by the existing browser-level Fetch session.
 
+use std::time::Duration;
+
 use base64::Engine;
 use serde_json::{Value, json};
 
 use super::BrowserConnection;
 
 pub(super) const DOCUMENT_URL: &str = "app://-/index.html";
+/// 开屏动画脚本注册预算：冷启动若 `Page.enable` 卡顿则快速放弃，不长期挂起会话任务。
+pub(super) const REGISTER_PLAYER_TIMEOUT: Duration = Duration::from_secs(3);
 const ASSET_PREFIX: &str = "app://-/__codey-startup/";
 const INTRO: &[u8] = include_bytes!("../../resources/startup-animation/intro.mp4");
 const LOOP: &[u8] = include_bytes!("../../resources/startup-animation/loop.mp4");
+
+pub(super) fn accepts_target_url(url: &str) -> bool {
+    url.is_empty() || url == "about:blank" || url == DOCUMENT_URL
+}
 
 pub(super) fn asset_pattern() -> Value {
     json!({ "urlPattern": format!("{ASSET_PREFIX}*") })
@@ -20,10 +28,15 @@ pub(super) async fn register_player(
 ) -> anyhow::Result<()> {
     // Enabling Page on this session makes the script run on the next document.
     connection
-        .call("Page.enable", json!({}), Some(session))
+        .call_with_timeout(
+            "Page.enable",
+            json!({}),
+            Some(session),
+            REGISTER_PLAYER_TIMEOUT,
+        )
         .await?;
     connection
-        .call(
+        .call_with_timeout(
             "Page.addScriptToEvaluateOnNewDocument",
             json!({
                 "source": include_str!("startup_player.js"),
@@ -31,6 +44,7 @@ pub(super) async fn register_player(
                 "runImmediately": true,
             }),
             Some(session),
+            REGISTER_PLAYER_TIMEOUT,
         )
         .await?;
     Ok(())

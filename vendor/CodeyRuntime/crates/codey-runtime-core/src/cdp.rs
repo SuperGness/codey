@@ -146,14 +146,15 @@ async fn query_targets_url(client: &reqwest::Client, url: &str) -> anyhow::Resul
         .context("failed to deserialize CDP targets")
 }
 
-/// Codex 在主窗口之外还会创建隐藏的预热窗口（分离会话、快捷窗口、Spotlight、
-/// 宠物浮层）。它们与主窗口同源、标题也可能是应用名，`/json` 又按最近活动
-/// 排序，新建的预热窗口常排在主窗口前面；注入到这些窗口里，主窗口就拿不到
-/// 桥接，请求入口也永远找不到会话管理器。
-const AUXILIARY_WINDOW_ROUTES: [&str; 4] = [
+/// Codex 在主窗口之外还会创建隐藏的预热或辅助窗口（宠物浮层、分离会话、全局听写、
+/// 本地页面窗口、Spotlight）。它们与主窗口同源且 `<title>` 同样是 `"ChatGPT"`，
+/// `/json` 又按最近活动排序，新建的辅助窗口常排在主窗口前面；注入到这些窗口里，
+/// 主窗口就拿不到桥接，请求入口也永远找不到会话管理器。
+const AUXILIARY_WINDOW_ROUTES: [&str; 5] = [
     "/avatar-overlay",
     "/detached-window",
-    "/hotkey-window",
+    "/global-dictation",
+    "/space/local-page-",
     "/spotlight",
 ];
 
@@ -194,14 +195,10 @@ pub fn is_injectable_page_target(target: &CdpTarget) -> bool {
             .is_some_and(|url| !url.is_empty())
 }
 
+/// 当前桌面版主窗口 `<title>` 为 `"ChatGPT"`，仅以打包协议主文档 `app://-/index.html`
+/// 识别渲染页，不再依赖旧版标题或任意 URL 子串匹配，避免误命中内嵌网页或错误页。
 pub fn is_codex_page_target(target: &CdpTarget) -> bool {
-    let url = target.url.trim();
-    if target.target_type != "page" || starts_with_ignore_ascii_case(url, "data:text/html") {
-        return false;
-    }
-    contains_ignore_ascii_case(&target.title, "codex")
-        || contains_ignore_ascii_case(url, "codex")
-        || is_packaged_codex_page(url)
+    target.target_type == "page" && is_packaged_codex_page(target.url.trim())
 }
 
 pub fn is_primary_codex_page_target(target: &CdpTarget) -> bool {
@@ -219,7 +216,8 @@ pub fn is_auxiliary_codex_window_url(url: &str) -> bool {
 }
 
 /// 辅助窗口既可能以 `index.html?initialRoute=/x` 打开，也可能使用独立文档
-/// （`detached-window.html`）或直接以路由为路径。
+/// （`detached-window.html`）或子路由前缀（如 `/global-dictation/setup`、
+/// `/space/local-page-<id>`）。
 fn auxiliary_codex_window_route(url: &str) -> Option<&'static str> {
     let (path, query) = split_app_url(url);
     let document = strip_prefix_ignore_ascii_case(path, "app://-/")?;
@@ -228,9 +226,20 @@ fn auxiliary_codex_window_route(url: &str) -> Option<&'static str> {
     AUXILIARY_WINDOW_ROUTES.into_iter().find(|candidate| {
         route
             .as_deref()
-            .is_some_and(|route| route.eq_ignore_ascii_case(candidate))
-            || document.eq_ignore_ascii_case(&candidate[1..])
+            .is_some_and(|route| matches_auxiliary_route(route, candidate))
+            || matches_auxiliary_route(document, &candidate[1..])
     })
+}
+
+fn matches_auxiliary_route(value: &str, candidate: &str) -> bool {
+    let Some(rest) = strip_prefix_ignore_ascii_case(value, candidate) else {
+        return false;
+    };
+    if candidate.ends_with('-') {
+        !rest.is_empty()
+    } else {
+        rest.is_empty() || matches!(rest.as_bytes().first(), Some(b'/' | b'?' | b'#'))
+    }
 }
 
 /// 拆出不含片段的地址主体与查询串。
@@ -299,16 +308,6 @@ fn strip_suffix_ignore_ascii_case<'a>(value: &'a str, suffix: &str) -> Option<&'
         .get(split..)
         .filter(|tail| tail.eq_ignore_ascii_case(suffix))
         .map(|_| &value[..split])
-}
-
-fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]
@@ -434,11 +433,26 @@ mod tests {
     }
 
     #[test]
-    fn ascii_case_insensitive_substring_handles_empty_and_multibyte_inputs() {
-        assert!(contains_ignore_ascii_case("Codex App", ""));
-        assert!(contains_ignore_ascii_case("", ""));
-        assert!(!contains_ignore_ascii_case("", "codex"));
-        assert!(contains_ignore_ascii_case("本地 CoDeX 调试页", "codex"));
-        assert!(!contains_ignore_ascii_case("本地调试页", "codex"));
+    fn packaged_main_window_matches_chatgpt_title_and_excludes_new_auxiliary_routes() {
+        let main = CdpTarget {
+            id: "main".to_string(),
+            target_type: "page".to_string(),
+            title: "ChatGPT".to_string(),
+            url: "app://-/index.html".to_string(),
+            web_socket_debugger_url: Some("ws://main".to_string()),
+        };
+        assert!(is_codex_page_target(&main));
+        assert!(is_primary_codex_page_target(&main));
+
+        for aux_url in [
+            "app://-/index.html?initialRoute=%2Fglobal-dictation",
+            "app://-/index.html?initialRoute=%2Fglobal-dictation%2Fsetup",
+            "app://-/index.html?initialRoute=%2Fspace%2Flocal-page-9f0c2b10%3FstartedAt%3D1",
+        ] {
+            assert!(is_auxiliary_codex_window_url(aux_url), "{aux_url}");
+        }
+        assert!(!is_auxiliary_codex_window_url(
+            "app://-/index.html?initialRoute=%2Fhotkey-window"
+        ));
     }
 }

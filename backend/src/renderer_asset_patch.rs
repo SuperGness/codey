@@ -525,7 +525,19 @@ impl BrowserConnection {
     }
 
     async fn call(&self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
-        self.call_ref(method, &params, session_id).await
+        self.call_ref_with_timeout(method, &params, session_id, COMMAND_TIMEOUT)
+            .await
+    }
+
+    async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value> {
+        self.call_ref_with_timeout(method, &params, session_id, timeout)
+            .await
     }
 
     async fn call_ref(
@@ -533,6 +545,17 @@ impl BrowserConnection {
         method: &str,
         params: &Value,
         session_id: Option<&str>,
+    ) -> Result<Value> {
+        self.call_ref_with_timeout(method, params, session_id, COMMAND_TIMEOUT)
+            .await
+    }
+
+    async fn call_ref_with_timeout(
+        &self,
+        method: &str,
+        params: &Value,
+        session_id: Option<&str>,
+        timeout: Duration,
     ) -> Result<Value> {
         let id = next_message_id();
         let (respond, response) = oneshot::channel();
@@ -551,7 +574,7 @@ impl BrowserConnection {
                 .remove(&id);
             bail!("补丁服务连接已关闭，CDP command {method} 未发送");
         }
-        match tokio::time::timeout(COMMAND_TIMEOUT, response).await {
+        match tokio::time::timeout(timeout, response).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(error))) => bail!("CDP command {method} failed: {error}"),
             Ok(Err(_)) => bail!("补丁服务连接已关闭，CDP command {method} 无响应"),
@@ -881,11 +904,12 @@ async fn on_attached(connection: BrowserConnection, context: Arc<ServiceContext>
             json!({ "targetId": target_id, "message": format!("{error:#}") }),
         );
     }
-    // Page commands need a running renderer. The script also runs in any
-    // already-created document so it can still find the native loader.
+    // Page commands need a running renderer and only apply to potential main
+    // documents; Fetch interception is already active above so a slow or timed-out
+    // Page.enable never delays asset patching or misses sourceGate.
     resume();
     if context.startup_animation
-        && (attached_before_load || url == startup::DOCUMENT_URL)
+        && startup::accepts_target_url(url)
         && let Err(error) = startup::register_player(&connection, session_id).await
     {
         log_service_event(

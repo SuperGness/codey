@@ -17,6 +17,9 @@ use tokio_tungstenite::tungstenite::Message;
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// 冷启动期间渲染线程繁忙时 `Page.enable` 可能慢于 Runtime 域（openai/codex#63240）；
+/// 单独缩短其预算并在超时/报错时退化为仅当前文档 `Runtime.evaluate`，避免拖垮首轮注入。
+const CDP_PAGE_ENABLE_TIMEOUT: Duration = Duration::from_secs(2);
 const BRIDGE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const BRIDGE_MAX_CONCURRENT_READ_HANDLERS: usize = 8;
 const BRIDGE_MAX_PENDING_CALLS: usize = 256;
@@ -291,76 +294,126 @@ pub async fn install_bridge_with_options(
         .remove(websocket_url)
         .unwrap_or_default();
 
-    // 流水线发送独立的会话初始化命令（单条 CDP WebSocket 按 FIFO 顺序执行），
-    // 把启动阶段多次串行 RTT 压成一次。
-    let mut setup_commands = Vec::with_capacity(4 + stale_registrations.len());
-    setup_commands.push((1, "Runtime.enable", json!({}), true));
-    setup_commands.push((
-        2,
-        "Runtime.removeBinding",
-        json!({ "name": binding_name }),
-        true,
-    ));
-    setup_commands.push((
-        3,
-        "Runtime.addBinding",
-        json!({ "name": binding_name }),
-        true,
-    ));
-    // 文档脚本只在启用了 Page 域的会话上随新文档执行；不启用时页面重载后
-    // 桥接不会自动恢复，只能等看门狗重新注入。
-    setup_commands.push((4, "Page.enable", json!({}), true));
-    for identifier in stale_registrations {
-        setup_commands.push((
+    // 流水线发送独立的 Runtime 会话初始化命令（不开启 Debugger/DOM/Network 等重型域，
+    // 并显式将异步调用栈深度设为 0，规避 rspack 海量 chunk 下的调试器开销）。
+    session
+        .send_pipelined_commands(vec![
+            (1, "Runtime.enable", json!({}), true),
+            (
+                2,
+                "Runtime.setAsyncCallStackDepth",
+                json!({ "maxDepth": 0 }),
+                false,
+            ),
+            (
+                3,
+                "Runtime.removeBinding",
+                json!({ "name": binding_name }),
+                true,
+            ),
+            (
+                4,
+                "Runtime.addBinding",
+                json!({ "name": binding_name }),
+                true,
+            ),
+        ])
+        .await?;
+
+    // 文档脚本只在启用了 Page 域的会话上随新文档执行；冷启动若 Page.enable 超时或失败，
+    // 保留旧注册标识待后续重装清理，同时继续通过 Runtime.evaluate 完成当前文档装桥。
+    let mut page_commands = Vec::with_capacity(1 + stale_registrations.len());
+    page_commands.push((5, "Page.enable", json!({}), true));
+    for identifier in &stale_registrations {
+        page_commands.push((
             next_message_id(),
             "Page.removeScriptToEvaluateOnNewDocument",
             json!({ "identifier": identifier }),
             false,
         ));
     }
-    session.send_pipelined_commands(setup_commands).await?;
+    let page_enabled = match session
+        .send_pipelined_commands_with_timeout(page_commands, CDP_PAGE_ENABLE_TIMEOUT)
+        .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            if !stale_registrations.is_empty() {
+                document_script_registrations()
+                    .lock()
+                    .expect("document script registry poisoned")
+                    .entry(websocket_url.to_string())
+                    .or_default()
+                    .extend(stale_registrations);
+            }
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "bridge.page_enable_skipped",
+                json!({
+                    "message": format!("{error:#}"),
+                    "websocketUrl": websocket_url,
+                }),
+            );
+            false
+        }
+    };
 
     let bridge_script = build_bridge_script_for_session(binding_name, &session_token);
-    let mut bridge_responses = session
-        .send_pipelined_commands(vec![
-            (
-                5,
-                "Page.addScriptToEvaluateOnNewDocument",
-                json!({ "source": bridge_script }),
-                true,
-            ),
-            (
-                6,
-                "Runtime.evaluate",
-                runtime_evaluate_params(&bridge_script),
-                true,
-            ),
-        ])
-        .await?;
-    remember_document_script(websocket_url, &bridge_responses[0]);
-    ensure_runtime_evaluate_succeeded(bridge_responses.pop().expect("bridge evaluate response"))?;
-
-    for script in new_document_scripts {
-        let add_id = next_message_id();
-        let eval_id = next_message_id();
-        let mut responses = session
+    if page_enabled {
+        let mut bridge_responses = session
             .send_pipelined_commands(vec![
                 (
-                    add_id,
+                    6,
                     "Page.addScriptToEvaluateOnNewDocument",
-                    json!({ "source": script }),
-                    true,
+                    json!({ "source": bridge_script }),
+                    false,
                 ),
                 (
-                    eval_id,
+                    7,
                     "Runtime.evaluate",
-                    runtime_evaluate_params(script),
+                    runtime_evaluate_params(&bridge_script),
                     true,
                 ),
             ])
             .await?;
-        remember_document_script(websocket_url, &responses[0]);
-        ensure_runtime_evaluate_succeeded(responses.pop().expect("script evaluate response"))?;
+        remember_document_script(websocket_url, &bridge_responses[0]);
+        ensure_runtime_evaluate_succeeded(
+            bridge_responses.pop().expect("bridge evaluate response"),
+        )?;
+    } else {
+        let eval_response = session
+            .send_command(7, "Runtime.evaluate", runtime_evaluate_params(&bridge_script))
+            .await?;
+        ensure_runtime_evaluate_succeeded(eval_response)?;
+    }
+
+    for script in new_document_scripts {
+        let eval_id = next_message_id();
+        if page_enabled {
+            let add_id = next_message_id();
+            let mut responses = session
+                .send_pipelined_commands(vec![
+                    (
+                        add_id,
+                        "Page.addScriptToEvaluateOnNewDocument",
+                        json!({ "source": script }),
+                        false,
+                    ),
+                    (
+                        eval_id,
+                        "Runtime.evaluate",
+                        runtime_evaluate_params(script),
+                        true,
+                    ),
+                ])
+                .await?;
+            remember_document_script(websocket_url, &responses[0]);
+            ensure_runtime_evaluate_succeeded(responses.pop().expect("script evaluate response"))?;
+        } else {
+            let eval_response = session
+                .send_command(eval_id, "Runtime.evaluate", runtime_evaluate_params(script))
+                .await?;
+            ensure_runtime_evaluate_succeeded(eval_response)?;
+        }
     }
 
     let probe = match options.readiness_probe {
@@ -858,7 +911,15 @@ where
         &mut self,
         commands: Vec<(u64, &'static str, Value, bool)>,
     ) -> anyhow::Result<Vec<Value>> {
-        let timeout = CDP_COMMAND_TIMEOUT;
+        self.send_pipelined_commands_with_timeout(commands, CDP_COMMAND_TIMEOUT)
+            .await
+    }
+
+    async fn send_pipelined_commands_with_timeout(
+        &mut self,
+        commands: Vec<(u64, &'static str, Value, bool)>,
+        timeout: Duration,
+    ) -> anyhow::Result<Vec<Value>> {
         let deadline = tokio::time::Instant::now() + timeout;
         for (message_id, method, params, _) in &commands {
             tokio::time::timeout_at(

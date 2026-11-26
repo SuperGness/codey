@@ -2737,7 +2737,9 @@ assert.equal(nextPage.window.attempts, 1);
 
         for href in [
             "app://-/detached-window.html?initialRoute=%2Fdetached-window",
-            "app://-/index.html?initialRoute=%2Fhotkey-window",
+            "app://-/index.html?initialRoute=%2Fglobal-dictation",
+            "app://-/index.html?initialRoute=%2Fglobal-dictation%2Fsetup",
+            "app://-/index.html?initialRoute=%2Fspace%2Flocal-page-1",
         ] {
             let failure = judge_readiness(probe(href, true)).unwrap_err();
             assert!(failure.reinstall, "{href}");
