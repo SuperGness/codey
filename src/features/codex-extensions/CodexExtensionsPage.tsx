@@ -602,7 +602,7 @@ function CodexExtensionsPageComponent({
         {loading && !inventory && (
           <div
             role="status"
-            className="rounded-2xl border border-[var(--codey-border)] bg-[var(--codey-panel)] px-4 py-3.5 text-xs text-muted"
+            className="py-3 text-xs text-muted"
           >
             <div className="flex items-center gap-2 font-medium text-foreground/80">
               <IconRefresh
@@ -616,7 +616,7 @@ function CodexExtensionsPageComponent({
               {[0, 1, 2].map((row) => (
                 <div
                   key={row}
-                  className="flex items-center gap-3.5 rounded-xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-3.5"
+                  className="flex items-center gap-3 border-b border-[var(--codey-border-subtle)] py-3"
                 >
                   <div className="size-10 rounded-xl bg-default/50" />
                   <div className="flex-1 space-y-2">

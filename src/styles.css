@@ -1,53 +1,53 @@
 /*
- * 视觉语言：克制的桌面控制台。中性灰阶与克制圆角建立层级，
- * 细线与柔和表面区分区块，语义色仅用于必要的状态提示与主保存操作。
+ * 视觉语言：参照 Apple 官网的克制质感。大面积纯白与 #f5f5f7 浅灰承载层级，
+ * 以留白和发丝线分隔内容而非卡片描边，强调色只用于主操作、选中与状态。
  */
 :root,
 :host {
   color-scheme: light;
   font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI",
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
 
-  --codey-text: #1c1e24;
-  --codey-text-soft: #424652;
-  --codey-muted: #626773;
-  --codey-subtle: #868c98;
+  --codey-text: #1d1d1f;
+  --codey-text-soft: #424245;
+  --codey-muted: #6e6e73;
+  --codey-subtle: #86868b;
 
   --codey-surface: #ffffff;
-  --codey-surface-muted: #f9fafb;
-  --codey-surface-sunken: #f3f4f6;
+  --codey-surface-muted: #fbfbfd;
+  --codey-surface-sunken: #f4f5f8;
   --codey-surface-elevated: #ffffff;
-  --codey-ink-rgb: 28, 30, 36;
+  --codey-ink-rgb: 29, 29, 31;
 
-  --codey-border: #e7e9ee;
-  --codey-border-subtle: #f0f1f5;
-  --codey-border-strong: #d5d8e0;
-  --codey-hover: rgba(28, 30, 36, 0.036);
-  --codey-press: rgba(28, 30, 36, 0.068);
-  --codey-nav-active: rgba(28, 30, 36, 0.065);
+  --codey-border: #e4e5ea;
+  --codey-border-subtle: #eeeff2;
+  --codey-border-strong: #d4d5da;
+  --codey-hover: rgba(29, 29, 31, 0.035);
+  --codey-press: rgba(29, 29, 31, 0.07);
+  --codey-nav-active: rgba(0, 122, 255, 0.1);
 
-  --codey-blue: #3370e2;
-  --codey-blue-hover: #2860cc;
-  --codey-blue-soft: rgba(51, 112, 226, 0.095);
-  --codey-blue-border: rgba(51, 112, 226, 0.25);
+  --codey-blue: #0a72ef;
+  --codey-blue-hover: #2b85ff;
+  --codey-blue-soft: rgba(0, 122, 255, 0.1);
+  --codey-blue-border: rgba(0, 122, 255, 0.28);
 
-  --codey-green: #1f9464;
-  --codey-green-soft: rgba(31, 148, 100, 0.095);
-  --codey-green-border: rgba(31, 148, 100, 0.25);
+  --codey-green: #1e9e4a;
+  --codey-green-soft: rgba(52, 199, 89, 0.14);
+  --codey-green-border: rgba(52, 199, 89, 0.34);
 
-  --codey-red: #dc444b;
-  --codey-red-soft: rgba(220, 68, 75, 0.095);
-  --codey-red-border: rgba(220, 68, 75, 0.25);
+  --codey-red: #e8343a;
+  --codey-red-soft: rgba(255, 59, 48, 0.1);
+  --codey-red-border: rgba(255, 59, 48, 0.3);
 
-  --codey-amber: #c97d14;
-  --codey-amber-soft: rgba(201, 125, 20, 0.105);
-  --codey-amber-border: rgba(201, 125, 20, 0.26);
+  --codey-amber: #d26e00;
+  --codey-amber-soft: rgba(255, 149, 0, 0.13);
+  --codey-amber-border: rgba(255, 149, 0, 0.34);
 
-  --codey-purple: #7862c8;
-  --codey-purple-soft: rgba(120, 98, 200, 0.095);
-  --codey-purple-border: rgba(120, 98, 200, 0.25);
+  --codey-purple: #9f4fd8;
+  --codey-purple-soft: rgba(175, 82, 222, 0.11);
+  --codey-purple-border: rgba(175, 82, 222, 0.3);
 
   --mac-blue: var(--codey-blue);
   --mac-gray-bg: var(--codey-surface-sunken);
@@ -55,65 +55,66 @@
   --mac-text-secondary: var(--codey-muted);
   --mac-text-tertiary: var(--codey-subtle);
 
-  /* 侧栏以明快浅灰收束导航，主内容区保持干净白底，面板以轻浅灰托底。 */
-  --codey-sidebar: #f9f9fb;
+  /* 侧栏使用 Apple 标志性的 #f5f5f7，正文保持纯白，内嵌面板只用浅灰填充不加描边。 */
+  --codey-sidebar: #f6f7f9;
   --codey-canvas: #ffffff;
   --codey-card: #ffffff;
-  --codey-panel: #f9fafb;
+  --codey-panel: #f4f5f8;
   --codey-card-shadow: none;
-  --codey-popover-shadow: 0 10px 28px -6px rgba(15, 17, 21, 0.12), 0 2px 6px rgba(15, 17, 21, 0.05), 0 0 0 1px rgba(15, 17, 21, 0.06);
+  --codey-popover-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.05), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
 
   --codey-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --codey-pill: 980px;
 }
 
-/* 深色模式：明快通透的中深石墨灰层级与清晰柔和语义色，兼顾克制与可读性。 */
+/* 深色模式：参照 Apple 深色界面的近黑层级与系统色，保持清晰对比。 */
 [data-theme="dark"] {
   color-scheme: dark;
-  --codey-text: #f3f4f8;
-  --codey-text-soft: #d6d8e0;
-  --codey-muted: #a3a6b3;
-  --codey-subtle: #868a98;
+  --codey-text: #f5f5f7;
+  --codey-text-soft: #dcdce1;
+  --codey-muted: #aeaeb4;
+  --codey-subtle: #8e8e94;
 
-  --codey-surface: #2b2d33;
-  --codey-surface-muted: #25262c;
-  --codey-surface-sunken: #1e1f24;
-  --codey-surface-elevated: #33353d;
+  --codey-surface: #25252a;
+  --codey-surface-muted: #28282d;
+  --codey-surface-sunken: #34343a;
+  --codey-surface-elevated: #34343a;
 
-  --codey-sidebar: #1f2024;
-  --codey-canvas: #24252a;
-  --codey-card: #2b2d33;
-  --codey-panel: #292a30;
+  --codey-sidebar: #1e1e22;
+  --codey-canvas: #25252a;
+  --codey-card: #25252a;
+  --codey-panel: #2d2d32;
   --codey-card-shadow: none;
-  --codey-popover-shadow: 0 14px 36px -6px rgba(0, 0, 0, 0.42), 0 3px 10px rgba(0, 0, 0, 0.24), 0 0 0 1px rgba(255, 255, 255, 0.1);
-  --codey-ink-rgb: 243, 244, 248;
+  --codey-popover-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.6), 0 3px 10px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+  --codey-ink-rgb: 245, 245, 247;
 
-  --codey-border: #393c45;
-  --codey-border-subtle: #31333b;
-  --codey-border-strong: #4b4f5b;
-  --codey-hover: rgba(243, 244, 248, 0.055);
-  --codey-press: rgba(243, 244, 248, 0.095);
-  --codey-nav-active: rgba(243, 244, 248, 0.105);
+  --codey-border: #404046;
+  --codey-border-subtle: #36363c;
+  --codey-border-strong: #505057;
+  --codey-hover: rgba(245, 245, 247, 0.06);
+  --codey-press: rgba(245, 245, 247, 0.1);
+  --codey-nav-active: rgba(64, 160, 255, 0.2);
 
-  --codey-blue: #6498f0;
-  --codey-blue-hover: #7cabf6;
-  --codey-blue-soft: rgba(100, 152, 240, 0.16);
-  --codey-blue-border: rgba(100, 152, 240, 0.34);
+  --codey-blue: #40a0ff;
+  --codey-blue-hover: #5cb0ff;
+  --codey-blue-soft: rgba(64, 160, 255, 0.16);
+  --codey-blue-border: rgba(64, 160, 255, 0.36);
 
-  --codey-green: #4cc792;
-  --codey-green-soft: rgba(76, 199, 146, 0.16);
-  --codey-green-border: rgba(76, 199, 146, 0.34);
+  --codey-green: #32d74b;
+  --codey-green-soft: rgba(50, 215, 75, 0.15);
+  --codey-green-border: rgba(50, 215, 75, 0.34);
 
-  --codey-red: #ec787d;
-  --codey-red-soft: rgba(236, 120, 125, 0.16);
-  --codey-red-border: rgba(236, 120, 125, 0.34);
+  --codey-red: #ff6b63;
+  --codey-red-soft: rgba(255, 107, 99, 0.15);
+  --codey-red-border: rgba(255, 107, 99, 0.34);
 
-  --codey-amber: #e5ae54;
-  --codey-amber-soft: rgba(229, 174, 84, 0.16);
-  --codey-amber-border: rgba(229, 174, 84, 0.34);
+  --codey-amber: #ffb73d;
+  --codey-amber-soft: rgba(255, 183, 61, 0.15);
+  --codey-amber-border: rgba(255, 183, 61, 0.34);
 
-  --codey-purple: #ad9bec;
-  --codey-purple-soft: rgba(173, 155, 236, 0.16);
-  --codey-purple-border: rgba(173, 155, 236, 0.34);
+  --codey-purple: #da8fff;
+  --codey-purple-soft: rgba(218, 143, 255, 0.13);
+  --codey-purple-border: rgba(218, 143, 255, 0.3);
 
   --mac-blue: var(--codey-blue);
   --mac-gray-bg: var(--codey-surface-sunken);
@@ -160,15 +161,15 @@ body {
 }
 
 @layer components {
-  /* 桌面收敛按钮：规整圆角与克制字重，深色模式下避免刺眼纯白实底。 */
+  /* Apple 式胶囊按钮：主操作为品牌蓝实底，次要操作为浅灰填充，不使用描边。 */
   .button {
-    height: 32px;
-    gap: 6px;
-    border-radius: 8px;
-    padding-inline: 12px;
+    height: 30px;
+    gap: 5px;
+    border-radius: var(--codey-pill);
+    padding-inline: 14px;
     font-size: 13px;
-    font-weight: 550;
-    letter-spacing: 0;
+    font-weight: 500;
+    letter-spacing: -0.005em;
     transition:
       background-color 140ms ease,
       border-color 140ms ease,
@@ -177,62 +178,47 @@ body {
   }
 
   .button--sm {
-    height: 28px;
-    border-radius: 7px;
-    padding-inline: 10px;
-    font-size: 12px;
+    height: 26px;
+    padding-inline: 11px;
+    font-size: 12.5px;
   }
 
   .button--lg {
-    height: 38px;
-    border-radius: 9px;
-    padding-inline: 18px;
+    height: 36px;
+    padding-inline: 20px;
     font-size: 14px;
   }
 
   .button--icon-only {
-    width: 32px;
+    width: 30px;
     padding: 0;
   }
 
   .button--icon-only.button--sm {
-    width: 28px;
+    width: 26px;
   }
 
   .button--primary {
-    --button-bg: #2b2e36;
-    --button-bg-hover: #3a3e48;
-    --button-bg-pressed: #202228;
+    --button-bg: #007aff;
+    --button-bg-hover: #1a87ff;
+    --button-bg-pressed: #006fe8;
     --button-fg: #ffffff;
-  }
-
-  [data-theme="dark"] .button--primary {
-    --button-bg: #e4e6ee;
-    --button-bg-hover: #eff1f7;
-    --button-bg-pressed: #d4d7e2;
-    --button-fg: #181a1f;
   }
 
   .button--outline,
   .button--secondary {
-    --button-bg: var(--codey-surface);
-    --button-bg-hover: var(--codey-surface-muted);
-    --button-bg-pressed: var(--codey-press);
+    --button-bg: rgba(var(--codey-ink-rgb), 0.06);
+    --button-bg-hover: rgba(var(--codey-ink-rgb), 0.1);
+    --button-bg-pressed: rgba(var(--codey-ink-rgb), 0.14);
     --button-fg: var(--codey-text);
-    border: 1px solid var(--codey-border-strong);
+    border: 0;
     box-shadow: none;
   }
 
-  [data-theme="dark"] .button--outline,
-  [data-theme="dark"] .button--secondary {
-    --button-bg: var(--codey-surface);
-    --button-bg-hover: var(--codey-surface-elevated);
-  }
-
   .button--tertiary {
-    --button-bg: var(--codey-surface-sunken);
-    --button-bg-hover: var(--codey-hover);
-    --button-bg-pressed: var(--codey-press);
+    --button-bg: rgba(var(--codey-ink-rgb), 0.06);
+    --button-bg-hover: rgba(var(--codey-ink-rgb), 0.1);
+    --button-bg-pressed: rgba(var(--codey-ink-rgb), 0.14);
     --button-fg: var(--codey-text);
     box-shadow: none;
   }
@@ -249,17 +235,36 @@ body {
     box-shadow: none;
   }
 
+  /* 表单控件统一压缩到 30px 行高，与胶囊按钮的密度一致。 */
+  .input,
+  .textarea {
+    padding: 5px 11px;
+    font-size: 13.5px;
+    line-height: 20px;
+  }
+
+  .input-group,
+  .select__trigger {
+    min-height: 32px;
+    font-size: 13.5px;
+  }
+
+  .select__trigger {
+    padding-block: 5px;
+    padding-inline: 11px;
+  }
+
   .chip {
-    border-radius: 5px;
-    font-size: 11px;
+    border-radius: var(--codey-pill);
+    font-size: 11.5px;
     line-height: 17px;
-    font-weight: 550;
+    font-weight: 500;
     letter-spacing: 0;
   }
 
   .toast {
-    border-radius: 10px;
-    border: 1px solid var(--codey-border);
+    border-radius: 12px;
+    border: 0;
     box-shadow: var(--codey-popover-shadow);
   }
 }
@@ -400,16 +405,15 @@ button,
 }
 
 .settings-modal-shell {
-  border: 1px solid var(--codey-border);
+  border: 0;
   background: var(--codey-canvas);
-  box-shadow: 0 18px 48px -12px rgba(15, 17, 21, 0.22), 0 0 0 1px rgba(15, 17, 21, 0.04);
+  box-shadow: 0 24px 60px -16px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
   animation: codey-modal-enter 160ms ease-out;
 }
 
 [data-theme="dark"] .settings-modal-shell {
-  border-color: rgba(255, 255, 255, 0.11);
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 0 0.5px rgba(255, 255, 255, 0.16),
     0 20px 54px -10px rgba(0, 0, 0, 0.48),
     0 6px 20px -4px rgba(0, 0, 0, 0.26);
 }
@@ -532,20 +536,30 @@ button,
   width: 100%;
   min-height: 100%;
   margin: 0;
-  padding: 0 0 40px;
+  padding: 0 0 32px;
 }
 
 .page > section,
 .page > .secondary-section,
 .overview-config > section {
+  position: relative;
   margin: 0;
-  padding: 22px var(--page-gutter-end) 26px var(--page-gutter);
-  border-bottom: 1px solid var(--codey-border);
+  padding: 18px var(--page-gutter-end) 20px var(--page-gutter);
+  border-bottom: 0;
 }
 
-.page > section:last-child,
-.overview-config > section:last-child {
-  border-bottom: 0;
+/* 区块之间只在内容列宽度内画一条发丝线，两侧留白不通栏。 */
+.page > section + section::before,
+.page > section + .secondary-section::before,
+.page > .secondary-section + section::before,
+.page > .secondary-section + .secondary-section::before,
+.overview-config > section + section::before {
+  position: absolute;
+  top: 0;
+  right: var(--page-gutter-end);
+  left: var(--page-gutter);
+  border-top: 1px solid var(--codey-border-subtle);
+  content: "";
 }
 
 /* 基础功能页配置区：标题在上，配置项按两列分组排列；保持与 DOM 焦点顺序一致。 */
@@ -556,7 +570,7 @@ button,
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: 208px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -571,14 +585,14 @@ button,
   flex-direction: column;
   overflow: hidden;
   overscroll-behavior: contain;
-  border-right: 1px solid var(--codey-border);
+  border-right: 1px solid var(--codey-border-subtle);
   background: var(--codey-sidebar);
-  padding: 12px 10px 12px;
+  padding: 12px 8px 10px;
 }
 
 .settings-sidebar-header {
   flex: none;
-  padding: 6px 8px 14px;
+  padding: 4px 8px 14px;
 }
 
 .sidebar-brand {
@@ -590,10 +604,10 @@ button,
 }
 
 .sidebar-brand > .codey-brand-mark {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   flex: none;
-  border-radius: 7px;
+  border-radius: 6px;
 }
 
 .sidebar-brand-text {
@@ -607,10 +621,10 @@ button,
 .sidebar-brand-text h1 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 15.5px;
-  font-weight: 650;
-  line-height: 19px;
-  letter-spacing: -0.015em;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: -0.016em;
 }
 
 .sidebar-brand-text span {
@@ -636,15 +650,15 @@ button,
 }
 
 .settings-nav-group + .settings-nav-group {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .settings-nav-group-title {
-  padding: 5px 10px 4px;
+  padding: 4px 10px 4px;
   color: var(--codey-subtle);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
   user-select: none;
 }
 
@@ -652,7 +666,7 @@ button,
   position: relative;
   display: flex;
   width: 100%;
-  min-height: 34px;
+  min-height: 32px;
   flex-shrink: 0;
   align-items: center;
   gap: 9px;
@@ -660,9 +674,9 @@ button,
   border-radius: 8px;
   background: transparent;
   padding: 0 10px;
-  color: var(--codey-text-soft);
+  color: var(--codey-text);
   font-size: 13.5px;
-  font-weight: 450;
+  font-weight: 400;
   line-height: 1.25;
   text-align: left;
   white-space: nowrap;
@@ -677,8 +691,8 @@ button,
 }
 
 .settings-nav-item svg {
-  width: 16.5px;
-  height: 16.5px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
   color: var(--codey-muted);
   stroke-width: 1.75;
@@ -696,13 +710,13 @@ button,
 
 .settings-nav-item[aria-current="page"] {
   background: var(--codey-nav-active);
-  color: var(--codey-text);
-  font-weight: 600;
+  color: var(--codey-blue);
+  font-weight: 500;
 }
 
 .settings-nav-item[aria-current="page"] svg {
-  stroke-width: 1.95;
-  color: var(--codey-text);
+  stroke-width: 1.9;
+  color: var(--codey-blue);
 }
 
 .settings-nav-item:focus-visible {
@@ -717,7 +731,7 @@ button,
   gap: 8px;
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid var(--codey-border);
+  border-top: 1px solid var(--codey-border-subtle);
 }
 
 /* Codex 运行状态条：收敛圆角卡片，保持低干扰层次。 */
@@ -725,15 +739,11 @@ button,
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 7px 7px 10px;
-  border: 1px solid var(--codey-border);
-  border-radius: 9px;
-  background: var(--codey-surface);
-  transition: background-color 140ms ease, border-color 140ms ease;
-}
-
-.codex-status-card:hover {
-  border-color: var(--codey-border-strong);
+  padding: 6px 6px 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(var(--codey-ink-rgb), 0.045);
+  transition: background-color 140ms ease;
 }
 
 .codex-status-dot {
@@ -787,16 +797,16 @@ button,
 .codex-status-action {
   flex: none;
   height: 26px !important;
-  padding-inline: 9px !important;
-  border: 1px solid var(--codey-border-strong) !important;
-  border-radius: 6px !important;
+  padding-inline: 10px !important;
+  border: 0 !important;
+  border-radius: var(--codey-pill) !important;
+  background-color: var(--codey-surface);
   color: var(--codey-text) !important;
-  font-size: 11.5px !important;
-  font-weight: 550 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
 }
 
 .codex-status-action.is-warning {
-  border-color: var(--codey-amber-border) !important;
   color: var(--codey-amber) !important;
   background-color: var(--codey-amber-soft);
 }
@@ -833,10 +843,10 @@ button,
 /* 保存按钮：有未保存更改时使用克制主题色，已保存时退为中性禁用态。 */
 .sidebar-save-button {
   width: 100% !important;
-  height: 34px !important;
-  border-radius: 8px !important;
+  height: 32px !important;
+  border-radius: var(--codey-pill) !important;
   font-size: 13px !important;
-  font-weight: 600 !important;
+  font-weight: 500 !important;
   border: 1px solid transparent !important;
   box-shadow: none !important;
   transition:
@@ -847,32 +857,21 @@ button,
 }
 
 .sidebar-save-button.button--primary:not(:disabled) {
-  background: var(--codey-blue) !important;
-  border-color: var(--codey-blue) !important;
+  background: #007aff !important;
+  border-color: #007aff !important;
   color: #ffffff !important;
   box-shadow: none !important;
 }
 
 .sidebar-save-button.button--primary:hover:not(:disabled) {
-  background: var(--codey-blue-hover) !important;
-  border-color: var(--codey-blue-hover) !important;
+  background: #1a87ff !important;
+  border-color: #1a87ff !important;
   box-shadow: none !important;
 }
 
-[data-theme="dark"] .sidebar-save-button.button--primary:not(:disabled) {
-  background: #4d84e0 !important;
-  border-color: #4d84e0 !important;
-  color: #ffffff !important;
-}
-
-[data-theme="dark"] .sidebar-save-button.button--primary:hover:not(:disabled) {
-  background: #5c91ea !important;
-  border-color: #5c91ea !important;
-}
-
 .sidebar-save-button:disabled {
-  background: var(--codey-surface-sunken) !important;
-  border-color: var(--codey-border) !important;
+  background: rgba(var(--codey-ink-rgb), 0.05) !important;
+  border-color: transparent !important;
   color: var(--codey-muted) !important;
   opacity: 1 !important;
   box-shadow: none !important;
@@ -927,8 +926,8 @@ button,
 /* ---------- 右侧内容区 ---------- */
 
 .settings-content {
-  --page-gutter: 28px;
-  --page-gutter-end: max(var(--page-gutter), calc(100cqi - 1000px + var(--page-gutter)));
+  --page-gutter: 32px;
+  --page-gutter-end: max(var(--page-gutter), calc(100cqi - 920px + var(--page-gutter)));
   position: relative;
   display: flex;
   min-width: 0;
@@ -967,7 +966,7 @@ button,
   flex: none;
   overflow: hidden;
   scrollbar-gutter: stable;
-  border-bottom: 1px solid var(--codey-border);
+  border-bottom: 1px solid var(--codey-border-subtle);
   background: var(--codey-canvas);
 }
 
@@ -975,7 +974,7 @@ button,
   position: static;
   width: 100%;
   margin: 0;
-  padding: 14px var(--page-gutter-end) 14px var(--page-gutter);
+  padding: 16px var(--page-gutter-end) 12px var(--page-gutter);
   border-bottom: 0;
   box-shadow: none;
   background: transparent;
@@ -987,10 +986,10 @@ button,
 
 .settings-close-button {
   position: absolute !important;
-  top: 13px;
+  top: 14px;
   right: 14px;
   z-index: 50;
-  border-radius: 7px !important;
+  border-radius: var(--codey-pill) !important;
   color: var(--codey-muted) !important;
 }
 
@@ -1006,14 +1005,14 @@ button,
   justify-content: flex-start;
   gap: 12px;
   padding: 12px 24px;
-  border-bottom: 1px solid var(--codey-border);
+  border-bottom: 1px solid var(--codey-border-subtle);
   background: var(--codey-canvas);
 }
 
 .usage-analysis-topbar .usage-back { flex: none; width: 32px; height: 32px; color: var(--codey-text); }
 .usage-analysis-heading { min-width: 0; }
-.usage-analysis-heading h1 { margin: 0; font-size: 17.5px; line-height: 1.3; font-weight: 650; letter-spacing: -0.015em; outline: none; }
-.usage-analysis-heading p { margin: 1px 0 0; font-size: 12.5px; color: var(--codey-muted); }
+.usage-analysis-heading h1 { margin: 0; font-size: 21px; line-height: 1.25; font-weight: 600; letter-spacing: -0.022em; outline: none; }
+.usage-analysis-heading p { margin: 2px 0 0; font-size: 13px; color: var(--codey-muted); }
 
 .app-shell.embedded .usage-analysis-topbar {
   padding-right: 64px;
@@ -1160,7 +1159,7 @@ button,
   flex-direction: column;
   justify-content: center;
   min-width: 0;
-  gap: 1px;
+  gap: 2px;
 }
 
 .settings-page-title-row {
@@ -1173,10 +1172,10 @@ button,
 .settings-page-heading h2 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 17.5px;
-  font-weight: 650;
-  line-height: 1.3;
-  letter-spacing: -0.015em;
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.022em;
   overflow-wrap: anywhere;
 }
 
@@ -1184,7 +1183,7 @@ button,
 .settings-page-heading p {
   margin: 0;
   color: var(--codey-muted);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -1194,7 +1193,7 @@ button,
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
-  min-height: 32px;
+  min-height: 28px;
   min-width: 0;
   max-width: 100%;
 }
@@ -1208,18 +1207,18 @@ button,
 .settings-section-heading {
   margin: 0;
   color: var(--codey-text);
-  font-size: 14.5px;
-  font-weight: 650;
+  font-size: 15px;
+  font-weight: 600;
   line-height: 1.35;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.012em;
 }
 
 /* ---------- Cards & Segmented Controls ---------- */
 
 .codey-card {
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-card);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   box-shadow: var(--codey-card-shadow, none);
   overflow: hidden;
   transition:
@@ -1227,16 +1226,16 @@ button,
     background-color 140ms ease;
 }
 
-/* HeroUI 标签页统一为收敛的下划线样式。 */
+/* HeroUI 标签页统一为 Apple 分段控件：浅灰轨道，选中项为白色浮起胶囊。 */
 .tabs__list-container {
-  border-bottom: 1px solid var(--codey-border);
-  border-radius: 0;
-  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(var(--codey-ink-rgb), 0.06);
 }
 
 .tabs__list {
-  gap: 2px;
-  padding: 0;
+  gap: 0;
+  padding: 2px;
 }
 
 .tabs__separator {
@@ -1244,32 +1243,34 @@ button,
 }
 
 .tabs__tab {
-  height: 36px;
-  border-radius: 0;
-  padding-inline: 12px;
-  color: var(--codey-muted);
+  height: 26px;
+  border-radius: 7px;
+  padding-inline: 13px;
+  color: var(--codey-text-soft);
   font-size: 13px;
   font-weight: 500;
 }
 
 .tabs__tab:not([data-selected="true"]):not([data-disabled="true"]):hover {
-  background: var(--codey-hover);
+  background: transparent;
   color: var(--codey-text);
   opacity: 1;
 }
 
 .tabs__tab[data-selected="true"] {
   color: var(--codey-text);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tabs__indicator {
-  top: auto;
-  bottom: 0;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--codey-blue);
-  box-shadow: none;
+  border-radius: 7px;
+  background: var(--codey-surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="dark"] .tabs__indicator {
+  background: #5a5a62;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 /* 关闭态开关轨道在白底上需要足够对比度。 */

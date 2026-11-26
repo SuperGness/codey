@@ -95,7 +95,7 @@ export function SkillCacheDialog({ open, request, container, onClose }: {
             </div>
           </DialogHeader>
           <div className="max-h-[70vh] space-y-3 overflow-y-auto pt-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--codey-border)] bg-[var(--codey-panel)] px-3.5 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[var(--codey-panel)] px-3.5 py-2.5">
               <span className="text-xs font-medium text-muted">
                 全局用户缓存{cache ? ` · 共 ${cache.skills.length} 项` : ""}
               </span>
@@ -120,7 +120,7 @@ export function SkillCacheDialog({ open, request, container, onClose }: {
               {cache?.skills.map((entry) => (
                 <article
                   key={entry.id}
-                  className="rounded-2xl border border-[var(--codey-border)] bg-[var(--codey-card)] p-4 space-y-2.5"
+                  className="rounded-xl bg-[var(--codey-panel)] p-4 space-y-2.5"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0 flex-1 space-y-1">

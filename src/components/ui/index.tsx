@@ -98,7 +98,7 @@ export interface ButtonProps extends Omit<HeroButtonProps, "variant" | "size" | 
 const buttonAppearance: Record<Exclude<ButtonVariant, "link" | "filled">, { variant: HeroButtonVariant; className?: string }> = {
   default: { variant: "primary" },
   light: { variant: "secondary" },
-  "brand-outline": { variant: "outline", className: "border-[var(--codey-blue-border)] text-[var(--codey-blue)] hover:bg-[var(--codey-blue-soft)]" },
+  "brand-outline": { variant: "outline", className: "bg-[var(--codey-blue-soft)] text-[var(--codey-blue)] hover:bg-[color-mix(in_srgb,var(--codey-blue)_14%,transparent)]" },
   warning: { variant: "primary", className: "bg-warning text-warning-foreground hover:bg-warning/90" },
   destructive: { variant: "danger" },
   "destructive-light": { variant: "danger-soft" },
@@ -116,10 +116,10 @@ function resolveButtonAppearance(variant: ButtonVariant, color: ButtonColor | un
 const buttonSizing: Record<ButtonSize, { size: HeroButtonProps["size"]; iconOnly?: boolean; className?: string }> = {
   default: { size: "md" },
   sm: { size: "sm" },
-  xs: { size: "sm", className: "h-7 min-h-7 px-2.5 text-xs md:h-7" },
+  xs: { size: "sm", className: "h-[26px] min-h-[26px] px-2.5 text-[12.5px] md:h-[26px]" },
   lg: { size: "lg" },
   icon: { size: "md", iconOnly: true },
-  "icon-sm": { size: "sm", iconOnly: true, className: "size-7 min-w-7 md:size-7" },
+  "icon-sm": { size: "sm", iconOnly: true, className: "size-[26px] min-w-[26px] md:size-[26px]" },
 };
 export function Button({
   variant = "default", color, size = "default", type = "button", loading, disabled, className, children, title, ...props

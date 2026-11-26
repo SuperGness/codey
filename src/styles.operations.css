@@ -19,16 +19,15 @@
   margin-right: 4px;
 }
 
-/* 运行状态：收敛圆角面板，三列以细竖线分隔。 */
+/* 运行状态：无边框的三列信息带，仅以发丝竖线分隔，悬停与展开用浅灰填充。 */
 .operations-status-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
-  margin-bottom: 0;
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-panel);
-  overflow: hidden;
+  margin: 0 -12px;
+  border: 0;
+  background: transparent;
+  overflow: visible;
 }
 
 .status-strip-item {
@@ -38,10 +37,10 @@
   min-width: 0;
   flex-direction: column;
   justify-content: flex-start;
-  gap: 5px;
-  padding: 13px 15px 12px;
+  gap: 4px;
+  padding: 10px 12px;
   border: 0;
-  border-radius: 0;
+  border-radius: 10px;
   background: transparent;
   color: inherit;
   text-align: left;
@@ -50,8 +49,20 @@
   transition: background-color 140ms ease, box-shadow 140ms ease;
 }
 
-.status-strip-item + .status-strip-item {
-  border-left: 1px solid var(--codey-border);
+.status-strip-item + .status-strip-item::before {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  border-left: 1px solid var(--codey-border-subtle);
+  content: "";
+}
+
+.status-strip-item:hover::before,
+.status-strip-item.is-expanded::before,
+.status-strip-item:hover + .status-strip-item::before,
+.status-strip-item.is-expanded + .status-strip-item::before {
+  opacity: 0;
 }
 
 .status-strip-item.tone-success { --tone: var(--codey-green); }
@@ -63,8 +74,7 @@
 }
 
 .status-strip-item.is-expanded {
-  background: var(--codey-card);
-  box-shadow: inset 0 -2px 0 var(--tone);
+  background: var(--codey-panel);
 }
 
 .status-strip-item:focus-visible {
@@ -107,7 +117,7 @@
   background: transparent;
   color: var(--tone);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.4;
 }
 
@@ -131,10 +141,10 @@
 .status-strip-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  color: var(--codey-muted);
+  gap: 3px;
+  color: var(--codey-blue);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 400;
   transition: color 140ms ease;
 }
 
@@ -148,16 +158,15 @@
 
 .status-strip-item:hover .status-strip-toggle,
 .status-strip-item.is-expanded .status-strip-toggle {
-  color: var(--codey-text);
+  color: var(--codey-blue-hover);
 }
 
 @container settings-content (max-width: 640px) {
   .operations-status-cards {
     grid-template-columns: minmax(0, 1fr);
   }
-  .status-strip-item + .status-strip-item {
-    border-left: 0;
-    border-top: 1px solid var(--codey-border);
+  .status-strip-item + .status-strip-item::before {
+    display: none;
   }
 }
 
@@ -166,11 +175,11 @@
 }
 
 .operations-expanded-tray {
-  margin-top: 10px;
+  margin-top: 8px;
   padding: 14px 16px;
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-card);
+  border: 0;
+  border-radius: 12px;
+  background: var(--codey-panel);
   animation: codey-panel-enter 150ms ease-out;
 }
 
@@ -196,10 +205,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 12px;
-  border: 1px solid var(--codey-border-subtle);
-  border-radius: 8px;
-  background: var(--codey-panel);
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font-size: 12.5px;
   color: var(--codey-text-soft);
 }
@@ -210,7 +219,7 @@
   height: 26px;
   place-items: center;
   border-radius: 6px;
-  background: var(--codey-surface-sunken);
+  background: var(--codey-surface);
   color: var(--codey-muted);
   flex-shrink: 0;
 }
@@ -265,7 +274,7 @@
 .injection-mode-heading h4 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
   line-height: 1.4;
 }
@@ -273,7 +282,7 @@
 .injection-mode-description {
   margin: 4px 0 0;
   color: var(--codey-muted);
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -305,7 +314,7 @@
 .injection-status-header h4 {
   margin: 0;
   color: var(--codey-text);
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
 }
 
@@ -321,11 +330,11 @@
   grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
-  min-height: 44px;
-  padding: 9px 11px;
-  border: 1px solid var(--codey-border-subtle);
-  border-radius: 8px;
-  background: var(--codey-panel);
+  min-height: 40px;
+  padding: 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .injection-script-icon {
@@ -348,14 +357,14 @@
   gap: 8px;
   min-width: 0;
   color: var(--codey-text);
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 600;
 }
 
 .injection-script-source {
   flex-shrink: 0;
   color: var(--codey-subtle);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
 }
 
@@ -363,7 +372,7 @@
   display: block;
   margin-top: 2px;
   color: var(--codey-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }

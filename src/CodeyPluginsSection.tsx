@@ -461,7 +461,7 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
             {[0, 1].map((row) => (
               <div
                 key={row}
-                className="flex items-center gap-3.5 rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-card)] p-4"
+                className="flex items-center gap-3 border-b border-[var(--codey-border-subtle)] py-3"
               >
                 <div className="size-9 shrink-0 rounded-lg bg-default/50" />
                 <div className="flex-1 space-y-2">
@@ -472,12 +472,12 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
             ))}
           </div>
         ) : !known && !loading ? (
-          <div className="flex flex-col items-center justify-center rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-panel)] px-6 py-12 text-center">
-            <div className="mb-3 flex size-10 items-center justify-center rounded-lg border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] text-[var(--codey-red)]">
+          <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
+            <div className="mb-3 flex size-11 items-center justify-center rounded-xl bg-[var(--codey-red-soft)] text-[var(--codey-red)]">
               <IconAlertTriangle size={20} stroke={1.7} aria-hidden="true" />
             </div>
-            <h4 className="m-0 text-[14.5px] font-semibold text-foreground">无法读取插件列表</h4>
-            <p className="mb-3 mt-1 max-w-sm text-[12.5px] text-muted leading-relaxed">
+            <h4 className="m-0 text-[15px] font-semibold tracking-[-0.012em] text-foreground">无法读取插件列表</h4>
+            <p className="mb-3 mt-1 max-w-sm text-xs text-muted leading-relaxed">
               请检查本地服务状态后重试读取插件目录。
             </p>
             <Button
@@ -489,14 +489,14 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
               重新读取
             </Button>
           </div>
-        ) : known && !loading && <div className="flex flex-col items-center justify-center rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-panel)] px-6 py-14 text-center">
-          <div className="mb-3 flex size-10 items-center justify-center rounded-lg border border-[var(--codey-border)] bg-[var(--codey-surface)] text-foreground">
+        ) : known && !loading && <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+          <div className="mb-3 flex size-11 items-center justify-center rounded-xl bg-[var(--codey-surface-sunken)] text-muted">
             <IconPuzzle size={20} stroke={1.6} />
           </div>
           {searchQuery || statusFilter !== "all" ? (
             <>
-              <h4 className="m-0 text-[14.5px] font-semibold text-foreground">未找到匹配的插件</h4>
-              <p className="mb-3 mt-1 text-[12.5px] text-muted">
+              <h4 className="m-0 text-[15px] font-semibold tracking-[-0.012em] text-foreground">未找到匹配的插件</h4>
+              <p className="mb-3 mt-1 text-xs text-muted">
                 {searchQuery
                   ? `没有符合「${searchQuery}」的插件，请尝试其他关键词。`
                   : `当前没有${statusFilter === "enabled" ? "已启用" : "未启用"}的插件。`}
@@ -514,8 +514,8 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
             </>
           ) : (
             <>
-              <h4 className="m-0 text-[14.5px] font-semibold text-foreground">尚未安装任何插件</h4>
-              <p className="mb-0 mt-1 max-w-sm text-[12.5px] text-muted leading-relaxed">
+              <h4 className="m-0 text-[15px] font-semibold tracking-[-0.012em] text-foreground">尚未安装任何插件</h4>
+              <p className="mb-0 mt-1 max-w-sm text-xs text-muted leading-relaxed">
                 在上方选择或拖入 .codey-plugin 插件包，扩展环境适配、模型代理拦截与自定增强功能。
               </p>
             </>
@@ -535,24 +535,24 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div
-                        className={`flex size-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
+                        className={`flex size-[30px] shrink-0 items-center justify-center rounded-lg transition-colors ${
                           plugin.enabled
-                            ? "border-[var(--codey-border-strong)] bg-[var(--codey-surface-sunken)] text-foreground"
-                            : "border-[var(--codey-border)] bg-[var(--codey-surface-sunken)] text-muted"
+                            ? "bg-[var(--codey-surface-sunken)] text-foreground"
+                            : "bg-[var(--codey-surface-sunken)] text-muted"
                         }`}
                       >
                         <IconPuzzle size={17} stroke={1.75} aria-hidden="true" />
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <h4 className="m-0 truncate text-[13.5px] font-semibold text-foreground">
+                          <h4 className="m-0 truncate text-[13px] font-semibold text-foreground">
                             {plugin.name}
                           </h4>
-                          <span className="inline-flex items-center rounded-md bg-[var(--codey-surface-sunken)] px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">
+                          <span className="inline-flex items-center rounded-full bg-[var(--codey-surface-sunken)] px-2 py-px font-mono text-[11px] font-medium text-muted">
                             v{plugin.version}
                           </span>
                         </div>
-                        <div className="mb-0 mt-0.5 flex items-center gap-1.5 font-mono text-[12.5px] text-muted">
+                        <div className="mb-0 mt-0.5 flex items-center gap-1.5 font-mono text-xs text-muted">
                           <span className="truncate">{plugin.id}</span>
                           {hasDirs ? (
                             <Tooltip
@@ -621,17 +621,17 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                   </div>
 
                   {plugin.description && (
-                    <p className="mb-0 mt-1.5 line-clamp-2 text-[13px] text-muted leading-relaxed sm:ml-[48px]">
+                    <p className="mb-0 mt-1.5 line-clamp-2 text-xs text-muted leading-relaxed sm:ml-[42px]">
                       {plugin.description}
                     </p>
                   )}
 
                   {plugin.capabilities && plugin.capabilities.length > 0 && (
-                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-[48px]">
+                    <div className="mt-2.5 flex flex-wrap gap-1.5 sm:ml-[42px]">
                       {plugin.capabilities.map((cap) => (
                         <span
                           key={cap}
-                          className="inline-flex items-center rounded-md border border-[var(--codey-border)] bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] text-muted"
+                          className="inline-flex items-center rounded-full bg-[var(--codey-surface-sunken)] px-2 py-0.5 font-mono text-[11px] text-muted"
                         >
                           {cap}
                         </span>
@@ -640,21 +640,21 @@ function CodeyPluginsSectionComponent({ active = true, container }: CodeyPlugins
                   )}
 
                   {plugin.restartRequired && (
-                    <div className="mt-3 rounded-lg border border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] px-3 py-2 text-[12.5px] text-[var(--codey-amber)] sm:ml-[48px]">
+                    <div className="mt-3 rounded-[10px] bg-[var(--codey-amber-soft)] px-3 py-2 text-xs text-[var(--codey-amber)] sm:ml-[42px]">
                       需要重启 Codey 或停用后重新启用，以应用版本更新或配置变更。
                     </div>
                   )}
 
                   {plugin.lastError && (
-                    <div role="alert" className="mt-3 rounded-lg border border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-3 py-2 text-[12.5px] text-[var(--codey-red)] sm:ml-[48px]">
+                    <div role="alert" className="mt-3 rounded-[10px] bg-[var(--codey-red-soft)] px-3 py-2 text-xs text-[var(--codey-red)] sm:ml-[42px]">
                       {plugin.lastError}
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-[48px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 sm:ml-[42px]">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="whitespace-nowrap text-[12.5px] text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
+                    <span className="whitespace-nowrap text-xs text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
                       日志 {plugin.logSizeBytes == null ? "大小未知" : formatBytes(plugin.logSizeBytes)}
                     </span>
                     <Button

@@ -48,15 +48,15 @@
 
 .route-header-switch-label {
   color: var(--mac-text-primary);
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
   line-height: 1.25;
   white-space: nowrap;
 }
 
 .route-header-divider {
   width: 1px;
-  height: 22px;
+  height: 16px;
   background: var(--codey-border);
   flex-shrink: 0;
 }
@@ -102,7 +102,7 @@
 }
 
 .catalog-aggregate-heading {
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .catalog-aggregate-title {
@@ -121,8 +121,8 @@
 .catalog-aggregate-heading strong {
   color: var(--mac-text-primary);
   font-size: 14.5px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 600;
+  letter-spacing: -0.012em;
 }
 
 .catalog-aggregate-heading small,
@@ -137,17 +137,17 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
-  padding: 9px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--codey-amber-border);
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 0;
   background: var(--codey-amber-soft);
   color: var(--codey-amber);
-  font-size: 12px;
-  font-weight: 550;
+  font-size: 12.5px;
+  font-weight: 500;
   line-height: 1.45;
 }
 
-/* 线路列表：统一收敛圆角卡片容器，方圆图标 + 模型芯片整齐缩进。 */
+/* 线路列表：无外框的平铺行，行间发丝线分隔，图标与模型胶囊整齐缩进。 */
 .settings-page .provider-model-groups {
   display: flex;
   flex-direction: column;
@@ -155,19 +155,21 @@
   gap: 0;
   margin-inline: 0;
   padding: 0;
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-card);
+  border: 0;
+  border-top: 1px solid var(--codey-border-subtle);
+  border-bottom: 1px solid var(--codey-border-subtle);
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .provider-model-group {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  overflow: hidden;
+  gap: 8px;
+  padding: 12px 0;
+  overflow: visible;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -177,11 +179,7 @@
 }
 
 .provider-model-group + .provider-model-group {
-  border-top: 1px solid var(--codey-border);
-}
-
-.provider-model-group:hover {
-  background: var(--codey-hover);
+  border-top: 1px solid var(--codey-border-subtle);
 }
 
 .provider-model-group.is-disabled .provider-heading-main {
@@ -249,7 +247,7 @@
   place-items: center;
   width: 32px;
   height: 32px;
-  border: 1px solid var(--codey-border);
+  border: 0;
   border-radius: 8px;
   background: var(--codey-surface-sunken);
   color: var(--codey-text-soft);
@@ -464,13 +462,13 @@
   min-width: 0;
   max-width: 100%;
   gap: 6px;
-  min-height: 27px;
-  padding: 2px 10px 2px 8px;
-  border: 1px solid var(--codey-border);
-  border-radius: 7px;
-  background: var(--codey-surface-muted);
+  min-height: 26px;
+  padding: 2px 11px 2px 9px;
+  border: 0;
+  border-radius: var(--codey-pill);
+  background: var(--codey-surface-sunken);
   color: var(--mac-text-primary);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   text-align: left;
@@ -485,8 +483,7 @@
 }
 
 .model-tag-pill:hover:not(:disabled) {
-  background: var(--codey-hover);
-  border-color: var(--codey-border-strong);
+  background: rgba(var(--codey-ink-rgb), 0.09);
   color: var(--codey-text);
 }
 
@@ -496,7 +493,7 @@
 }
 
 .model-tag-pill:active:not(:disabled) {
-  background: var(--codey-press);
+  background: rgba(var(--codey-ink-rgb), 0.13);
 }
 
 .model-tag-pill:disabled {
@@ -505,14 +502,12 @@
 
 .model-tag-pill.is-default {
   background: var(--codey-blue-soft);
-  border-color: var(--codey-blue-border);
   color: var(--codey-blue);
   font-weight: 600;
 }
 
 .model-tag-pill.is-default:hover:not(:disabled) {
   background: var(--codey-blue-soft);
-  border-color: var(--codey-blue-border);
   color: var(--codey-blue);
 }
 
@@ -543,7 +538,7 @@
   min-width: 0;
   overflow-wrap: anywhere;
   font-family: var(--codey-font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
   letter-spacing: -0.01em;
 }
 
@@ -556,12 +551,12 @@
   display: inline-flex;
   flex-shrink: 0;
   align-items: center;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
-  padding: 0 5px;
+  padding: 0 6px;
   height: 16px;
   line-height: 16px;
-  border-radius: 4px;
+  border-radius: var(--codey-pill);
   background: color-mix(in srgb, var(--codey-blue) 14%, transparent);
   color: var(--codey-blue);
   margin-left: 2px;
@@ -575,7 +570,7 @@
   gap: 12px;
   padding: 26px 16px;
   color: var(--mac-text-secondary);
-  font-size: 13px;
+  font-size: 13.5px;
   background: transparent;
   margin: 0;
 }
@@ -615,13 +610,13 @@
 
 .route-field > span {
   color: var(--mac-text-primary);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
 }
 
 .route-field-hint {
   color: var(--mac-text-secondary);
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.4;
 }
 
@@ -708,7 +703,7 @@
   align-items: center;
   gap: 6px;
   color: var(--success, #34c759);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -725,12 +720,12 @@
   align-items: center;
   gap: 6px;
   color: var(--mac-text-primary);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
 }
 
 .route-protocol-section-badge {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--mac-text-secondary);
   background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
@@ -807,7 +802,7 @@
 
 .route-option-title {
   color: var(--mac-text-primary);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   line-height: 1.3;
 }
@@ -839,7 +834,7 @@
 
 .route-option-item .route-field-hint {
   color: var(--mac-text-secondary);
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.35;
   white-space: normal;
   padding-left: 28px;
@@ -848,7 +843,7 @@
 
 /* 第二行并排开关的提示文案保持单行自然展示 */
 .route-option-grid-row .route-option-item .route-field-hint {
-  font-size: 10.5px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -888,13 +883,13 @@
 }
 
 .route-option-subpanel-label {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--mac-text-primary);
 }
 
 .route-option-subpanel-badge {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 500;
   color: var(--codey-blue, #007aff);
   background: var(--codey-blue-soft, #eaf3ff);
@@ -903,7 +898,7 @@
 }
 
 .route-option-subpanel-hint {
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.35;
   color: var(--mac-text-secondary);
   margin: 0;
@@ -933,14 +928,14 @@
 .official-model-editor-heading strong,
 .official-model-option strong {
   color: var(--mac-text-primary);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .official-model-editor-heading small,
 .official-model-option small {
   color: var(--mac-text-secondary);
-  font-size: 10px;
+  font-size: 10.5px;
   line-height: 1.4;
 }
 
@@ -990,15 +985,13 @@
 }
 
 .settings-page .route-auxiliary-bar {
-  --field-background: var(--codey-surface);
-  --field-border: var(--codey-border);
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding: 4px 18px;
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-panel);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
   margin-top: 18px;
   margin-bottom: 14px;
@@ -1033,9 +1026,9 @@
 
 .route-auxiliary-title {
   font-size: 14.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--mac-text-primary);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.012em;
 }
 
 .route-auxiliary-subtitle {
@@ -1049,13 +1042,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 13px 0;
-  border-top: 1px solid var(--codey-border);
-}
-
-.route-auxiliary-header + .route-setting-row {
-  border-top: none;
-  padding-top: 2px;
+  padding: 12px 0;
+  border-top: 1px solid var(--codey-border-subtle);
 }
 
 .route-setting-row:last-child {
@@ -1091,7 +1079,7 @@
 
 .route-setting-text p.route-setting-warning {
   color: var(--codey-amber, #b45309);
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .route-setting-control {
@@ -1152,11 +1140,11 @@
 .settings-page .readonly-note {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 14px;
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-panel);
+  gap: 8px;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--mac-text-secondary);
   font-size: 12.5px;
 }
@@ -1224,7 +1212,7 @@
 
 .official-accounts-title {
   font-size: 14.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--mac-text-primary);
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -1261,7 +1249,7 @@
   padding: 14px 16px;
   border-radius: 10px;
   background: var(--codey-panel);
-  border: 1px solid var(--codey-border);
+  border: 0;
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--mac-text-secondary);
@@ -1269,7 +1257,7 @@
 
 .official-accounts-error,
 .official-login-waiting {
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.45;
   color: var(--mac-text-secondary);
 }
@@ -1284,10 +1272,12 @@
   gap: 0;
   margin: 0;
   padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--codey-border);
-  border-radius: 10px;
-  background: var(--codey-card);
+  overflow: visible;
+  border: 0;
+  border-top: 1px solid var(--codey-border-subtle);
+  border-bottom: 1px solid var(--codey-border-subtle);
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
   list-style: none;
 }
@@ -1300,8 +1290,8 @@
   align-items: center;
   column-gap: 16px;
   row-gap: 12px;
-  min-height: 68px;
-  padding: 13px 16px;
+  min-height: 60px;
+  padding: 12px 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -1310,7 +1300,7 @@
 }
 
 .settings-page .official-account-item + .official-account-item {
-  border-top: 1px solid var(--codey-border);
+  border-top: 1px solid var(--codey-border-subtle);
 }
 
 @container settings-content (max-width: 720px) {
@@ -1333,8 +1323,8 @@
   cursor: pointer;
 }
 
-.settings-page .official-account-item.is-switchable:hover {
-  background: var(--codey-hover);
+.settings-page .official-account-item.is-switchable:hover .official-account-line strong {
+  color: var(--codey-blue);
 }
 
 .settings-page .official-account-item.is-switchable:focus-visible {
@@ -1343,18 +1333,18 @@
 }
 
 .settings-page .official-account-item.is-invalid {
-  background: color-mix(in srgb, var(--codey-red) 4.5%, transparent);
+  background: transparent;
 }
 
 /* 默认账号标记；is-pending 表示改动要等 Codex 重启生效。 */
 .official-account-default-corner {
   display: inline-flex;
   align-items: center;
-  height: 19px;
-  padding: 0 6px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  font-size: 10.5px;
+  height: 18px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--codey-pill);
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0;
   user-select: none;
@@ -1412,15 +1402,14 @@
   place-items: center;
   width: 32px;
   height: 32px;
-  border: 1px solid var(--codey-border);
+  border: 0;
   border-radius: 8px;
   background: var(--codey-surface-sunken);
   flex-shrink: 0;
 }
 
 .official-account-item.is-default .official-account-item-icon-pill {
-  background: var(--codey-surface-elevated);
-  border-color: var(--codey-border-strong);
+  background: rgba(var(--codey-ink-rgb), 0.09);
 }
 
 .official-account-avatar {
@@ -1445,14 +1434,14 @@
   flex-shrink: 0;
   box-sizing: border-box;
   font-family: var(--codey-font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  padding: 0 6px;
+  padding: 0 8px;
   height: 19px;
-  line-height: 17px;
-  border-radius: 4px;
-  border: 1px solid transparent;
+  line-height: 19px;
+  border-radius: var(--codey-pill);
+  border: 0;
   user-select: none;
   white-space: nowrap;
   transition: all 0.15s ease;
@@ -1576,7 +1565,7 @@
   flex-shrink: 0;
   box-sizing: border-box;
   font-family: var(--codey-font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
   padding: 0 6px;
@@ -1654,7 +1643,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.4;
   color: var(--mac-text-secondary);
 }
@@ -1701,9 +1690,9 @@
   flex-direction: column;
   gap: 5px;
   min-width: 0;
-  padding: 9px 12px;
-  border: 1px solid var(--codey-border-subtle);
-  border-radius: 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
   background: var(--codey-panel);
 }
 
@@ -1715,7 +1704,7 @@
 }
 
 .official-account-usage-window {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 620;
   color: var(--mac-text-primary);
   white-space: nowrap;
@@ -1725,8 +1714,8 @@
   display: inline-flex;
   align-items: center;
   font-family: var(--codey-font-mono);
-  font-size: 10px;
-  font-weight: 650;
+  font-size: 10.5px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   padding: 1px 5px;
   border-radius: 3px;
@@ -1799,7 +1788,7 @@
   align-items: center;
   gap: 4.5px;
   font-family: var(--codey-font-mono);
-  font-size: 10px;
+  font-size: 10.5px;
   line-height: 1.3;
   color: var(--mac-text-secondary);
   min-height: 14px;
@@ -1826,7 +1815,7 @@
 .official-account-usage-stale {
   grid-column: 1 / -1;
   color: var(--mac-text-tertiary);
-  font-size: 10.5px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -1883,7 +1872,7 @@
 .official-manual-file-help,
 .official-manual-file-loaded {
   color: var(--mac-text-secondary);
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.45;
 }
 
@@ -1896,11 +1885,11 @@
   display: block;
   overflow: hidden;
   padding: 8px 10px;
-  border: 1px solid var(--codey-border);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 8px;
   background: var(--codey-surface-sunken);
   font-family: var(--codey-font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.4;
   color: var(--mac-text-secondary);
   text-overflow: ellipsis;
@@ -1913,16 +1902,18 @@
   display: none !important;
 }
 
+/* 线路与模型分区：Apple 分段控件，浅灰轨道内的白色胶囊表示当前分区。 */
 .route-tabs {
   display: flex;
-  align-items: stretch;
-  gap: 4px;
-  padding: 0 var(--page-gutter-end, 28px) 0 var(--page-gutter, 28px);
-  margin: -22px calc(var(--page-gutter-end, 28px) * -1) 18px calc(var(--page-gutter, 28px) * -1);
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 0;
+  padding: 2px;
+  margin: 0 0 18px;
   border: 0;
-  border-bottom: 1px solid var(--codey-border);
-  border-radius: 0;
-  background: transparent;
+  border-radius: 9px;
+  background: rgba(var(--codey-ink-rgb), 0.06);
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -1933,39 +1924,38 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  height: 40px;
-  padding: 0 12px;
+  gap: 6px;
+  height: 26px;
+  padding: 0 13px;
   border: 0;
-  border-radius: 0;
+  border-radius: 7px;
   background: transparent;
-  color: var(--mac-text-secondary);
-  font-size: 13.5px;
+  color: var(--codey-text-soft);
+  font-size: 12.5px;
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
+  transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.route-tab svg {
+  width: 14px;
+  height: 14px;
 }
 
 .route-tab:hover {
-  background: var(--codey-hover);
   color: var(--mac-text-primary);
 }
 
 .route-tab[aria-selected="true"] {
+  background: var(--codey-surface);
   color: var(--mac-text-primary);
-  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 }
 
-.route-tab[aria-selected="true"]::after {
-  content: "";
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 0;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--codey-blue);
+[data-theme="dark"] .route-tab[aria-selected="true"] {
+  background: #5a5a62;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .route-tab:focus-visible {
@@ -1974,37 +1964,27 @@
 }
 
 .route-tab-count {
-  min-width: 18px;
-  padding: 0 5px;
-  border: 1px solid var(--codey-border);
-  border-radius: 5px;
-  background: var(--codey-surface-sunken);
+  min-width: 16px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--codey-pill);
+  background: transparent;
   color: var(--codey-muted);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 17px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
-[data-theme="dark"] .route-tab-count {
-  background: var(--codey-surface-elevated);
-  border-color: var(--codey-border);
-  color: var(--codey-text-soft);
-}
-
 .route-tab[aria-selected="true"] .route-tab-count {
-  background: var(--codey-nav-active);
-  border-color: var(--codey-border-strong);
-  color: var(--codey-text);
+  color: var(--codey-text-soft);
 }
 
 @container settings-content (max-width: 520px) {
   .route-tab {
-    height: 38px;
     padding: 0 9px;
     gap: 5px;
-    font-size: 13px;
   }
 }
 

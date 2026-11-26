@@ -17,10 +17,6 @@
 }
 
 @media (max-width: 760px) {
-  .route-tabs {
-    margin-top: -18px;
-  }
-
   .route-item-drag-handle {
     margin-left: -6px;
     margin-right: -4px;
@@ -50,7 +46,6 @@
   }
 
   .route-auxiliary-bar {
-    padding: 10px 14px;
     gap: 10px;
   }
 

@@ -63,16 +63,16 @@ export function ExtensionList({
 
   if (!entries.length) {
     return (
-      <div className="flex min-h-56 flex-col items-center justify-center rounded-[10px] border border-dashed border-[var(--codey-border-strong)] bg-[var(--codey-panel)] px-6 py-10 text-center">
-        <div className="mb-3 flex size-10 items-center justify-center rounded-lg border border-[var(--codey-border)] bg-[var(--codey-surface)] text-muted">
+      <div className="flex min-h-56 flex-col items-center justify-center px-6 py-12 text-center">
+        <div className="mb-3 flex size-11 items-center justify-center rounded-xl bg-[var(--codey-surface-sunken)] text-muted">
           <KindIcon size={20} stroke={1.65} />
         </div>
-        <h4 className="m-0 text-[14.5px] font-semibold text-foreground">
+        <h4 className="m-0 text-[15px] font-semibold tracking-[-0.012em] text-foreground">
           {filtered
             ? "没有符合筛选条件的结果"
             : `当前范围暂无${isMcp ? " MCP 服务" : " Skill"}`}
         </h4>
-        <p className="mb-0 mt-1.5 max-w-sm text-[12.5px] text-muted leading-relaxed">
+        <p className="mb-0 mt-1.5 max-w-sm text-xs text-muted leading-relaxed">
           {filtered
             ? "请尝试更换搜索关键词、状态标签或来源筛选条件。"
             : isMcp
