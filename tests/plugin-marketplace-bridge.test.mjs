@@ -40,21 +40,23 @@ function setup({ lateBridge = false } = {}) {
   return { window, calls, localCalls, timers, nativePromise, response, electronBridge, interceptor, sandbox };
 }
 
-test("chat text, paths and arbitrary objects never activate plugin IPC patches", async () => {
+test("chat text, paths, legacy envelopes and arbitrary objects never activate plugin IPC patches", async () => {
   const fixture = setup();
   const { window, calls, localCalls, nativePromise, response } = fixture;
   const messages = [
     { channel: "thread-update", payload: { text: "install-plugin and list-plugins", includeHidden: false } },
+    { channel: "list-plugins", options: { includeHidden: false, includeRemote: false } },
+    { method: "list-plugins", options: { includeHidden: false, includeRemote: false } },
+    { path: "/api/plugins/list", options: { includeHidden: false, includeRemote: false } },
+    { type: "invoke", payload: { request: { method: "plugin/list" } } },
     { method: "turn/start", params: { input: "plugin marketplace", includeRemote: false } },
-    { method: "turn/start", payload: { method: "list-plugins", includeHidden: false } },
-    { type: "invoke", method: "turn/start", payload: { method: "list-plugins" } },
-    { type: "mcp-request", request: { method: "tools/call", params: { name: "install-plugin" } } },
-    { type: "invoke", payload: { method: "tools/call", request: { method: "list-plugins" } } },
+    { method: "turn/start", payload: { method: "plugin/list" } },
+    { type: "mcp-request", request: { method: "tools/call", params: { name: "plugin/install" } } },
     { description: "plugin", plugin: { includeHidden: false } },
     { payload: { text: "marketplace", file: "/workspace/plugins/example.md" } },
-    { metadata: { method: "list-plugins", path: "/plugins/list" } },
-    { method: "get-plugin-documentation", options: { includeHidden: false } },
-    { method: "plugin-helper/list", options: { includeHidden: false } },
+    { metadata: { method: "plugin/list", path: "/plugins/list" } },
+    { method: "get-plugin-documentation" },
+    { method: "plugin-helper/list" },
   ];
   for (const message of messages) {
     const result = window.electronBridge.sendMessageFromView(message);
@@ -62,45 +64,49 @@ test("chat text, paths and arbitrary objects never activate plugin IPC patches",
     assert.equal(calls.at(-1)[0], message);
     assert.equal(await result, response);
   }
-  const payload = { method: "list-plugins", includeHidden: false };
+  const payload = { method: "plugin/list" };
   assert.equal(window.electronBridge.sendMessageFromView("turn/start", payload), nativePromise);
   assert.equal(calls.at(-1)[1], payload);
   assert.equal(localCalls.length, 0);
   assert.equal(response.plugins[0].hidden, true);
 });
 
-test("explicit plugin commands and nested transport envelopes retain normalization and local lists", async () => {
+test("26.1120.50957 plugin RPC commands and mcp-request envelopes retain normalization and local lists", async () => {
   for (const message of [
-    { channel: "list-plugins", options: { includeHidden: false, includeRemote: false } },
-    { method: "plugin/list", options: { includeHidden: false, includeRemote: false } },
-    { path: "/api/plugins/list", options: { includeHidden: false, includeRemote: false } },
-    { type: "invoke", payload: { request: { method: "list-plugins", options: { includeHidden: false } } } },
-    { type: "mcp-request", request: { method: "plugin/list", params: { includeRemote: false } } },
-    { body: JSON.stringify({ method: "plugin/list" }) },
-    JSON.stringify({ method: "list-plugins", options: { includeHidden: false } }),
+    { method: "plugin/list", params: { cwds: ["/workspace"] } },
+    { method: "plugin/installed", params: {} },
+    { type: "mcp-request", request: { id: "req-1", method: "plugin/list", params: {} } },
+    { type: "mcp-request", request: { id: "req-2", method: "plugin/installed", params: {} } },
   ]) {
     const { window, localCalls, calls } = setup();
     const response = await window.electronBridge.sendMessageFromView(message);
     assert.equal(localCalls.length, 1, JSON.stringify(message));
     assert.equal(localCalls[0][0], "/plugins/list");
+    assert.equal(calls[0][0], message);
     assert.equal(response.plugins[0].hidden, false);
     assert.equal(response.plugins.some((plugin) => plugin.id === "local"), true);
-    assert.doesNotMatch(JSON.stringify(calls[0]), /"include(?:Hidden|Remote)":false/);
   }
-  const { window, localCalls, calls } = setup();
-  await window.electronBridge.sendMessageFromView("list-plugins", { includeHidden: false });
-  await window.electronBridge.sendMessageFromView("invoke", { method: "plugin/list" });
+  const { window, localCalls } = setup();
+  await window.electronBridge.sendMessageFromView("mcp-request", { method: "plugin/list", params: {} });
+  await window.electronBridge.sendMessageFromView("mcp-request", { request: { method: "plugin/installed" } });
   assert.equal(localCalls.length, 2);
-  assert.equal(calls[0][1].includeHidden, true);
 });
 
 test("read and mutation commands patch results while only mutations trigger a refresh", async () => {
   const { window, localCalls } = setup();
-  const read = await window.electronBridge.sendMessageFromView({ method: "plugin/read" });
+  const read = await window.electronBridge.sendMessageFromView({
+    type: "mcp-request",
+    request: { method: "plugin/read", params: { pluginName: "remote" } },
+  });
   assert.equal(read.plugins[0].hidden, false);
   assert.equal(localCalls.length, 0);
-  for (const method of ["plugin/install", "plugin/uninstall", "install-plugin", "uninstall-plugin"]) {
-    await window.electronBridge.sendMessageFromView({ type: "invoke", payload: { method } });
+  for (const message of [
+    { method: "plugin/install", params: { pluginName: "remote" } },
+    { method: "plugin/uninstall", params: { pluginId: "remote" } },
+    { type: "mcp-request", request: { method: "plugin/install", params: { pluginName: "remote" } } },
+    { type: "mcp-request", request: { method: "plugin/uninstall", params: { pluginId: "remote" } } },
+  ]) {
+    await window.electronBridge.sendMessageFromView(message);
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(localCalls.length, 4);
@@ -117,8 +123,9 @@ test("late bridge retries and reinjection preserve narrow request matching", asy
   vm.runInNewContext(source, sandbox);
   assert.equal(window.electronBridge.sendMessageFromView, wrapped);
   assert.equal(window.electronBridge.sendMessageFromView({ method: "turn/start", prompt: "plugin" }), nativePromise);
-  const result = await window.electronBridge.sendMessageFromView({ method: "list-plugins", includeHidden: false });
-  assert.equal(calls[1][0].includeHidden, true);
+  const req = { type: "mcp-request", request: { method: "plugin/list", params: {} } };
+  const result = await window.electronBridge.sendMessageFromView(req);
+  assert.equal(calls[1][0], req);
   assert.equal(result.plugins[0].hidden, false);
 });
 
@@ -130,10 +137,10 @@ test("fetch matching ignores hostnames, query strings, fragments and chat payloa
   for (const [url, body] of [
     ["https://plugins.example/chat", { prompt: "plugin" }],
     ["//plugins/chat", { prompt: "marketplace" }],
-    ["https://example.com/chat?redirect=/plugins/list#marketplace", { prompt: "list-plugins" }],
-    ["https://example.com/plugin-docs", { method: "turn/start", payload: { method: "list-plugins" } }],
+    ["https://example.com/chat?redirect=/ps/plugins/list#marketplace", { prompt: "plugin/list" }],
+    ["https://example.com/plugin-docs", { method: "turn/start", payload: { method: "plugin/list" } }],
     ["https://example.com/rpc", { method: "tools/call", params: { method: "plugin/list" } }],
-    ["https://example.com/rpc", { description: "list-plugins", metadata: { method: "list-plugins" } }],
+    ["https://example.com/api/list-plugins", { description: "legacy route" }],
   ]) {
     const result = interceptor(() => nativePromise, url, { body: JSON.stringify(body) });
     assert.equal(result, nativePromise, url);
@@ -141,25 +148,25 @@ test("fetch matching ignores hostnames, query strings, fragments and chat payloa
   assert.equal(localCalls.length, 0);
 });
 
-test("plugin fetch routes patch JSON and RPC list bodies still wait for the local refresh", async () => {
+test("plugin fetch routes patch JSON across /ps/plugins/* and /marketplace/list", async () => {
   const { interceptor, localCalls } = setup();
   const native = () => Promise.resolve(new Response(JSON.stringify({ plugins: [{ id: "remote", hidden: true }] }), {
     headers: { "content-type": "application/json", "content-length": "1" },
   }));
-  for (const url of ["https://example.com/plugins/list", "/api/marketplace/list", "/api/list-plugins"]) {
+  for (const url of [
+    "https://chatgpt.com/backend-api/wham/ps/plugins/list",
+    "/backend-api/ps/plugins/installed",
+    "/ps/plugins/search?query=figma",
+    "/ps/plugins/workspace/created",
+    "/api/marketplace/list",
+  ]) {
     const result = await interceptor(native, url);
     assert.equal(result.headers.has("content-length"), false);
     const data = await result.json();
     assert.equal(data.plugins[0].hidden, false);
     assert.equal(data.plugins.some((plugin) => plugin.id === "local"), true);
   }
-  assert.equal(localCalls.length, 3);
-  const nativeResponse = await native();
-  const result = await interceptor(() => Promise.resolve(nativeResponse), "/rpc", {
-    body: JSON.stringify({ type: "invoke", payload: { method: "plugin/list" } }),
-  });
-  assert.equal(result, nativeResponse);
-  assert.equal(localCalls.length, 4);
+  assert.equal(localCalls.length, 5);
 });
 
 test("local plugins are merged only into plugin lists, not other nested arrays", async () => {

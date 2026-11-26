@@ -102,123 +102,79 @@
   };
   const patchResponse = (value) => mergePlugins(value);
   window.__codeyPatchPluginResponse = patchResponse;
-  const normalizeRequest = (
-    value,
-    depth = 0,
-    seen = new WeakMap(),
-    budget = { remaining: 128 },
-  ) => {
-    if (!value || typeof value !== "object" || depth >= 8 || budget.remaining <= 0) return value;
-    if (seen.has(value)) return seen.get(value);
-    let entries;
-    try {
-      entries = Object.entries(value);
-    } catch {
-      return value;
-    }
-    const output = Array.isArray(value) ? [] : {};
-    seen.set(value, output);
-    for (const [key, child] of entries) {
-      if (budget.remaining <= 0) {
-        output[key] = child;
-        continue;
-      }
-      budget.remaining -= 1;
-      if (key === "includeHidden" || key === "includeRemote") {
-        output[key] = true;
-      } else {
-        output[key] = normalizeRequest(child, depth + 1, seen, budget);
-      }
-    }
-    return output;
-  };
-  const normalizeRequestArg = (value) => {
-    if (typeof value !== "string") {
-      try { return normalizeRequest(value); } catch { return value; }
-    }
-    try { return JSON.stringify(normalizeRequest(JSON.parse(value))); } catch { return value; }
-  };
 
-  const directRequestKeys = ["channel", "command", "method", "action", "type", "path", "topic", "url"];
-  const envelopeKeys = ["payload", "request", "body"];
-  const envelopeCommands = new Set(["invoke", "request", "rpc", "mcp-request"]);
+  // Codex 26.1120.50957 插件通道：
+  // 1) AppServer RPC 经 mcp-request 包络或直接请求发送 plugin/{list,installed,read,install,uninstall}；
+  // 2) HTTP 目录查询请求 /ps/plugins/{list,search,workspace/created}。
+  const pluginMethods = new Map([
+    ["plugin/list", { list: true, mutation: false }],
+    ["plugin/installed", { list: true, mutation: false }],
+    ["plugin/read", { list: false, mutation: false }],
+    ["plugin/install", { list: false, mutation: true }],
+    ["plugin/uninstall", { list: false, mutation: true }],
+  ]);
   const requestPath = (value) => value.trim().toLowerCase()
     .split(/[?#]/, 1)[0].replace(/^(?:[a-z][a-z\d+.-]*:)?\/\/[^/]+/, "");
-  const pluginRoute = (value) => typeof value === "string"
-    && /(?:^|\/)(?:plugins?|marketplace)(?:\/|$)/.test(requestPath(value));
-  const pluginCommand = (value, route = false) => {
+  const pluginRoute = (value) => {
     if (typeof value !== "string") return null;
-    const name = requestPath(value);
-    const legacy = /^(?:\/?[a-z\d_-]+[/:.])*(?:list-plugins|install-plugin|uninstall-plugin)$/.test(name.replace(/^\//, ""));
-    const namespaced = route ? pluginRoute(value)
-      : /^[a-z\d_-]+(?:[/:.][a-z\d_-]+)*$/.test(name.replace(/^\//, ""))
-        && /(?:^|[/:.])(?:plugins?|marketplace)(?:[/:.]|$)/.test(name);
-    if (!legacy && !namespaced) return null;
-    return {
-      list: /(?:^|[/:.])list-plugins$/.test(name) || /(?:^|[/:.])(?:plugins?|marketplace)[/:.]list$/.test(name),
-      mutation: /(?:^|[/:.])(?:install-plugin|uninstall-plugin)$/.test(name)
-        || /(?:^|[/:.])(?:plugins?|marketplace)[/:.](?:install|uninstall)$/.test(name),
-    };
+    const path = requestPath(value);
+    if (
+      /(?:^|\/)(?:ps\/)?plugins\/(?:list|installed|search|workspace\/created)(?:\/|$)/.test(path)
+      || /(?:^|\/)marketplace\/list(?:\/|$)/.test(path)
+    ) {
+      return { list: true, mutation: false };
+    }
+    return null;
   };
-  const isStructuredRequestBody = (value) => {
-    if (!value || typeof value !== "object") return false;
-    if (Array.isArray(value)) return false;
+  const isPlainRequestObject = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     try {
       return Object.prototype.toString.call(value) === "[object Object]";
     } catch {
-      return true;
+      return false;
     }
   };
-  const pluginRequest = (
-    value,
-    depth = 0,
-    seen = new WeakSet(),
-    budget = { remaining: 24 },
-  ) => {
+  const pluginRequest = (value) => {
     if (typeof value === "string") {
-      if (!/plugin|marketplace/i.test(value)) return null;
+      if (!value.includes("plugin/")) return null;
       try { value = JSON.parse(value); } catch { return null; }
     }
-    if (!isStructuredRequestBody(value) || depth >= 4 || seen.has(value) || budget.remaining <= 0) {
+    if (!isPlainRequestObject(value)) return null;
+    let type;
+    let method;
+    try {
+      type = value.type;
+      method = value.method;
+    } catch {
       return null;
     }
-    seen.add(value);
-    let hasCommand = false;
-    let isEnvelope = false;
-    let hasApplicationMethod = false;
-    for (const key of directRequestKeys) {
-      let marker;
-      try {
-        marker = value[key];
-      } catch {
-        continue;
-      }
-      const command = pluginCommand(marker, key === "path" || key === "url");
-      if (command) return command;
-      if (typeof marker === "string") {
-        hasCommand = true;
-        if (envelopeCommands.has(marker.toLowerCase())) isEnvelope = true;
-        else if (key === "method" || key === "command" || key === "action") hasApplicationMethod = true;
-      }
+    if (typeof method === "string") {
+      return pluginMethods.get(method) || null;
     }
-    // Only transport envelopes contain another command. Application payloads
-    // such as chat prompts, tool parameters and descriptions are opaque here.
-    if (hasApplicationMethod || (hasCommand && !isEnvelope)) return null;
-    for (const key of envelopeKeys) {
-      if (budget.remaining-- <= 0) break;
+    if (type === "mcp-request") {
       try {
-        const command = pluginRequest(value[key], depth + 1, seen, budget);
-        if (command) return command;
+        const inner = value.request;
+        if (isPlainRequestObject(inner) && typeof inner.method === "string") {
+          return pluginMethods.get(inner.method) || null;
+        }
       } catch {}
     }
     return null;
   };
   const pluginRequestArgs = (args) => {
     const first = args[0];
-    if (typeof first !== "string") return pluginRequest(first);
-    const command = pluginCommand(first);
-    if (command) return command;
-    if (envelopeCommands.has(first.toLowerCase())) return pluginRequest(args[1]);
+    if (first === "mcp-request") {
+      const second = args[1];
+      if (!isPlainRequestObject(second)) return null;
+      try {
+        if (typeof second.method === "string") return pluginMethods.get(second.method) || null;
+        const inner = second.request;
+        if (isPlainRequestObject(inner) && typeof inner.method === "string") {
+          return pluginMethods.get(inner.method) || null;
+        }
+      } catch {}
+      return null;
+    }
     return pluginRequest(first);
   };
 
@@ -259,9 +215,11 @@
       // Every IPC message passes through here; unrelated requests must not
       // pay for an extra promise hop or a second argument walk.
       if (!request) return original.apply(this, args);
-      const normalizedArgs = args.map(normalizeRequestArg);
-      const result = original.apply(this, normalizedArgs);
-      if (!result || typeof result.then !== "function") return result;
+      const result = original.apply(this, args);
+      if (!result || typeof result.then !== "function") {
+        if (request.mutation) refreshLocalPlugins(true);
+        return result;
+      }
       const localRefresh = request.list ? waitForLocalPlugins() : Promise.resolve();
       return Promise.all([result, localRefresh]).then(([response]) => {
         let patched = response;
@@ -306,7 +264,7 @@
     registerFetchInterceptor("plugin-marketplace", (next, ...args) => {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
       const body = args[1]?.body;
-      const routeRequest = pluginCommand(url, true);
+      const routeRequest = pluginRoute(url);
       const request = routeRequest || pluginRequest(body);
       if (!request) return next(...args);
       const patchesPluginResponse = Boolean(routeRequest);
@@ -316,6 +274,7 @@
         ? Promise.all([responsePromise, waitForLocalPlugins()]).then(([response]) => response)
         : responsePromise;
       return ready.then(async (response) => {
+        if (request.mutation) refreshLocalPlugins(true);
         const contentType = response.headers.get("content-type") || "";
         if (!patchesPluginResponse || !contentType.includes("application/json")) return response;
         try {
