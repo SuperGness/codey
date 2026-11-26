@@ -34,6 +34,14 @@ class FakeElement extends FakeElementCore {
         if (candidate.startsWith("#")) {
           return element.id === candidate.slice(1);
         }
+        if (candidate.startsWith(".")) {
+          const dotMatch = candidate.match(/^\.([A-Za-z0-9_-]+)(.*)$/);
+          if (!dotMatch || !element.classList.contains(dotMatch[1])) {
+            return false;
+          }
+          if (!dotMatch[2]) return true;
+          candidate = dotMatch[2];
+        }
         const attribute = candidate.match(
           /^\[([^=\]]+)(?:=['"]?([^'"\]]+)['"]?)?\]$/,
         );
@@ -140,9 +148,16 @@ const createEnvironment = (options = {}) => {
     options.conversationId ?? "conversation-1",
   );
   const scope = new FakeElement("div");
-  const textarea = new FakeElement("textarea");
-  textarea.value = options.initialText ?? "";
+  const textarea = new FakeElement("div");
+  textarea.setAttribute("class", "ProseMirror");
+  textarea.setAttribute("contenteditable", "true");
+  textarea.setAttribute("role", "textbox");
+  textarea.innerText = options.initialText ?? "";
+  if (options.pmViewDesc) {
+    textarea.pmViewDesc = options.pmViewDesc;
+  }
   const newChatInput = new FakeElement("div");
+  newChatInput.setAttribute("class", "ProseMirror");
   newChatInput.setAttribute("contenteditable", "true");
   newChatInput.setAttribute("role", "textbox");
   newChatInput.innerText = options.newChatInitialText ?? "";
@@ -205,7 +220,7 @@ const createEnvironment = (options = {}) => {
   const dialog = new FakeElement("div");
   dialog.setAttribute("role", "dialog");
   dialog.setAttribute("aria-modal", "true");
-  const dialogInput = new FakeElement("textarea", {
+  const dialogInput = new FakeElement("div", {
     rect: {
       bottom: 700,
       height: 180,
@@ -215,7 +230,10 @@ const createEnvironment = (options = {}) => {
       width: 800,
     },
   });
-  dialogInput.value = options.dialogInitialText ?? "Git 提交信息";
+  dialogInput.setAttribute("class", "ProseMirror");
+  dialogInput.setAttribute("contenteditable", "true");
+  dialogInput.setAttribute("role", "textbox");
+  dialogInput.innerText = options.dialogInitialText ?? "Git 提交信息";
   const dialogToolbar = new FakeElement("div");
   const dialogControl = new FakeElement("button", {
     rect: {
@@ -335,7 +353,10 @@ const createEnvironment = (options = {}) => {
       : [...fallbackInputs, dialogInput];
   }
   scope.querySelectorAll = (selector) => {
-    if (selector === "textarea, [contenteditable='true'], [role='textbox']") {
+    if (
+      selector ===
+      ".ProseMirror[contenteditable='true'], [contenteditable='true'], [role='textbox']"
+    ) {
       return includeComposer ? [textarea] : [];
     }
     if (selector === "button, [role='button']") {
@@ -376,7 +397,7 @@ const createEnvironment = (options = {}) => {
       }
       if (
         selector ===
-        "main textarea, main [contenteditable='true'], main [role='textbox'], textarea, [contenteditable='true'][role='textbox']"
+        "main .ProseMirror[contenteditable='true'], main [contenteditable='true'], main [role='textbox'], .ProseMirror[contenteditable='true'], [contenteditable='true'][role='textbox']"
       ) {
         return options.fallbackTextareas === false ? [] : fallbackInputs;
       }
@@ -770,7 +791,10 @@ test("relocates a hidden mounted button for composer replacements and geometry c
     if (selector === "button, [role='button']") {
       return [replacementAccess, env.modelButton];
     }
-    if (selector === "textarea, [contenteditable='true'], [role='textbox']") {
+    if (
+      selector ===
+      ".ProseMirror[contenteditable='true'], [contenteditable='true'], [role='textbox']"
+    ) {
       return [];
     }
     return [];
@@ -934,18 +958,18 @@ test("enables the optimize button only while the composer has content", async ()
   await flush();
   const button = env.getElementById("codey-prompt-optimize-button");
 
-  env.textarea.value = "   ";
+  env.textarea.innerText = "   ";
   env.emitInput();
   await flush();
   assert.equal(button.disabled, true);
 
-  env.textarea.value = "需要优化的提示词";
+  env.textarea.innerText = "需要优化的提示词";
   env.emitInput();
   await flush();
   assert.equal(button.disabled, false);
   assert.equal(button.getAttribute("aria-disabled"), "false");
 
-  env.textarea.value = "";
+  env.textarea.innerText = "";
   env.emitInput();
   await flush();
   assert.equal(button.disabled, true);
@@ -1064,8 +1088,8 @@ test("ignores Git commit textboxes inside modal dialogs", async () => {
     (call) => call.path === "/api/optimize_prompt",
   );
   assert.equal(optimizeCall?.payload.text, "正常对话提示词");
-  assert.equal(env.textarea.value, "优化后的提示词");
-  assert.equal(env.dialogInput.value, "Git 提交信息");
+  assert.equal(env.textarea.innerText, "优化后的提示词");
+  assert.equal(env.dialogInput.innerText, "Git 提交信息");
 });
 
 test("does not use controls inside modal dialogs as insertion targets", async () => {
@@ -1203,7 +1227,7 @@ test("rescans when a connected composer is replaced during navigation", async ()
   await flush();
 
   assert.equal(nextInput.innerText, "优化后的提示词");
-  assert.equal(env.textarea.value, "");
+  assert.equal(env.textarea.innerText, "");
 });
 
 test("skips geometry scans for child and character changes inside the tracked input", async () => {
@@ -1479,7 +1503,7 @@ test("clicking the button calls the bridge and replaces the composer text", asyn
     "optimize_prompt should be called through the bridge",
   );
   assert.equal(optimizeCall.payload.text, "写一个关于 Rust 的博客");
-  assert.equal(env.textarea.value, "优化后的提示词");
+  assert.equal(env.textarea.innerText, "优化后的提示词");
   assert.equal(button.dataset.busy, "false");
 });
 
@@ -1514,7 +1538,7 @@ test("shows a disabled loading state while optimization is pending", async () =>
   assert.equal(button.disabled, false);
   assert.equal(button.dataset.busy, "false");
   assert.equal(button.getAttribute("aria-busy"), "false");
-  assert.equal(env.textarea.value, "优化完成");
+  assert.equal(env.textarea.innerText, "优化完成");
 });
 
 test("restores a pending optimization to its original composer after navigation", async () => {
@@ -1560,7 +1584,7 @@ test("restores a pending optimization to its original composer after navigation"
   await flush();
 
   assert.equal(nextInput.innerText, "新会话提示词");
-  assert.equal(env.textarea.value, "旧会话提示词");
+  assert.equal(env.textarea.innerText, "旧会话提示词");
   assert.equal(button.dataset.busy, "false");
 
   env.setLocationHref("codex://conversation/1");
@@ -1577,7 +1601,7 @@ test("restores a pending optimization to its original composer after navigation"
   ]);
   await flush(280);
 
-  assert.equal(env.textarea.value, "旧会话优化结果");
+  assert.equal(env.textarea.innerText, "旧会话优化结果");
   assert.equal(nextInput.innerText, "新会话提示词");
 });
 
@@ -1608,7 +1632,7 @@ test("restores a pending optimization when the original conversation reuses a co
   resolveOptimization({ optimized: "旧会话优化结果" });
   await flush();
 
-  assert.equal(env.textarea.value, "相同提示词");
+  assert.equal(env.textarea.innerText, "相同提示词");
   assert.equal(button.dataset.busy, "false");
 
   env.anchor.setAttribute(
@@ -1624,7 +1648,7 @@ test("restores a pending optimization when the original conversation reuses a co
   ]);
   await flush(280);
 
-  assert.equal(env.textarea.value, "旧会话优化结果");
+  assert.equal(env.textarea.innerText, "旧会话优化结果");
 });
 
 test("failed optimization keeps the original text and uses the global toast", async () => {
@@ -1644,7 +1668,7 @@ test("failed optimization keeps the original text and uses the global toast", as
   });
   await flush();
 
-  assert.equal(env.textarea.value, "原文");
+  assert.equal(env.textarea.innerText, "原文");
   const toast = env.getElementById("codey-runtime-toast");
   assert.ok(toast, "global error toast should be created");
   assert.equal(toast.dataset.tone, "error");
@@ -1657,7 +1681,7 @@ test("清空输入框后在延后的状态更新前点击，仍不发送空的�
   await flush();
   const button = env.getElementById("codey-prompt-optimize-button");
   assert.equal(button.disabled, false);
-  env.textarea.value = "";
+  env.textarea.innerText = "";
   env.emitInput();
 
   button.dispatchEvent({
@@ -1790,5 +1814,138 @@ test("binds active listeners only while enabled and fast-skips turn-internal mut
     assert.equal(env.getListenerCount("window", type), 0, `${type} unbinds when disabled`);
   }
   assert.equal(env.getListenerCount("document", "input"), 0);
+});
+
+test("writes optimized text through ProseMirror pmViewDesc.view.dispatch without clobbering innerText", async () => {
+  const dispatchedTransactions = [];
+  const insertTextCalls = [];
+  let docText = "第一段\n第二段";
+  let focused = 0;
+  let innerTextSetterCalls = 0;
+  const pmView = {
+    focus() {
+      focused += 1;
+    },
+    get state() {
+      return {
+        doc: {
+          content: { size: docText.length + 4 },
+          textBetween(from, to, blockSep) {
+            assert.equal(from, 0);
+            assert.equal(to, docText.length + 4);
+            assert.equal(blockSep, "\n");
+            return docText;
+          },
+        },
+        tr: {
+          insertText(text, from, to) {
+            insertTextCalls.push({ text, from, to });
+            return { kind: "pm-insert-text", text, from, to };
+          },
+          scrollIntoView() {
+            return { kind: "pm-insert-text-scrolled", text: insertTextCalls.at(-1).text };
+          },
+        },
+      };
+    },
+    dispatch(tr) {
+      dispatchedTransactions.push(tr);
+      docText = insertTextCalls.at(-1).text;
+    },
+  };
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    initialText: "stale dom text",
+    pmViewDesc: { parent: { view: pmView } },
+    optimizeResult: { optimized: "ProseMirror 事务写入结果" },
+  });
+  Object.defineProperty(env.textarea, "innerText", {
+    configurable: true,
+    get() {
+      return "stale dom text";
+    },
+    set() {
+      innerTextSetterCalls += 1;
+    },
+  });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  assert.equal(button.disabled, false);
+
+  button.dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await flush();
+
+  const optimizeCall = env.calls.find((call) => call.path === "/api/optimize_prompt");
+  assert.equal(optimizeCall?.payload.text, "第一段\n第二段");
+  assert.deepEqual(insertTextCalls, [{
+    text: "ProseMirror 事务写入结果",
+    from: 0,
+    to: "第一段\n第二段".length + 4,
+  }]);
+  assert.equal(dispatchedTransactions.length, 1);
+  assert.equal(innerTextSetterCalls, 0);
+  assert.equal(focused, 1);
+});
+
+test("resolves ProseMirror view on a child .ProseMirror inside a textbox wrapper", async () => {
+  const dispatched = [];
+  let docText = "子级 ProseMirror 文本";
+  const childPm = new FakeElement("div");
+  childPm.setAttribute("class", "ProseMirror");
+  childPm.pmViewDesc = {
+    view: {
+      focus() {},
+      get state() {
+        return {
+          doc: {
+            content: { size: 12 },
+            textContent: docText,
+          },
+          tr: {
+            insertText(text, from, to) {
+              return { text, from, to };
+            },
+          },
+        };
+      },
+      dispatch(tr) {
+        dispatched.push(tr);
+        docText = tr.text;
+      },
+    },
+  };
+  const wrapperInput = new FakeElement("div");
+  wrapperInput.setAttribute("role", "textbox");
+  wrapperInput.appendChild(childPm);
+  wrapperInput.querySelector = (selector) => (
+    selector === ".ProseMirror" ? childPm : null
+  );
+
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    anchors: false,
+    optimizeResult: { optimized: "子级回写成功" },
+  });
+  env.textarea.visible = false;
+  env.scope.appendChild(wrapperInput);
+  env.setFallbackInputs([wrapperInput]);
+  env.emitMutation([{ type: "childList", target: env.scope, addedNodes: [wrapperInput], removedNodes: [] }]);
+  await flush(280);
+
+  const button = env.getElementById("codey-prompt-optimize-button");
+  button.dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await flush();
+
+  assert.deepEqual(dispatched, [{ text: "子级回写成功", from: 0, to: 12 }]);
 });
 

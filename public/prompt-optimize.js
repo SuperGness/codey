@@ -24,10 +24,12 @@
   const scanDelayMs = 250;
   const repositionDelayMs = 100;
   const composerAnchorSelector = "[data-above-composer-conversation-id]";
+  const conversationFallbackAttribute = "data-conversation-id";
+  const prosemirrorSelector = ".ProseMirror";
   const composerCandidateSelector =
-    "textarea, [contenteditable='true'], [role='textbox']";
+    ".ProseMirror[contenteditable='true'], [contenteditable='true'], [role='textbox']";
   const composerFallbackSelector =
-    "main textarea, main [contenteditable='true'], main [role='textbox'], textarea, [contenteditable='true'][role='textbox']";
+    "main .ProseMirror[contenteditable='true'], main [contenteditable='true'], main [role='textbox'], .ProseMirror[contenteditable='true'], [contenteditable='true'][role='textbox']";
   const composerControlSelector = "button, [role='button']";
   const ignoredComposerContainerSelector =
     "dialog, [role='dialog'], [aria-modal='true']";
@@ -230,7 +232,6 @@
 
   const isComposerInput = (element) => {
     if (!element) return false;
-    if (element.tagName === "TEXTAREA") return true;
     if (element.isContentEditable === true) return true;
     if (element.getAttribute?.("contenteditable") === "true") return true;
     return element.getAttribute?.("role") === "textbox";
@@ -560,10 +561,46 @@
     updateButtonState();
   };
 
+  const extractProseMirrorView = (node) => {
+    let desc = node?.pmViewDesc;
+    let depth = 0;
+    while (desc && depth < 16) {
+      const view = desc.view;
+      if (
+        view &&
+        typeof view.dispatch === "function" &&
+        typeof view.state?.tr?.insertText === "function" &&
+        typeof view.state?.doc?.content?.size === "number"
+      ) {
+        return view;
+      }
+      desc = desc.parent;
+      depth += 1;
+    }
+    return null;
+  };
+
+  const resolveProseMirrorView = (element) => {
+    if (!element || typeof element !== "object") return null;
+    const direct = extractProseMirrorView(element);
+    if (direct) return direct;
+    const child = element.querySelector?.(prosemirrorSelector);
+    const fromChild = child ? extractProseMirrorView(child) : null;
+    if (fromChild) return fromChild;
+    const ancestor = element.closest?.(prosemirrorSelector);
+    return ancestor && ancestor !== element
+      ? extractProseMirrorView(ancestor)
+      : null;
+  };
+
   const readComposerText = (element = inputElement) => {
     if (!element) return "";
-    if (element.tagName === "TEXTAREA") {
-      return element.value;
+    const view = resolveProseMirrorView(element);
+    if (view && typeof view.state?.doc?.textBetween === "function") {
+      return view.state.doc.textBetween(0, view.state.doc.content.size, "\n", "\n");
+    }
+    if (typeof view?.state?.doc?.textContent === "string") {
+      return view.state.doc.textContent;
     }
     return element.innerText || "";
   };
@@ -581,7 +618,9 @@
           : null;
       }
     }
-    return null;
+    const fallbackOwner = element.closest?.(`[${conversationFallbackAttribute}]`);
+    const fallbackId = fallbackOwner?.getAttribute?.(conversationFallbackAttribute);
+    return typeof fallbackId === "string" && fallbackId ? fallbackId : null;
   };
 
   const currentLocationKey = () =>
@@ -675,16 +714,12 @@
 
   const replaceComposerText = (text, element = inputElement) => {
     if (!element) return;
-    if (element.tagName === "TEXTAREA") {
-      const prototype = window.HTMLTextAreaElement?.prototype;
-      const setter =
-        prototype && Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-      if (setter) {
-        setter.call(element, text);
-      } else {
-        element.value = text;
-      }
-      element.dispatchEvent(new Event("input", { bubbles: true }));
+    const view = resolveProseMirrorView(element);
+    if (view) {
+      view.dispatch(
+        view.state.tr.insertText(text, 0, view.state.doc.content.size),
+      );
+      scheduleButtonStateUpdate(element);
       return;
     }
     element.innerText = text;
@@ -761,8 +796,8 @@
         }
         const shouldFocus = isCurrentComposerContext(context);
         deliverOptimization(context, optimized);
-        if (shouldFocus && context.element?.focus) {
-          context.element.focus();
+        if (shouldFocus) {
+          (resolveProseMirrorView(context.element) || context.element)?.focus?.();
         }
       })
       .catch((error) => {
@@ -869,18 +904,13 @@
 
   const editableStateAttributes = new Set([
     "aria-multiline",
-    "cols",
     "contenteditable",
     "dir",
-    "maxlength",
-    "minlength",
     "placeholder",
     "readonly",
     "role",
-    "rows",
     "spellcheck",
     "tabindex",
-    "wrap",
   ]);
 
   const isPlainTrackedInputMutation = (mutation) => {
@@ -933,7 +963,8 @@
     if (nodeInsideComposerRegion(mutation?.target)) return true;
     if (
       mutation?.type === "attributes" &&
-      mutation.attributeName === "data-above-composer-conversation-id"
+      (mutation.attributeName === "data-above-composer-conversation-id" ||
+        mutation.attributeName === conversationFallbackAttribute)
     ) {
       return true;
     }
@@ -1013,7 +1044,8 @@
       }
       if (
         mutation.type === "attributes" &&
-        mutation.attributeName === "data-above-composer-conversation-id"
+        (mutation.attributeName === "data-above-composer-conversation-id" ||
+          mutation.attributeName === conversationFallbackAttribute)
       ) {
         conversationChanged = true;
         continue;
@@ -1036,6 +1068,7 @@
       "class",
       "contenteditable",
       "data-above-composer-conversation-id",
+      conversationFallbackAttribute,
       "disabled",
       "hidden",
       "readonly",
@@ -1053,6 +1086,7 @@
       "aria-hidden",
       "contenteditable",
       "data-above-composer-conversation-id",
+      conversationFallbackAttribute,
       "disabled",
       "hidden",
       "readonly",
