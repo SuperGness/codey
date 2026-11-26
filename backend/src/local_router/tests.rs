@@ -8904,8 +8904,14 @@ fn chat_search_annotations_are_preserved_in_responses_output_text() {
     .unwrap();
 
     assert_eq!(
-        body["output"][0]["content"][0]["annotations"][0]["url_citation"]["url"],
-        "https://openai.com/"
+        body["output"][0]["content"][0]["annotations"][0],
+        json!({
+            "type": "url_citation",
+            "url": "https://openai.com/",
+            "title": "OpenAI",
+            "start_index": 0,
+            "end_index": 6
+        })
     );
 }
 
@@ -14792,6 +14798,8 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     while router.request_log_health().await.stats.entries_written < 2 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // 统计查询默认按 `timestamp_unix_ms < now_ms` 过滤，推进 2ms 避免同毫秒写入尚未落入半开区间。
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let stats = test_http_client()
         .post(format!(
             "{}/codey/api/query_route_request_log_stats",
@@ -15831,4 +15839,201 @@ async fn router_listener_reports_kernel_allocation_failure() {
         error.downcast_ref::<std::io::Error>().unwrap().kind(),
         std::io::ErrorKind::PermissionDenied
     );
+}
+
+#[tokio::test]
+async fn chat_url_citations_are_flattened_and_malformed_entries_filtered_across_modes() {
+    let annotations = json!([
+        {
+            "type": "url_citation",
+            "url_citation": {
+                "url": "https://openai.com/news",
+                "title": "OpenAI News",
+                "start_index": 0,
+                "end_index": 6
+            }
+        },
+        {
+            "type": "url_citation",
+            "url": "https://rust-lang.org/",
+            "start_index": 7,
+            "end_index": 11
+        },
+        {
+            "type": "url_citation",
+            "url_citation": {"url": "", "title": "empty", "start_index": 0, "end_index": 1}
+        },
+        {
+            "type": "url_citation",
+            "url_citation": {"url": "https://bad.example/", "start_index": "0", "end_index": 2}
+        },
+        {
+            "type": "url_citation",
+            "url_citation": {"url": "https://missing-end.example/", "start_index": 0}
+        }
+    ]);
+    let expected = json!([
+        {
+            "type": "url_citation",
+            "url": "https://openai.com/news",
+            "title": "OpenAI News",
+            "start_index": 0,
+            "end_index": 6
+        },
+        {
+            "type": "url_citation",
+            "url": "https://rust-lang.org/",
+            "title": "",
+            "start_index": 7,
+            "end_index": 11
+        }
+    ]);
+
+    // 1. 非流式 JSON 转换
+    let body = chat_completion_to_responses_body(
+        json!({
+            "id": "chatcmpl-cite",
+            "created": 1,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "OpenAI Rust",
+                    "annotations": annotations
+                },
+                "finish_reason": "stop"
+            }]
+        }),
+        "gpt-5-search",
+    )
+    .unwrap();
+    assert_eq!(body["output"][0]["content"][0]["annotations"], expected);
+
+    // 2. 缓冲 SSE 与实时流式 SSE 转换
+    let sse = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"id":"chatcmpl-cite","choices":[{"index":0,"delta":{"role":"assistant","content":"OpenAI Rust"},"finish_reason":null}]}),
+        json!({"id":"chatcmpl-cite","choices":[{"index":0,"delta":{"annotations":annotations},"finish_reason":"stop"}]})
+    );
+    let collected_chat = parse_chat_completion_sse_bytes(sse.as_bytes(), "gpt-5-search").unwrap();
+    let collected_resp = chat_completion_to_responses_body(collected_chat, "gpt-5-search").unwrap();
+    assert_eq!(
+        collected_resp["output"][0]["content"][0]["annotations"],
+        expected
+    );
+
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = upstream.local_addr().unwrap();
+    let sse_payload = sse.clone();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let _ = read_http_request(&mut stream).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse_payload}",
+                    sse_payload.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let (mut config, provider, model) = router_config(format!("http://{addr}/v1"));
+    config.profiles[0].upstream_protocol =
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    config.profiles[0].normalize();
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let stream_text = test_http_client()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"model": model_alias(&provider, &model), "input": "cite", "stream": true}))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let events = parse_responses_websocket_sse_events(&stream_text).unwrap();
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(
+        completed["response"]["output"][0]["content"][0]["annotations"],
+        expected
+    );
+    upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminalless_empty_chat_sse_is_rejected_while_legitimate_empty_stop_succeeds() {
+    // 异常空流（无 finish_reason 且无任何输出，包括空 EOF 与仅发 [DONE]）必须报错，不伪造空 completed。
+    for bad_sse in [
+        "",
+        ": keepalive\n\n",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]\n\n",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+    ] {
+        assert!(
+            parse_chat_completion_sse_bytes(bad_sse.as_bytes(), "m").is_err(),
+            "buffered SSE should reject: {bad_sse:?}"
+        );
+
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        let payload = bad_sse.to_string();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let _ = read_http_request(&mut stream).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let (mut config, provider, model) = router_config(format!("http://{addr}/v1"));
+        config.profiles[0].upstream_protocol =
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+        config.profiles[0].normalize();
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let text = test_http_client()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&json!({"model": model_alias(&provider, &model), "input": "hi", "stream": true}))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let events = parse_responses_websocket_sse_events(&text).unwrap();
+        assert!(
+            events.iter().any(|event| event["type"] == "response.failed"),
+            "streaming SSE must emit response.failed for {bad_sse:?}, got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "streaming SSE must not emit response.completed for {bad_sse:?}"
+        );
+        upstream_task.await.unwrap();
+        router.stop().await.unwrap();
+    }
+
+    // 合法空回复（带有明确 finish_reason="stop"）保持兼容。
+    let valid_empty = "data: {\"id\":\"c-ok\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let parsed = parse_chat_completion_sse_bytes(valid_empty.as_bytes(), "m").unwrap();
+    let converted = chat_completion_to_responses_body(parsed, "m").unwrap();
+    assert_eq!(converted["status"], "completed");
+    assert_eq!(converted["output"][0]["content"][0]["text"], "");
 }

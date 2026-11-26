@@ -902,12 +902,49 @@ pub(crate) fn chat_message_content_text(content: &Value) -> String {
     }
 }
 
+pub(crate) fn normalize_chat_annotation(annotation: &Value) -> Option<Value> {
+    let object = annotation.as_object()?;
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| object.contains_key("url_citation").then_some("url_citation"))?;
+    if kind == "url_citation" {
+        let nested = object.get("url_citation").and_then(Value::as_object);
+        let field = |name: &str| {
+            nested
+                .and_then(|inner| inner.get(name))
+                .or_else(|| object.get(name))
+        };
+        let url = field("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())?;
+        let start_index = field("start_index").and_then(Value::as_u64)?;
+        let end_index = field("end_index").and_then(Value::as_u64)?;
+        let title = field("title").and_then(Value::as_str).unwrap_or_default();
+        return Some(json!({
+            "type": "url_citation",
+            "url": url,
+            "title": title,
+            "start_index": start_index,
+            "end_index": end_index,
+        }));
+    }
+    (!kind.trim().is_empty()).then(|| annotation.clone())
+}
+
 pub(crate) fn chat_message_annotations(message: &serde_json::Map<String, Value>) -> Value {
-    message
+    let annotations = message
         .get("annotations")
-        .filter(|annotations| annotations.is_array())
-        .cloned()
-        .unwrap_or_else(|| Value::Array(Vec::new()))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(normalize_chat_annotation)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Value::Array(annotations)
 }
 
 #[cfg(test)]

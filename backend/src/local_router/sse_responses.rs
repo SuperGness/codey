@@ -20,6 +20,7 @@ pub(crate) struct ResponsesStreamMessage {
     pub(crate) output_index: usize,
     pub(crate) text: String,
     pub(crate) refusal: String,
+    pub(crate) annotations: Vec<Value>,
     pub(crate) text_content_index: Option<usize>,
     pub(crate) refusal_content_index: Option<usize>,
     pub(crate) next_content_index: usize,
@@ -131,6 +132,7 @@ impl<'a> ResponsesSseState<'a> {
             output_index,
             text: String::new(),
             refusal: String::new(),
+            annotations: Vec::new(),
             text_content_index: None,
             refusal_content_index: None,
             next_content_index: 0,
@@ -541,7 +543,7 @@ impl<'a> ResponsesSseState<'a> {
                     "item_id":message.item_id,
                     "output_index":message.output_index,
                     "content_index":content_index,
-                    "part":{"type":"output_text","text":message.text,"annotations":[]},
+                    "part":{"type":"output_text","text":message.text,"annotations":message.annotations},
                 }));
             }
             if let Some(content_index) = message.refusal_content_index {
@@ -776,7 +778,7 @@ pub(crate) fn stream_message_item(message: &ResponsesStreamMessage) -> Value {
     if message.text_content_index.is_some() {
         content.push((
             message.text_content_index.unwrap_or_default(),
-            json!({"type":"output_text","text":message.text,"annotations":[]}),
+            json!({"type":"output_text","text":message.text,"annotations":message.annotations}),
         ));
     }
     if message.refusal_content_index.is_some() {

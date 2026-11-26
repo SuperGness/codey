@@ -271,6 +271,8 @@ pub(crate) struct ChatSseAccumulator {
     pub(crate) content: String,
     pub(crate) reasoning_content: Option<String>,
     pub(crate) refusal: String,
+    pub(crate) annotations: Vec<Value>,
+    pub(crate) saw_output: bool,
     pub(crate) tool_calls: BTreeMap<usize, ChatSseToolCall>,
     pub(crate) finish_reason: Option<String>,
     pub(crate) usage: Option<Value>,
@@ -288,6 +290,8 @@ impl ChatSseAccumulator {
             content: String::new(),
             reasoning_content: None,
             refusal: String::new(),
+            annotations: Vec::new(),
+            saw_output: false,
             tool_calls: BTreeMap::new(),
             finish_reason: None,
             usage: None,
@@ -341,19 +345,44 @@ impl ChatSseAccumulator {
             else {
                 continue;
             };
-            // ResponsesSseState already retains text for the final streaming events.
-            if self.retain_text {
-                if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+            // ResponsesSseState already retains text for the final streaming events,
+            // while saw_output tracks whether any real output arrived across both modes.
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                self.saw_output |= !reasoning.is_empty();
+                if self.retain_text {
                     self.reasoning_content
                         .get_or_insert_default()
                         .push_str(reasoning);
                 }
-                if let Some(content) = delta.get("content") {
-                    self.content.push_str(&chat_message_content_text(content));
+            }
+            if let Some(content) = delta.get("content") {
+                match content {
+                    Value::String(text) => {
+                        self.saw_output |= !text.is_empty();
+                        if self.retain_text {
+                            self.content.push_str(text);
+                        }
+                    }
+                    other => {
+                        let text = chat_message_content_text(other);
+                        self.saw_output |= !text.is_empty();
+                        if self.retain_text {
+                            self.content.push_str(&text);
+                        }
+                    }
                 }
-                if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
+            }
+            if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
+                self.saw_output |= !refusal.is_empty();
+                if self.retain_text {
                     self.refusal.push_str(refusal);
                 }
+            }
+            if self.retain_text
+                && let Some(annotations) = delta.get("annotations").and_then(Value::as_array)
+            {
+                self.annotations
+                    .extend(annotations.iter().filter_map(normalize_chat_annotation));
             }
             if let Some(tool_calls) = delta
                 .get("tool_calls")
@@ -422,17 +451,19 @@ impl ChatSseAccumulator {
         done: bool,
         tool_bridge: &ResponsesToolBridge,
     ) -> Result<(String, Option<Value>, Option<&'static str>)> {
-        if !done
-            && self
-                .finish_reason
-                .as_deref()
-                .is_none_or(|reason| reason.trim().is_empty())
-        {
+        let has_finish_reason = self
+            .finish_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty());
+        if !done && !has_finish_reason {
             anyhow::bail!("Chat Completions SSE 在 [DONE] 或 finish_reason 前断开");
         }
         self.tool_calls.retain(|_, tool| {
             !(tool.name.is_empty() && tool.arguments.is_empty() && tool.id.is_empty())
         });
+        if !has_finish_reason && !self.saw_output && self.tool_calls.is_empty() {
+            anyhow::bail!("Chat Completions SSE 未返回 finish_reason 或任何有效输出即结束");
+        }
         if let Some((target, source)) =
             chat_tool_merge_pair(&self.tool_calls, |tool| tool.name.is_empty())
             && let Some(merged) = self.tool_calls.remove(&source)
@@ -480,12 +511,11 @@ impl ChatSseAccumulator {
     }
 
     pub(crate) fn into_chat_completion(mut self, done: bool) -> Result<Value> {
-        if !done
-            && self
-                .finish_reason
-                .as_deref()
-                .is_none_or(|reason| reason.trim().is_empty())
-        {
+        let has_finish_reason = self
+            .finish_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty());
+        if !done && !has_finish_reason {
             anyhow::bail!("Chat Completions SSE 在 [DONE] 或 finish_reason 前断开");
         }
         // 与 Responses 桥保持一致：先丢弃没有任何内容的空槽位，再把被拆成两种形状的同一次
@@ -493,6 +523,9 @@ impl ChatSseAccumulator {
         self.tool_calls.retain(|_, tool| {
             !(tool.name.is_empty() && tool.arguments.is_empty() && tool.id.is_empty())
         });
+        if !has_finish_reason && !self.saw_output && self.tool_calls.is_empty() {
+            anyhow::bail!("Chat Completions SSE 未返回 finish_reason 或任何有效输出即结束");
+        }
         if let Some((target, source)) =
             chat_tool_merge_pair(&self.tool_calls, |tool| tool.name.is_empty())
             && let Some(merged) = self.tool_calls.remove(&source)
@@ -524,6 +557,12 @@ impl ChatSseAccumulator {
         }
         if let Some(reasoning) = self.reasoning_content {
             message.insert("reasoning_content".to_string(), Value::String(reasoning));
+        }
+        if !self.annotations.is_empty() {
+            message.insert(
+                "annotations".to_string(),
+                Value::Array(self.annotations),
+            );
         }
         if !self.tool_calls.is_empty() {
             let mut calls = Vec::new();
@@ -778,6 +817,19 @@ where
         }
         if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
             output.emit_refusal_delta(downstream, refusal).await?;
+        }
+        if let Some(annotations) = delta.get("annotations").and_then(Value::as_array) {
+            let normalized = annotations
+                .iter()
+                .filter_map(normalize_chat_annotation)
+                .collect::<Vec<_>>();
+            if !normalized.is_empty() {
+                let added = output.ensure_message();
+                output.write_events(downstream, added).await?;
+                if let Some(message) = output.message.as_mut() {
+                    message.annotations.extend(normalized);
+                }
+            }
         }
         if let Some(tool_calls) = delta
             .get("tool_calls")
